@@ -142,3 +142,13 @@ docs/           documentation
 ```
 
 Run the tests with `go test ./...`. See [Architecture](docs/architecture.md#development) for more.
+
+## License
+
+ibc is free software under the [MIT License](LICENSE): anyone may use, copy, change and share it,
+for any purpose, as long as the copyright notice stays with the copies.
+
+The `ibc` program includes [go-ethereum](https://github.com/ethereum/go-ethereum), which has its
+own license, the [LGPL-3.0](https://www.gnu.org/licenses/lgpl-3.0.html). If you distribute a
+built `ibc` program, make go-ethereum's source code available to those you give it to, as that
+license asks.
