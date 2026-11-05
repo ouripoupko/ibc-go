@@ -1,0 +1,15 @@
+# The built program
+/ibc
+/ibc.exe
+
+# A node's database (the default -data directory)
+/data/
+
+# solc output when compiling by hand
+/out/
+node_modules/
+
+# Editors
+.idea/
+.vscode/
+*.swp
