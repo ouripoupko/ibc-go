@@ -1,13 +1,16 @@
 // A minimal ibc client for browsers and Node.js 18+. No dependencies.
 //
 // Every transaction, and every read, is signed by the user's key with
-// EIP-712 (in MetaMask, each signature asks the user). Pass a signer:
-//   - in a browser, Ibc.metamask(window.ethereum) signs with MetaMask;
+// EIP-712 (in a browser wallet, each signature asks the user). Reads can
+// instead be signed by a read session: a key the client makes, which the
+// user authorizes once (see startSession). Pass a signer:
+//   - in a browser, Ibc.wallet(window.ethereum) signs with the browser wallet
+//     (MetaMask, Rabby, Coinbase Wallet, …);
 //   - anything with getAddress() and signTypedData(domain, types, message),
 //     such as an ethers.js Wallet, works too.
 //
 //   import { Ibc } from './ibc.mjs';
-//   const ibc = await Ibc.connect('http://localhost:2611', Ibc.metamask(window.ethereum));
+//   const ibc = await Ibc.connect('http://localhost:2611', Ibc.wallet(window.ethereum));
 //   await ibc.register();
 //   const contract = await ibc.deploy({ name: 'counter', code, abi, constructor: { start: 10 } });
 //   await ibc.write(contract, 'increment', { amount: 5 });   // -> 15
@@ -41,7 +44,18 @@ export const TYPES = {
     { name: 'time', type: 'uint64' },
     { name: 'nonce', type: 'string' },
   ],
+  Session: [
+    { name: 'agent', type: 'address' },
+    { name: 'nodeKey', type: 'address' },
+    { name: 'key', type: 'bytes' },
+    { name: 'scope', type: 'string' },
+    { name: 'expires', type: 'uint64' },
+    { name: 'nonce', type: 'string' },
+  ],
 };
+
+const hex = (bytes) => '0x' + Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+const now = () => Math.floor(Date.now() / 1000);
 
 function nonce() {
   const bytes = new Uint8Array(16);
@@ -61,8 +75,11 @@ export class Ibc {
     return ibc;
   }
 
-  /** A signer that signs with MetaMask (or any EIP-1193 wallet). */
-  static metamask(ethereum) {
+  /**
+   * A signer that signs with a browser wallet: any EIP-1193 provider that
+   * supports eth_requestAccounts and eth_signTypedData_v4, such as MetaMask.
+   */
+  static wallet(ethereum) {
     let account;
     return {
       async getAddress() {
@@ -80,6 +97,11 @@ export class Ibc {
     };
   }
 
+  /** The earlier name of Ibc.wallet. */
+  static metamask(ethereum) {
+    return Ibc.wallet(ethereum);
+  }
+
   constructor(url, signer, agent) {
     this.url = url.replace(/\/+$/, '');
     this.signer = signer;
@@ -88,6 +110,68 @@ export class Ibc {
     this.inFlight = new Set(); // per request being sent: the events that arrive meanwhile
     this.listeners = new Set();
     this.stream = null;
+    this.session = null; // the read session: { session, signature, key }
+    this.sessionHours = 0; // > 0: start a read session of this length when one is needed
+    this.sessionListeners = new Set();
+    this.sessionStarting = null;
+  }
+
+  // Read sessions. A session key signs this agent's queries (reads, contract
+  // details, the event stream) on this node, never transactions. The key is
+  // made with WebCrypto and cannot be extracted; the user signs the session
+  // once in the wallet. Sessions need WebCrypto, which browsers give only to
+  // secure pages (https, or http://localhost).
+
+  /** Can this environment make session keys? */
+  static sessionsAvailable() {
+    return Boolean(globalThis.crypto?.subtle);
+  }
+
+  /** Starts a read session lasting hours: one signature in the wallet. */
+  async startSession(hours = 8) {
+    const pair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign', 'verify']);
+    const raw = new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey));
+    const session = {
+      agent: this.agent, nodeKey: this.nodeKey, key: hex(raw), scope: 'read',
+      expires: now() + Math.round(hours * 3600), nonce: nonce(),
+    };
+    const signature = await this.signer.signTypedData(DOMAIN, { Session: TYPES.Session }, session);
+    this.useSession({ session, signature, key: pair.privateKey });
+    return this.session;
+  }
+
+  /** Uses a session kept from before, if it is this agent's, for this node, and still valid. */
+  useSession(s) {
+    const ok = s && this.sessionValid(s)
+      && s.session.agent.toLowerCase() === this.agent.toLowerCase()
+      && s.session.nodeKey.toLowerCase() === String(this.nodeKey).toLowerCase();
+    this.session = ok ? s : null;
+    for (const fn of this.sessionListeners) fn(this.session);
+    return this.session;
+  }
+
+  /** Forgets the session; reads are signed in the wallet again. */
+  endSession() {
+    this.useSession(null);
+  }
+
+  /** Is the session valid for at least another minute? */
+  sessionValid(s = this.session) {
+    return Boolean(s) && s.session.expires - 60 > now();
+  }
+
+  /** Calls fn(session or null) whenever the session changes. */
+  onSession(fn) {
+    this.sessionListeners.add(fn);
+    return () => this.sessionListeners.delete(fn);
+  }
+
+  async #readSession() {
+    if (this.sessionValid()) return this.session;
+    if (this.session) this.endSession(); // expired
+    if (!this.sessionHours || !Ibc.sessionsAvailable()) return null;
+    this.sessionStarting ??= this.startSession(this.sessionHours).finally(() => { this.sessionStarting = null; });
+    return this.sessionStarting;
   }
 
   /** One request to /ibc/app. Returns the decoded JSON reply. auth is a signed query for the URL. */
@@ -122,8 +206,16 @@ export class Ibc {
     const query = {
       agent: this.agent, action, target, contract,
       body: body === undefined ? '' : JSON.stringify(body),
-      time: Math.floor(Date.now() / 1000), nonce: nonce(),
+      time: now(), nonce: nonce(),
     };
+    const s = await this.#readSession();
+    if (s) {
+      // The session key signs the fields one per line (identity.Query.SessionMessage).
+      const message = ['ibc query v1', query.agent.toLowerCase(), query.action, query.target, query.contract,
+        query.body, String(query.time), query.nonce].join('\n');
+      const signature = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, s.key, new TextEncoder().encode(message));
+      return { query, signature: hex(new Uint8Array(signature)), session: { session: s.session, signature: s.signature } };
+    }
     return { query, signature: await this.signer.signTypedData(DOMAIN, { Query: TYPES.Query }, query) };
   }
 
@@ -131,7 +223,7 @@ export class Ibc {
   connect() {
     if (this.stream) return this.stream;
     const controller = new AbortController();
-    this.stream = new Promise((resolve, reject) => {
+    const stream = new Promise((resolve, reject) => {
       this.query('stream').then((auth) => fetch(`${this.url}/stream?auth=${encodeURIComponent(JSON.stringify(auth))}`, {
         signal: controller.signal,
       })).then(async (res) => {
@@ -142,7 +234,7 @@ export class Ibc {
         let connected = false;
         for (;;) {
           const { value, done } = await reader.read();
-          if (done) break;
+          if (done) break; // the node closed it: the next call opens a new one
           buffer += decoder.decode(value, { stream: true });
           let end;
           while ((end = buffer.indexOf('\n\n')) >= 0) {
@@ -153,10 +245,12 @@ export class Ibc {
             if (data) this.#dispatch(JSON.parse(data));
           }
         }
-      }).catch((err) => { if (err.name !== 'AbortError') reject(err); });
+      }).catch((err) => { if (err.name !== 'AbortError') reject(err); })
+        .finally(() => { if (this.stream === stream) this.stream = null; });
     });
+    this.stream = stream;
     this.abort = () => controller.abort();
-    return this.stream;
+    return stream;
   }
 
   #dispatch(event) {

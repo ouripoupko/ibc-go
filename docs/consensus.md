@@ -344,7 +344,7 @@ all three variants with equivocating miners.
 | # | Decision |
 |---|---|
 | D1 | The agent id is the address of the agent's root key |
-| D2 | No custodial mode: nodes never hold personal keys; users sign in MetaMask |
+| D2 | No custodial mode: nodes never hold personal keys; users sign in their wallets (MetaMask or another) |
 | — | One node key per node, authorized by each hosted agent's registration |
 | — | secp256k1 keys; EIP-712 signatures |
 | D3 | One blocklace; membership changes freeze the contract until output, and switch at the leader that output them (§10) |
@@ -360,6 +360,7 @@ all three variants with equivocating miners.
 ## 13. Not in this version
 
 - The personal two-pointer ledger of the ssDA paper (same-contract and same-agent pointers).
-- Session keys to reduce wallet approvals.
+- Session keys for transactions. (Read sessions exist; transactions stay signed by the agents'
+  own keys, so every ledger entry is.)
 - A timeout in eventual synchrony, and the asynchronous variant with a shared coin.
 - Contract events (logs).

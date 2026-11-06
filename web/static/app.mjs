@@ -1,4 +1,4 @@
-// Shared code of the web interface's pages: connecting MetaMask, small DOM
+// Shared code of the web interface's pages: connecting the wallet, small DOM
 // helpers, and forms built from a contract's ABI.
 //
 // Everything shown comes from the node or from contracts, so it is always
@@ -7,14 +7,73 @@ import { Ibc, IbcError } from './ibc.mjs';
 
 export { IbcError };
 
-/** Connects to this node as the MetaMask account's agent. */
+// How long a read session lasts. The node accepts up to 7 days.
+export const SESSION_HOURS = 8;
+
+/**
+ * Connects to this node as the agent of the browser wallet's account. Reads
+ * are signed by a read session, kept in this browser (IndexedDB) so that it
+ * outlives the page: the wallet is asked once, when the first read needs it.
+ */
 export async function connect() {
   if (!window.ethereum) {
-    throw new Error('MetaMask was not found. Install it, or open this page in a browser that has it.');
+    throw new Error('No browser wallet was found. Install one (see the list below), then reload this page.');
   }
-  const ibc = await Ibc.connect(location.origin, Ibc.metamask(window.ethereum));
+  const ibc = await Ibc.connect(location.origin, Ibc.wallet(window.ethereum));
   window.ethereum.on?.('accountsChanged', () => location.reload());
+  if (Ibc.sessionsAvailable()) {
+    ibc.sessionHours = SESSION_HOURS;
+    const id = `${location.origin} ${ibc.agent.toLowerCase()}`;
+    ibc.useSession(await sessionStore('get', id));
+    ibc.onSession((s) => {
+      sessionStore(s ? 'put' : 'delete', id, s ? { session: s.session, signature: s.signature, key: s.key } : undefined);
+      showSession(ibc);
+    });
+  }
+  showSession(ibc);
   return ibc;
+}
+
+/** Reads or writes the kept sessions; any storage failure means "no session kept". */
+async function sessionStore(op, id, value) {
+  try {
+    const db = await new Promise((resolve, reject) => {
+      const open = indexedDB.open('ibc', 1);
+      open.onupgradeneeded = () => open.result.createObjectStore('sessions');
+      open.onsuccess = () => resolve(open.result);
+      open.onerror = () => reject(open.error);
+    });
+    return await new Promise((resolve, reject) => {
+      const store = db.transaction('sessions', op === 'get' ? 'readonly' : 'readwrite').objectStore('sessions');
+      const req = op === 'put' ? store.put(value, id) : store[op](id);
+      req.onsuccess = () => resolve(req.result ?? null);
+      req.onerror = () => reject(req.error);
+    }).finally(() => db.close());
+  } catch {
+    return null;
+  }
+}
+
+/** Shows the read session in the header (#session), with a button to end it. */
+function showSession(ibc) {
+  const holder = document.querySelector('#session');
+  if (!holder) return;
+  if (!Ibc.sessionsAvailable()) {
+    holder.textContent = 'Reads are signed one by one (this page is not secure: use https)';
+    return;
+  }
+  if (!ibc.session) {
+    holder.textContent = 'No reading session';
+    return;
+  }
+  const until = new Date(ibc.session.session.expires * 1000).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' });
+  holder.replaceChildren(`Reading session until ${until} · `,
+    el('button', { class: 'link', title: 'Forget the session key: the next read asks your wallet again', onclick: () => ibc.endSession() }, 'End'));
+}
+
+/** A note for a status line: whether the wallet will ask before reading. */
+export function readNote(ibc) {
+  return ibc.sessionValid() || !ibc.sessionHours ? '' : ' (approve a reading session in your wallet)';
 }
 
 export const $ = (selector, root = document) => root.querySelector(selector);
@@ -53,9 +112,9 @@ export async function busy(button, statusNode, fn) {
   }
 }
 
-/** A readable message for an error from MetaMask, the node or the network. */
+/** A readable message for an error from the wallet, the node or the network. */
 export function errorText(err) {
-  if (err?.code === 4001) return 'You declined the signature in MetaMask.';
+  if (err?.code === 4001) return 'You declined the signature in your wallet.';
   if (err instanceof TypeError && /fetch/i.test(err.message)) return 'The node could not be reached.';
   return err?.message ?? String(err);
 }
@@ -200,7 +259,7 @@ export function functionForm(fn, actionLabel, run) {
     event.preventDefault();
     button.disabled = true;
     result.className = 'result';
-    result.textContent = isRead(fn) ? 'Reading… (sign the query in MetaMask)' : 'Sending… (sign the transaction in MetaMask)';
+    result.textContent = isRead(fn) ? 'Reading…' : 'Sending… (sign the transaction in your wallet)';
     try {
       const value = await run(inputs.read());
       result.textContent = pretty(value);

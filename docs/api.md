@@ -87,7 +87,8 @@ The node's operator can still see everything stored on the node.
 ## Signatures
 
 Agents sign with their Ethereum key, using [EIP-712](https://eips.ethereum.org/EIPS/eip-712)
-typed data: MetaMask's `eth_signTypedData_v4`, or `signTypedData` of ethers.js. The signature is
+typed data: a browser wallet's `eth_signTypedData_v4` (MetaMask, Rabby, …), or `signTypedData` of
+ethers.js. The signature is
 the usual 65-byte `0x`-hex string.
 
 ```js
@@ -166,6 +167,58 @@ is not a transaction's, so a signed query can never be used as a transaction. A 
 |---|---|
 | `contract_read` | `{"method": "count", "values": {…}}` |
 | `get_contracts`, `get_contract`, `stream` | `""` |
+
+### Read sessions
+
+A query can be signed by a **read session** instead of the agent's own key, so that an app can read
+without asking the wallet each time. The agent signs a `Session` once, in its wallet; the app then
+signs each query with the session's key.
+
+- **Read only.** A session signs queries: `contract_read`, `get_contract`, `get_contracts` and the
+  event stream. It can never sign a transaction, a registration or anything else that enters a
+  ledger: those take only the agent's own signature. Its `scope` must be `"read"`.
+- **One node.** `nodeKey` is the node's key, from `node_info`; other nodes refuse the session.
+- **Until a time.** `expires` is in unix seconds. The node refuses a session that has expired, or
+  that lasts more than 7 days from now. It keeps no record of sessions: a session cannot be ended
+  early on the node, only forgotten by the app, so keep sessions short.
+- **The key** is a P-256 (secp256r1) key, the kind browsers make with WebCrypto, which can keep it
+  unextractable. `key` is its public key, uncompressed (65 bytes, starting with `04`).
+
+```js
+Session: [
+  { name: 'agent',    type: 'address' },  // the signer: the agent
+  { name: 'nodeKey',  type: 'address' },  // the node it is for, from node_info
+  { name: 'key',      type: 'bytes' },    // the session's P-256 public key, uncompressed
+  { name: 'scope',    type: 'string' },   // "read"
+  { name: 'expires',  type: 'uint64' },   // unix seconds
+  { name: 'nonce',    type: 'string' },
+],
+```
+
+A query signed by a session carries the signed session with it, and its `signature` is the session
+key's:
+
+```json
+{
+  "query": {"agent": "0x86d6…", "action": "contract_read", …},
+  "signature": "0x…",
+  "session": {
+    "session": {"agent": "0x86d6…", "nodeKey": "0x57E3…", "key": "0x04…", "scope": "read",
+                "expires": 1789030000, "nonce": "…"},
+    "signature": "0x…"
+  }
+}
+```
+
+- The session key signs, with ECDSA P-256 and SHA-256, the query's fields one per line:
+  `"ibc query v1"`, `agent` (lower-case hex), `action`, `target`, `contract`, `body`, `time`
+  (decimal) and `nonce`, joined with `\n`. The signature is 64 bytes, `r` then `s`, as WebCrypto
+  gives it.
+- The query's `agent` must be the session's `agent`. The rest of the query's rules are unchanged:
+  60 seconds, accepted once, bound to its action, agent and contract.
+- Errors: `session for node key 0x…, this node's key is 0x…`; `session expired`; `session lasts
+  longer than 168h0m0s`; `session scope "…": only "read" is allowed`; `session: signature does not
+  match the agent`; `query: signature does not match the session key`.
 
 ## Values
 

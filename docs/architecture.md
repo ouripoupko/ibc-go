@@ -25,7 +25,7 @@ embedded [Pebble](https://github.com/cockroachdb/pebble) database, contracts run
 hold personal keys.
 
 ```
-client (MetaMask signs)
+client (a wallet signs)
    │ signed transaction
    ▼
 HTTP (dispatcher) ── reads ──────────────────► execution: read-only call on the latest state
@@ -50,7 +50,7 @@ execution.Navigator.Submit
 | [`cmd/ibc`](../cmd/ibc) | `ibc.py`, `*_service.py` | The program: the node, and key and signing tools |
 | [`node`](../node) | `docker-start.sh` | Wires storage, execution, consensus and HTTP in one process; startup recovery; orderly shutdown |
 | [`dispatcher`](../dispatcher) | `ibc.py`, `dispatcher/` | HTTP API, Server-Sent Events, the in-process event broker |
-| [`web`](../web) | — | The web interface: static pages and the JavaScript client, embedded in the binary and served at `/`. They call the API from the browser and sign with MetaMask; the node holds no session |
+| [`web`](../web) | — | The web interface: static pages and the JavaScript client, embedded in the binary and served at `/`. They call the API from the browser and sign with the browser wallet; reads are signed by a read session the browser keeps |
 | [`identity`](../identity) | — | Signed transactions and registrations (EIP-712), the node key |
 | [`consensus`](../consensus) | `consensus/` | The `Protocol` interface and the `Router`, which runs each contract's protocol, carries miners' messages between nodes, and syncs joining nodes |
 | [`consensus/cordial`](../consensus/cordial) | `consensus/pbft.py` | Cordial Miners: blocks, the blocklace, τ, the miner, its store, and the simulator tests |
@@ -60,7 +60,7 @@ execution.Navigator.Submit
 ## The life of a transaction
 
 1. **The client** builds a transaction (deploy, call, join, leave or rotate_key) and has the user
-   sign it, in MetaMask or with a key file.
+   sign it, in a wallet or with a key file.
 2. **The dispatcher** checks that the agent in the URL is the signer and hands the transaction to
    the router.
 3. **The router** verifies the signature and gives it to the agent's miner of the contract, which
@@ -108,6 +108,11 @@ The dispatcher checks a signature on every call that changes or shows an agent's
   60 seconds of the node's clock, and accepted once. A read runs with `msg.sender` set to the
   signer, so the contract's own `view` functions decide what each reader may see; the other calls
   are for the agent itself only.
+- **Read sessions** ([`identity/session.go`](../identity/session.go)) let a P-256 key, made by
+  the browser and approved once by the agent, sign queries on one node until a time (7 days at
+  most). They are stateless: each query carries its signed session, and the node keeps nothing.
+  Only queries accept them; transactions and registrations take only the agent's own key, so every
+  ledger entry is signed by an agent itself.
 - **Node-to-node messages** are signed with the sending node's key when they are sent, not when
   they are queued, so the outbox's retries stay fresh ([`consensus/a2a.go`](../consensus/a2a.go)).
   Requests for blocks or the ledger are answered only for the nodes of the contract's members.
@@ -199,7 +204,7 @@ web/e2e/run.sh       # optional: the web interface in headless Chrome (needs Nod
 ```
 
 The browser test starts two nodes and drives the web interface as two users, with a stand-in for
-MetaMask that signs with an ethers.js wallet: register, deploy, write, read, invite, join. It is
+browser wallet that signs with an ethers.js wallet: register, deploy, write, read, invite, join. It is
 not part of `go test`.
 
 The tests include:
@@ -241,8 +246,8 @@ upgrade together.
 
 - **The personal ledger** of the ssDA paper: one DAG per agent with same-contract and same-agent
   pointers, linking an agent's actions across contracts.
-- **Session keys.** Every write, read and stream needs a wallet approval; a key held by the app
-  for a limited time and scope would avoid that.
+- **Ending a read session early.** The node keeps no record of sessions, so a session lasts until
+  it expires; the app can only forget its key.
 - **Contract events.** Logs emitted by contracts are discarded.
 - **Precompile addresses.** There are no precompiles, but a call to one of their addresses does not
   fail: `ecrecover` and `ripemd160` return zero, `sha256` reverts.

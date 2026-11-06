@@ -24,10 +24,12 @@ type Query struct {
 	Nonce    string            `json:"nonce"`
 }
 
-// SignedQuery is a query with the agent's signature.
+// SignedQuery is a query with its signature: by the agent's own key, or,
+// when Session is given, by that session's key.
 type SignedQuery struct {
-	Query     Query         `json:"query"`
-	Signature hexutil.Bytes `json:"signature"`
+	Query     Query          `json:"query"`
+	Signature hexutil.Bytes  `json:"signature"`
+	Session   *SignedSession `json:"session,omitempty"`
 }
 
 // TypedData returns the query as EIP-712 typed data.
@@ -64,10 +66,16 @@ func (q Query) Hash() (ethcommon.Hash, error) {
 	return typedHash(q.TypedData())
 }
 
-// Verify checks that the query is signed by its agent, and returns its digest.
+// Verify checks that the query is signed by its agent, directly or through a
+// session the agent signed, and returns a digest that identifies the query.
+// For a session, the caller must still check that the session is for its
+// node and has not expired.
 func (s SignedQuery) Verify() (ethcommon.Hash, error) {
 	if s.Query.Agent == (ethcommon.Address{}) {
 		return ethcommon.Hash{}, errors.New("query has no agent")
+	}
+	if s.Session != nil {
+		return s.verifySession()
 	}
 	hash, err := s.Query.Hash()
 	if err != nil {

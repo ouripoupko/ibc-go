@@ -59,7 +59,7 @@ type Dispatcher struct {
 func New(navigator *execution.Navigator, protocol consensus.Protocol, broker *Broker,
 	nodeKey ethcommon.Address, done <-chan struct{}) *Dispatcher {
 	d := &Dispatcher{navigator: navigator, consensus: protocol, broker: broker, nodeKey: nodeKey, done: done,
-		guard: newGuard()}
+		guard: newGuard(nodeKey)}
 	d.mux = http.NewServeMux()
 	d.mux.HandleFunc("/ibc/app", d.handleApp)
 	d.mux.HandleFunc("/ibc/app/{path...}", d.handleApp)

@@ -12,8 +12,9 @@ This is the Go version of [ibc](https://github.com/ouripoupko/ibc):
   [go-ethereum](https://github.com/ethereum/go-ethereum), so you write them in Solidity.
 - **Partners agree with [Cordial Miners](docs/consensus.md)**, a Byzantine fault-tolerant
   consensus protocol, run separately for each contract among its partners.
-- **Users sign their own actions** with an Ethereum key, for example in MetaMask. A node never
-  holds anyone's personal key.
+- **Users sign their own actions** with an Ethereum key, in a browser wallet such as MetaMask. A
+  node never holds anyone's personal key. Reading can use a short-lived, read-only session key
+  instead, so that apps need not ask the wallet for every read.
 - **A node is a single program** with its own embedded database.
 
 > **Work in progress.** The essentials work end to end, but parts of the design are still to
@@ -83,7 +84,8 @@ curl 'http://localhost:2611/ibc/app?action=node_info'
 
 The reply is the address of the node's key, which the node uses to sign its consensus blocks.
 
-Open **http://localhost:2611** in a browser with [MetaMask](https://metamask.io) to use the node's
+Open **http://localhost:2611** in a browser with a wallet, such as [MetaMask](https://metamask.io)
+or [Rabby](https://rabby.io), to use the node's
 web interface: register, deploy compiled contracts, join contracts, and call their functions.
 Continue with the [usage guide](docs/usage.md) for the details, and for the shell and JavaScript
 clients.

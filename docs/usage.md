@@ -35,10 +35,11 @@ Every call used here is described in full in the [API reference](api.md).
 
 ## Your key
 
-Every transaction is signed with your Ethereum key, using EIP-712 (MetaMask's
+Every transaction is signed with your Ethereum key, using EIP-712 (a browser wallet's
 `eth_signTypedData_v4`). The node checks each signature, and so does every partner.
 
-- **In a web app**, the user signs in **MetaMask**. The JavaScript client below does that for you.
+- **In a web app**, the user signs in a **browser wallet**, such as MetaMask, Rabby or Coinbase
+  Wallet. The JavaScript client below does that for you.
 - **From the shell**, keep a key in a file and let the `ibc` program sign with it:
 
   ```sh
@@ -55,10 +56,18 @@ key cannot sign transactions in your name; it only takes part in ordering them.
 ## The web interface
 
 The node serves a web interface at its own address, for example `http://localhost:2611`. Open it in
-a browser with [MetaMask](https://metamask.io): MetaMask holds your key, and the page asks it to
-sign every call. The node never sees your key.
+a browser that has a wallet: it holds your key, and the page asks it to sign every call. The node
+never sees your key.
 
-- **Your contracts.** Connect MetaMask, and register on the node the first time. The page lists
+Any browser wallet for Ethereum keys works: [MetaMask](https://metamask.io),
+[Rabby](https://rabby.io), [Coinbase Wallet](https://www.coinbase.com/wallet),
+[Trust Wallet](https://trustwallet.com), [Frame](https://frame.sh), or the wallet built into
+[Brave](https://brave.com/wallet/). Your agent is your key, not the wallet app, so the same key in
+another wallet is the same agent. Smart-contract wallets, such as Safe, do not work: ibc identifies
+you by a key's own signature. Mobile wallets that connect by QR code (WalletConnect) are not
+supported yet.
+
+- **Your contracts.** Connect your wallet, and register on the node the first time. The page lists
   your contracts on this node; it cannot list other agents' contracts.
 - **Deploy.** Choose the compiled contract's `.bin` and `.abi` files ([Compile it](#compile-it)
   shows how to make them), or paste them. The page shows a field for each constructor argument.
@@ -72,12 +81,22 @@ sign every call. The node never sees your key.
 Arguments are typed as in [Arguments](#arguments): numbers and addresses as plain text, arrays and
 structs as JSON.
 
-Every call is a MetaMask signature, reads included: listing your contracts, opening a contract, each
-read, each transaction, and the first transaction on a page (which opens the event stream). Session
-keys, which would sign without asking each time, are planned.
+**Your wallet asks for each transaction:** each deploy, write, join and leave, and the registration.
+**Reading does not ask each time.** The first time the page needs to read (to list your contracts,
+open a contract, read, or open the event stream), your wallet asks you to approve a *reading
+session*: a key the browser makes, which can only read, only on this node, for 8 hours. The page
+signs every read with it. The header shows until when it lasts; **End** forgets it, and the next
+read asks again.
 
-MetaMask works with pages at `http://localhost`. To use a node over the network, put it behind
-HTTPS, as with any page that uses a wallet.
+- The session key cannot sign a transaction: the node accepts transactions only with your own
+  signature. A session can only let someone read what you can read, on this node, until it ends.
+- The browser keeps the key unextractable, in this site's storage, so moving between pages or
+  reloading keeps the session. Closing the browser does not end it; **End** does, or the time does.
+- Sessions need a secure page: `https`, or `http://localhost`. Elsewhere the page asks the wallet
+  for every read.
+
+Wallets work with pages at `http://localhost`. To use a node over the network, put it behind HTTPS,
+as with any page that uses a wallet.
 
 ## Write a contract
 
@@ -242,15 +261,15 @@ Run `examples/scripts/ibc.sh` without arguments for the full list.
 
 [`web/static/ibc.mjs`](../web/static/ibc.mjs) is a small client without dependencies; the web
 interface uses it, and every node serves it at `/ibc.mjs`. It works
-in browsers and in Node.js 18 and later. It signs through a *signer*: MetaMask in a browser, or
+in browsers and in Node.js 18 and later. It signs through a *signer*: a browser wallet, or
 any object with `getAddress()` and `signTypedData(domain, types, message)`, such as an ethers.js
 wallet. It opens the event stream for you and resolves each write with its result:
 
 ```js
 import { Ibc } from './ibc.mjs';
 
-const ibc = await Ibc.connect('http://localhost:2611', Ibc.metamask(window.ethereum));
-await ibc.register();                    // MetaMask asks the user to sign
+const ibc = await Ibc.connect('http://localhost:2611', Ibc.wallet(window.ethereum));
+await ibc.register();                    // the wallet asks the user to sign
 
 const code = await (await fetch('/build/Counter.bin')).text();
 const abi = await (await fetch('/build/Counter.abi')).text();
@@ -268,9 +287,13 @@ try {
 ibc.close();
 ```
 
-Every call asks the user to approve a signature in MetaMask: each write, deploy, join and leave,
-each read, and opening the event stream. (Session keys, which would sign without asking each
-time, are planned.)
+Every write, deploy, join and leave asks the user to approve a signature in the wallet. So does
+each read and opening the event stream, unless the client has a **read session**: set
+`ibc.sessionHours = 8` (for example), and the first read asks the wallet once to approve a session
+key, which then signs every read without asking. A session can only read, only on this node, and
+never signs a transaction. `ibc.startSession(hours)` starts one at once, `ibc.endSession()` forgets
+it, and `ibc.useSession(kept)` takes one kept from before (the web interface keeps it in IndexedDB).
+See [read sessions](api.md#read-sessions).
 
 [`examples/js/demo.mjs`](../examples/js/demo.mjs) deploys and calls all three examples from
 Node.js, signing with an ethers.js wallet:

@@ -10,15 +10,27 @@
 <body>
   <header class="top">
     <h1><a href="./">ibc</a></h1>
-    <div class="who" id="who">Not connected</div>
+    <div class="who"><div id="who">Not connected</div><div id="session"></div></div>
   </header>
   <main>
     <section class="card" id="connect-card">
       <h2>Connect</h2>
-      <p>This page works with your contracts on this node. You sign everything in MetaMask: the node
-        never holds your key. Every call asks for a signature, including reading.</p>
-      <button id="connect">Connect MetaMask</button>
+      <p>This page works with your contracts on this node. You sign in your browser wallet: the
+        node never holds your key. Each transaction asks for your signature. Reading is signed by a
+        <em>reading session</em> instead: a key this browser makes and you approve once, which can
+        only read, only on this node, for 8 hours.</p>
+      <button id="connect">Connect wallet</button>
       <div class="status" id="connect-status"></div>
+      <p class="hint" style="margin-top: 16px">Any browser wallet for Ethereum keys works, for example
+        <a href="https://metamask.io" target="_blank" rel="noopener noreferrer">MetaMask</a>,
+        <a href="https://rabby.io" target="_blank" rel="noopener noreferrer">Rabby</a>,
+        <a href="https://www.coinbase.com/wallet" target="_blank" rel="noopener noreferrer">Coinbase Wallet</a>,
+        <a href="https://trustwallet.com" target="_blank" rel="noopener noreferrer">Trust Wallet</a>,
+        <a href="https://frame.sh" target="_blank" rel="noopener noreferrer">Frame</a>, or the wallet
+        built into <a href="https://brave.com/wallet/" target="_blank" rel="noopener noreferrer">Brave</a>.
+        Your agent is your key, not the wallet app: the same key in another wallet is the same agent.
+        Smart-contract wallets, such as Safe, do not work, because ibc needs a key's own
+        signature.</p>
     </section>
 
     <section class="card hidden" id="register-card">

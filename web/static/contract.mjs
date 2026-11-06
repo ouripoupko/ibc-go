@@ -1,6 +1,6 @@
 // The contract page: details, an invite, and a form for each ABI function.
 import {
-  $, el, status, busy, errorText, connect, parseAbi, functionForm, isRead, encodeInvite, pretty, short,
+  $, el, status, busy, errorText, connect, readNote, parseAbi, functionForm, isRead, encodeInvite, pretty, short,
 } from './app.mjs';
 
 const id = new URLSearchParams(location.search).get('id') ?? '';
@@ -19,10 +19,10 @@ async function start(fromButton) {
   const button = $('#connect');
   button.disabled = true;
   try {
-    status($('#connect-status'), fromButton ? 'Approve the connection in MetaMask…' : 'Connecting…');
+    status($('#connect-status'), fromButton ? 'Approve the connection in your wallet…' : 'Connecting…');
     ibc = await connect();
     $('#who').textContent = `Agent ${ibc.agent} · node ${location.host}`;
-    status($('#connect-status'), 'Sign the query in MetaMask to open the contract…');
+    status($('#connect-status'), `Opening the contract…${readNote(ibc)}`);
     const c = await ibc.contract(id);
     if (!c || !c.id) throw new Error('You have no such contract on this node.');
     $('#connect-card').classList.add('hidden');
@@ -89,7 +89,7 @@ function show(c) {
   $('#leave').addEventListener('click', () => {
     if (!confirm('Leave this contract? The other members decide, by the contract\'s rules.')) return;
     busy($('#leave'), $('#leave-status'), async () => {
-      status($('#leave-status'), 'Sign the leave in MetaMask, then wait for the members…');
+      status($('#leave-status'), 'Sign the leave in your wallet, then wait for the members…');
       const reply = await ibc.leave(c.id);
       status($('#leave-status'), reply === true ? 'You left the contract.' : `Refused: ${pretty(reply)}`, reply === true ? 'ok' : 'bad');
     });

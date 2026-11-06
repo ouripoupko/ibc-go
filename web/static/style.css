@@ -44,7 +44,11 @@ header.top {
 }
 header.top h1 { font-size: 18px; margin: 0; }
 header.top h1 a { color: inherit; text-decoration: none; }
-.who { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+.who { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; text-align: right; }
+button.link {
+  margin: 0; padding: 0; border: 0; background: none; color: var(--accent);
+  font: inherit; font-weight: 400; text-decoration: underline; cursor: pointer;
+}
 
 section.card {
   background: var(--card); border: 1px solid var(--line); border-radius: 8px;

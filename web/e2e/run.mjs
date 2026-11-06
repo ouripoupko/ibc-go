@@ -1,5 +1,5 @@
 // End-to-end test of the web interface in headless Chrome, with a stand-in
-// for MetaMask (window.ethereum) that signs with an ethers.js wallet. Two
+// for a browser wallet (window.ethereum) that signs with an ethers.js wallet. Two
 // nodes, two users: register, deploy, write, read, invite, join, write.
 // Run it with web/e2e/run.sh, which builds and starts the nodes.
 import puppeteer from 'puppeteer-core';
@@ -10,7 +10,7 @@ const BUILD = new URL('../../examples/build', import.meta.url).pathname;
 const CHROME = process.env.CHROME ?? '/usr/bin/google-chrome';
 const SHOTS = process.env.SHOTS ?? '';  // a directory (ending in /) to save screenshots in
 const browser = await puppeteer.launch({ executablePath: CHROME, headless: true, args: ['--no-sandbox'] });
-let prompts = 0;
+const prompts = {}; // wallet signatures asked, by type
 
 async function pageFor(wallet, width = 1100) {
   const page = await browser.newPage();
@@ -18,8 +18,8 @@ async function pageFor(wallet, width = 1100) {
   page.on('pageerror', (e) => console.log('PAGE ERROR', e.message));
   page.on('console', (m) => { if (m.type() === 'error') console.log('CONSOLE', m.text()); });
   await page.exposeFunction('__sign', async (json) => {
-    prompts++;
     const data = JSON.parse(json);
+    prompts[data.primaryType] = (prompts[data.primaryType] ?? 0) + 1;
     delete data.types.EIP712Domain;
     return wallet.signTypedData(data.domain, data.types, data.message);
   });
@@ -129,7 +129,16 @@ try {
   await pa.waitForSelector('#contract-area:not(.hidden)');
   r = await runFn(pa, '#reads', 'count', []);
   check('alice reads count -> 16', r.text === '16', r.text);
-  console.log('signatures asked:', prompts);
+  check('reading session shown in the header', /Reading session until/.test(await text(pa, '#session')), await text(pa, '#session'));
+  console.log('wallet signatures asked:', JSON.stringify(prompts));
+  check('no read asked the wallet', !prompts.Query, `${prompts.Query ?? 0} queries`);
+  check('one reading session per user', prompts.Session === 2, `${prompts.Session} sessions`);
+
+  // Ending the session: the next read asks for a new one.
+  await pa.click('#session button');
+  await waitText(pa, '#session', /No reading session/);
+  r = await runFn(pa, '#reads', 'count', []);
+  check('read after ending the session', r.text === '16' && prompts.Session === 3, `${r.text}, ${prompts.Session} sessions`);
 } catch (err) {
   console.log('FAIL', err.message);
   process.exitCode = 1;

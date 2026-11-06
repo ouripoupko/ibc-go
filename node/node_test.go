@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/elliptic"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -567,6 +569,100 @@ func TestSignatures(t *testing.T) {
 		"signature": "0x" + fmt.Sprintf("%x", sig)}
 	refused("get_ledger from a stranger's node", call(t, a.URL, "PUT", alice.id, "a2a_consent", cid, "", env),
 		"serves no member")
+}
+
+// session is a read session: a P-256 key the user authorized once.
+type session struct {
+	signed identity.SignedSession
+	key    *ecdsa.PrivateKey
+}
+
+func (u *user) startSession(t *testing.T, n *testNode, lasts time.Duration) *session {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, _ := key.PublicKey.Bytes()
+	ss, err := identity.SignSession(identity.Session{Agent: identity.Address(u.key), NodeKey: ethcommon.HexToAddress(n.NodeKey()),
+		Key: pub, Scope: identity.SessionScope, Expires: uint64(time.Now().Add(lasts).Unix()), Nonce: identity.NewNonce()}, u.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &session{signed: ss, key: key}
+}
+
+// query signs a query of u with the session key.
+func (s *session) query(t *testing.T, u *user, action, target, contract string, body any) identity.SignedQuery {
+	t.Helper()
+	q := u.query(t, action, target, contract, body).Query
+	sq, err := identity.SignWithSession(q, s.signed, s.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sq
+}
+
+func (s *session) auth(t *testing.T, u *user, action, target, contract string) string {
+	raw, _ := json.Marshal(s.query(t, u, action, target, contract, nil))
+	return string(raw)
+}
+
+// A session key signs reads, contract details and the stream; never transactions.
+func TestReadSessions(t *testing.T) {
+	a, b := startNode(t, Config{}), startNode(t, Config{})
+	alice, bob := newUser(t), newUser(t)
+	events := openStream(t, a.URL, alice, "")
+	alice.register(t, a, events)
+	cid := alice.deploy(t, a, events, "Registry", "", map[string]any{"initialName": "s", "start": 0})
+	alice.write(t, a, events, cid, "setValue", map[string]any{"value": 3})
+	refused := func(what string, got any, want string) {
+		t.Helper()
+		if !strings.Contains(fmt.Sprint(got), want) {
+			t.Fatalf("%s: got %v, want an error with %q", what, got, want)
+		}
+	}
+	readBody := map[string]any{"method": "counter", "values": map[string]any{}}
+	read := func(s *session, u *user) any {
+		return call(t, a.URL, "POST", alice.id, "contract_read", cid, "", s.query(t, u, "contract_read", alice.id, cid, readBody))
+	}
+
+	s := alice.startSession(t, a, time.Hour)
+	if got := read(s, alice); got != json.Number("1") {
+		t.Fatalf("read with a session = %v", got)
+	}
+	if list := getAuth(t, a.URL, alice.id, "get_contracts", "", s.auth(t, alice, "get_contracts", alice.id, "")).([]any); len(list) != 1 {
+		t.Fatalf("get_contracts with a session = %v", list)
+	}
+	resp, err := http.Get(a.URL + "/stream?" + url.Values{"auth": {s.auth(t, alice, "stream", alice.id, "")}}.Encode())
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("stream with a session: %s", resp.Status)
+	}
+	// Anyone may read with a session of their own; the contract sees them.
+	if got := read(bob.startSession(t, a, time.Hour), bob); got != json.Number("1") {
+		t.Fatalf("bob's read with a session = %v", got)
+	}
+
+	sq := s.query(t, alice, "contract_read", alice.id, cid, readBody)
+	call(t, a.URL, "POST", alice.id, "contract_read", cid, "", sq)
+	refused("replayed session query", call(t, a.URL, "POST", alice.id, "contract_read", cid, "", sq), "already used")
+	refused("session for another node", read(alice.startSession(t, b, time.Hour), alice), "session for node key")
+	refused("expired session", read(alice.startSession(t, a, -time.Minute), alice), "session expired")
+	refused("session longer than 7 days", read(alice.startSession(t, a, 8*24*time.Hour), alice), "longer than")
+	refused("bob's session lists alice's contracts", getAuth(t, a.URL, alice.id, "get_contracts", "",
+		bob.startSession(t, a, time.Hour).auth(t, bob, "get_contracts", alice.id, "")), "only agent")
+	// A session cannot sign a transaction: a write takes only a transaction
+	// signed by the agent's own key.
+	refused("write with a session", call(t, a.URL, "POST", alice.id, "contract_write", cid, "setValue",
+		s.query(t, alice, "contract_write", alice.id, cid, map[string]any{"method": "setValue", "values": map[string]any{"value": 9}})),
+		"needs a call transaction")
+	if got := read(s, alice); got != json.Number("1") {
+		t.Fatalf("counter after the refused write = %v", got)
+	}
 }
 
 // A contract's approve_partner refuses an agent it did not invite.

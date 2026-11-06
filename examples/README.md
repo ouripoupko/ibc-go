@@ -26,7 +26,7 @@ shows. It runs with `go test ./...`.
 | Client | Signs with | Needs |
 |---|---|---|
 | [`scripts/ibc.sh`](scripts/ibc.sh) | A key file, through the `ibc` program | bash, curl, jq, `ibc` |
-| [`js/ibc.mjs`](js/ibc.mjs) | MetaMask in a browser, or an ethers.js wallet | A browser, or Node.js 18+ |
+| [`js/ibc.mjs`](js/ibc.mjs) | A browser wallet (MetaMask, Rabby, …), or an ethers.js wallet | A browser, or Node.js 18+ |
 
 `js/ibc.mjs` re-exports the client in [`web/static/ibc.mjs`](../web/static/ibc.mjs), which the
 node's web interface also uses.

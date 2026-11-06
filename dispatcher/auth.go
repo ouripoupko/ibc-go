@@ -17,16 +17,23 @@ import (
 // query is also accepted only once, so a copied query cannot be sent again.
 var queryWindow = 60 * time.Second
 
+// maxSession is the longest a session may last, from now: a leaked session
+// key reads for at most this long.
+var maxSession = 7 * 24 * time.Hour
+
 var errNoQuery = errors.New("this call needs a signed query")
 
 // guard checks signed queries and remembers the ones it accepted until they
 // expire.
 type guard struct {
-	mu   sync.Mutex
-	seen map[ethcommon.Hash]time.Time
+	nodeKey ethcommon.Address // sessions must be for this node
+	mu      sync.Mutex
+	seen    map[ethcommon.Hash]time.Time
 }
 
-func newGuard() *guard { return &guard{seen: map[ethcommon.Hash]time.Time{}} }
+func newGuard(nodeKey ethcommon.Address) *guard {
+	return &guard{nodeKey: nodeKey, seen: map[ethcommon.Hash]time.Time{}}
+}
 
 // check verifies a signed query for action on target's copy of contract, and
 // returns who signed it.
@@ -34,6 +41,20 @@ func (g *guard) check(sq identity.SignedQuery, action, target, contract string) 
 	id, err := sq.Verify()
 	if err != nil {
 		return ethcommon.Address{}, fmt.Errorf("query: %w", err)
+	}
+	now := time.Now()
+	if sq.Session != nil {
+		s := sq.Session.Session
+		if s.NodeKey != g.nodeKey {
+			return ethcommon.Address{}, fmt.Errorf("session for node key %s, this node's key is %s", s.NodeKey.Hex(), g.nodeKey.Hex())
+		}
+		expires := time.Unix(int64(s.Expires), 0)
+		if !now.Before(expires) {
+			return ethcommon.Address{}, errors.New("session expired")
+		}
+		if expires.Sub(now) > maxSession {
+			return ethcommon.Address{}, fmt.Errorf("session lasts longer than %s", maxSession)
+		}
 	}
 	q := sq.Query
 	if q.Action != action {
@@ -45,7 +66,6 @@ func (g *guard) check(sq identity.SignedQuery, action, target, contract string) 
 	if !strings.EqualFold(q.Contract, contract) {
 		return ethcommon.Address{}, fmt.Errorf("query for contract %q sent to %q", q.Contract, contract)
 	}
-	now := time.Now()
 	if d := now.Sub(time.Unix(int64(q.Time), 0)); d > queryWindow || d < -queryWindow {
 		return ethcommon.Address{}, errors.New("query expired, or its time is wrong: check the clock")
 	}

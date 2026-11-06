@@ -1,6 +1,6 @@
 // The contracts page: connect, register, list your contracts, deploy, join.
 import {
-  $, el, status, busy, errorText, connect, parseAbi, paramInputs, readFile, decodeInvite, short,
+  $, el, status, busy, errorText, connect, readNote, parseAbi, paramInputs, readFile, decodeInvite, short,
 } from './app.mjs';
 
 let ibc;
@@ -8,14 +8,14 @@ let ctorInputs = paramInputs([]);
 
 $('#connect').addEventListener('click', () => start(true));
 $('#register').addEventListener('click', () => busy($('#register'), $('#register-status'), async () => {
-  status($('#register-status'), 'Sign the registration in MetaMask…');
+  status($('#register-status'), 'Sign the registration in your wallet…');
   if (await ibc.register() !== true) throw new Error('the node refused the registration');
   $('#register-card').classList.add('hidden');
   await showAgent();
 }));
 $('#refresh').addEventListener('click', () => busy($('#refresh'), $('#list-status'), loadContracts));
 
-// Connect at once if MetaMask already allows this page; otherwise wait for the button.
+// Connect at once if the wallet already allows this page; otherwise wait for the button.
 window.ethereum?.request({ method: 'eth_accounts' }).then((accounts) => {
   if (accounts?.length) start(false);
 }).catch(() => {});
@@ -25,7 +25,7 @@ async function start(fromButton) {
   const button = $('#connect');
   button.disabled = true;
   try {
-    status($('#connect-status'), fromButton ? 'Approve the connection in MetaMask…' : 'Connecting…');
+    status($('#connect-status'), fromButton ? 'Approve the connection in your wallet…' : 'Connecting…');
     ibc = await connect();
     $('#who').textContent = `Agent ${ibc.agent} · node ${location.host}`;
     $('#connect-card').classList.add('hidden');
@@ -44,7 +44,7 @@ async function showAgent() {
 }
 
 async function loadContracts() {
-  status($('#list-status'), 'Sign the query in MetaMask to list your contracts…');
+  status($('#list-status'), `Loading your contracts…${readNote(ibc)}`);
   const list = await ibc.contracts();
   const body = $('#contracts tbody');
   body.replaceChildren();
@@ -110,7 +110,7 @@ $('#deploy').addEventListener('submit', (event) => {
     }
     const name = $('#d-name').value.trim();
     const constructor = ctorInputs.read();
-    status($('#deploy-status'), 'Sign the deploy in MetaMask, then wait for the node…');
+    status($('#deploy-status'), 'Sign the deploy in your wallet, then wait for the node…');
     const id = await ibc.deploy({ name, code, abi, constructor, protocol: $('#d-protocol').value });
     addRow({ id, name, protocol: $('#d-protocol').value, block_number: 1 });
     const done = $('#deploy-status');
@@ -141,7 +141,7 @@ $('#join').addEventListener('submit', (event) => {
   event.preventDefault();
   busy($('#j-submit'), $('#join-status'), async () => {
     const contract = $('#j-contract').value.trim();
-    status($('#join-status'), 'Sign the join in MetaMask, then wait for the members to decide…');
+    status($('#join-status'), 'Sign the join in your wallet, then wait for the members to decide…');
     const joined = await ibc.join(contract, $('#j-node').value.trim(), $('#j-agent').value.trim());
     if (joined !== true) {
       status($('#join-status'), 'The contract refused the join.', 'bad');

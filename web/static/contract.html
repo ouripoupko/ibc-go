@@ -10,15 +10,15 @@
 <body>
   <header class="top">
     <h1><a href="./">ibc</a> <span id="title-name" class="hint"></span></h1>
-    <div class="who" id="who">Not connected</div>
+    <div class="who"><div id="who">Not connected</div><div id="session"></div></div>
   </header>
   <main>
     <p><a href="./">← Your contracts</a></p>
 
     <section class="card" id="connect-card">
       <h2>Connect</h2>
-      <p>Connect MetaMask, then sign a query to open this contract.</p>
-      <button id="connect">Connect MetaMask</button>
+      <p>Connect your wallet to open this contract.</p>
+      <button id="connect">Connect wallet</button>
       <div class="status" id="connect-status"></div>
     </section>
 
@@ -40,8 +40,8 @@
 
       <section class="card" id="reads-card">
         <h2>Read</h2>
-        <p class="hint">A read changes nothing. You sign a query; the contract sees you as
-          <code>msg.sender</code>.</p>
+        <p class="hint">A read changes nothing. It is signed by your reading session; the
+          contract sees you as <code>msg.sender</code>.</p>
         <div id="reads"></div>
       </section>
 

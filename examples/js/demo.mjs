@@ -1,5 +1,5 @@
 // Deploys the example contracts and calls them, with the client in ibc.mjs.
-// In a browser you would sign with MetaMask; here an ethers.js wallet signs.
+// In a browser you would sign with a browser wallet; here an ethers.js wallet signs.
 //
 //   cd examples/js && npm install          # once: installs ethers
 //   node demo.mjs [node-url]
