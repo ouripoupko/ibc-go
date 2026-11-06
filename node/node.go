@@ -102,7 +102,11 @@ func New(cfg Config) (*Node, error) {
 	if err := n.consensus.Start(); err != nil {
 		return nil, errors.Join(fmt.Errorf("start consensus: %w", err), n.Close())
 	}
-	api := dispatcher.New(n.navigator, n.consensus, n.broker, identity.Address(n.nodeKey), n.done)
+	data := &storage{}
+	if cfg.DB == nil {
+		data.dir = cfg.DataDir
+	}
+	api := dispatcher.New(n.navigator, n.consensus, n.broker, identity.Address(n.nodeKey), data.Size, n.done)
 	mux := http.NewServeMux()
 	mux.Handle("/ibc/", api)
 	mux.Handle("/stream", api)

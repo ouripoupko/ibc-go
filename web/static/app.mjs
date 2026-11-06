@@ -34,6 +34,35 @@ export async function connect() {
   return ibc;
 }
 
+// The node's storage: the size of its data folder, from node_info (public).
+
+/** Bytes in a short form: 1.2 GB. */
+export function sizeText(bytes) {
+  const units = ['bytes', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0;
+  let n = bytes;
+  while (n >= 1000 && i < units.length - 1) {
+    n /= 1000;
+    i++;
+  }
+  return i === 0 ? `${n} bytes` : `${n.toFixed(n < 10 ? 1 : 0)} ${units[i]}`;
+}
+
+async function showStorage() {
+  const footer = document.querySelector('#storage');
+  if (!footer) return;
+  try {
+    const info = await (await fetch(`${location.origin}/ibc/app?action=node_info`)).json();
+    if (typeof info.storage === 'number') {
+      footer.textContent = `Node storage: ${sizeText(info.storage)}`;
+      footer.title = `${info.storage.toLocaleString()} bytes in the node's data folder`;
+    }
+  } catch {
+    // no footer
+  }
+}
+showStorage();
+
 // Explaining signatures. Every time the wallet is asked to sign, a message
 // box says in plain words what the signature does. It has no close button:
 // it closes when the wallet answers, whether the user signed or declined.

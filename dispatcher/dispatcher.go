@@ -49,16 +49,18 @@ type Dispatcher struct {
 	consensus consensus.Protocol
 	broker    *Broker
 	nodeKey   ethcommon.Address
+	storage   func() (int64, bool)
 	done      <-chan struct{}
 	mux       *http.ServeMux
 	guard     *guard
 }
 
 // New returns a Dispatcher. nodeKey is the address of the node's key, which
-// agents authorize when they register. Event streams end when done is closed.
+// agents authorize when they register. storage reports the size of the
+// node's data folder, if it has one. Event streams end when done is closed.
 func New(navigator *execution.Navigator, protocol consensus.Protocol, broker *Broker,
-	nodeKey ethcommon.Address, done <-chan struct{}) *Dispatcher {
-	d := &Dispatcher{navigator: navigator, consensus: protocol, broker: broker, nodeKey: nodeKey, done: done,
+	nodeKey ethcommon.Address, storage func() (int64, bool), done <-chan struct{}) *Dispatcher {
+	d := &Dispatcher{navigator: navigator, consensus: protocol, broker: broker, nodeKey: nodeKey, storage: storage, done: done,
 		guard: newGuard(nodeKey)}
 	d.mux = http.NewServeMux()
 	d.mux.HandleFunc("/ibc/app", d.handleApp)
@@ -130,7 +132,11 @@ func (d *Dispatcher) handle(ctx context.Context, record execution.Record, body [
 	type route struct{ method, action string }
 	switch (route{record.Type, record.Action}) {
 	case route{http.MethodGet, actionNodeInfo}:
-		return map[string]any{"nodeKey": d.nodeKey.Hex()}, nil
+		info := map[string]any{"nodeKey": d.nodeKey.Hex()}
+		if size, ok := d.storage(); ok {
+			info["storage"] = size
+		}
+		return info, nil
 
 	case route{http.MethodGet, actionIsExistAgent}:
 		return d.navigator.AgentExists(record.Agent)

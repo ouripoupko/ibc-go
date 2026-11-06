@@ -24,7 +24,8 @@ This is the Go version of [ibc](https://github.com/ouripoupko/ibc):
 
 | Document | For |
 |---|---|
-| This page | Running a node |
+| This page | Running a node on your computer |
+| [Deploying on a server](docs/deploy.md) | Running a node on a Linux server with HTTPS: service, Caddy, backups, updates |
 | [Usage guide](docs/usage.md) | Writing contracts, compiling them, and calling them from the shell or JavaScript |
 | [API reference](docs/api.md) | Every HTTP call, its parameters, replies, events and errors |
 | [Example contracts](examples/) | Counter, Poll and Board in Solidity, with a shell client and a JavaScript client |
@@ -89,6 +90,9 @@ or [Rabby](https://rabby.io), to use the node's
 web interface: register, deploy compiled contracts, join contracts, and call their functions.
 Continue with the [usage guide](docs/usage.md) for the details, and for the shell and JavaScript
 clients.
+
+To run a node on a server, reachable by others over HTTPS, see
+[Deploying on a server](docs/deploy.md).
 
 To stop the node, press Ctrl-C. It finishes the work it has already accepted, then exits. Your data
 stays in the data directory, and the node picks up from there when you start it again.

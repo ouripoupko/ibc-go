@@ -732,6 +732,11 @@ func TestDataSurvivesRestart(t *testing.T) {
 	cid := alice.deploy(t, a, events, "Registry", "", map[string]any{"initialName": "kept", "start": 0})
 	alice.write(t, a, events, cid, "setValue", map[string]any{"value": 5})
 	nodeKey := a.NodeKey()
+	// node_info reports the size of the data folder.
+	info := call(t, a.URL, "GET", "", "node_info", "", "", nil).(map[string]any)
+	if size, err := info["storage"].(json.Number).Int64(); err != nil || size <= 0 {
+		t.Fatalf("node_info storage = %v", info["storage"])
+	}
 	if err := a.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -806,7 +811,8 @@ func TestWebInterface(t *testing.T) {
 		t.Errorf("POST /: %s", resp.Status)
 	}
 	// The API is still reached under /ibc/app.
-	if info := call(t, a.URL, "GET", "", "node_info", "", "", nil).(map[string]any); info["nodeKey"] != a.NodeKey() {
+	// A node without a data folder (in memory) reports no storage.
+	if info := call(t, a.URL, "GET", "", "node_info", "", "", nil).(map[string]any); info["nodeKey"] != a.NodeKey() || info["storage"] != nil {
 		t.Errorf("node_info = %v", info)
 	}
 }

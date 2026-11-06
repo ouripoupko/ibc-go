@@ -78,6 +78,8 @@ supported yet.
   shows its result once all members have applied it. Reverts are shown in red. The page also
   shows an **invite** to give to people who should join, and a button to leave.
 
+The bottom of each page shows the node's storage: the size of its data folder.
+
 Arguments are typed as in [Arguments](#arguments): numbers and addresses as plain text, arrays and
 structs as JSON.
 

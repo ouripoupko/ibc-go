@@ -250,8 +250,14 @@ an array if it returns several.
 GET /ibc/app?action=node_info
 ```
 
-**Reply:** `{"nodeKey": "0x57E3…"}`, the address of the node's key. Registrations, deploys and joins
-name it.
+**Reply:** `{"nodeKey": "0x57E3…", "storage": 1234567}`.
+
+| Field | Meaning |
+|---|---|
+| `nodeKey` | The address of the node's key. Registrations, deploys and joins name it |
+| `storage` | The size of the node's data folder (the database and the node key), in bytes. Measured at most every 30 seconds. Missing if the node keeps its data in memory |
+
+Logs are not counted: the node writes them to standard error, not to the data folder.
 
 ## Agents
 
