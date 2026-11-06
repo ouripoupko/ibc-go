@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ibc · Contracts</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <h1><a href="./">ibc</a></h1>
+    <div class="who" id="who">Not connected</div>
+  </header>
+  <main>
+    <section class="card" id="connect-card">
+      <h2>Connect</h2>
+      <p>This page works with your contracts on this node. You sign everything in MetaMask: the node
+        never holds your key. Every call asks for a signature, including reading.</p>
+      <button id="connect">Connect MetaMask</button>
+      <div class="status" id="connect-status"></div>
+    </section>
+
+    <section class="card hidden" id="register-card">
+      <h2>Register on this node</h2>
+      <p>Your agent is not registered here yet. Registering authorizes this node to take part in
+        consensus for your contracts. It cannot sign anything as you.</p>
+      <button id="register">Register</button>
+      <div class="status" id="register-status"></div>
+    </section>
+
+    <div id="agent-area" class="hidden">
+      <section class="card">
+        <div class="row" style="justify-content: space-between">
+          <h2 style="margin: 0">Your contracts</h2>
+          <button class="secondary" id="refresh">Refresh</button>
+        </div>
+        <div class="status" id="list-status"></div>
+        <table id="contracts" class="hidden">
+          <thead><tr><th>Name</th><th>Contract id</th><th class="optional">Protocol</th><th class="optional">Transactions</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </section>
+
+      <section class="card">
+        <h2>Deploy a contract</h2>
+        <p class="hint">Give the compiled contract: its bytecode (<code>.bin</code>) and its ABI
+          (<code>.abi</code>), for example from <code>solc --bin --abi</code>.</p>
+        <form id="deploy">
+          <label for="d-name">Name</label>
+          <input type="text" id="d-name" required placeholder="my-counter" autocomplete="off">
+          <label for="d-bin">Bytecode (.bin)</label>
+          <input type="file" id="d-bin-file" accept=".bin,.txt">
+          <textarea id="d-bin" placeholder="6080604052…" spellcheck="false"></textarea>
+          <label for="d-abi">ABI (.abi or .json)</label>
+          <input type="file" id="d-abi-file" accept=".abi,.json">
+          <textarea id="d-abi" placeholder='[{"type": "function", …}]' spellcheck="false"></textarea>
+          <label for="d-protocol">Consensus protocol</label>
+          <select id="d-protocol">
+            <option value="cordial">Cordial Miners (default)</option>
+            <option value="immediate">Immediate (single member, for testing)</option>
+          </select>
+          <div id="d-ctor"></div>
+          <button type="submit" id="d-submit">Deploy</button>
+          <div class="status" id="deploy-status"></div>
+        </form>
+      </section>
+
+      <section class="card">
+        <h2>Join a contract</h2>
+        <p class="hint">Ask a member to let you join. Paste the invite a member gave you, or fill in
+          the fields. The contract's own rules decide.</p>
+        <form id="join">
+          <label for="j-invite">Invite</label>
+          <textarea id="j-invite" placeholder="Paste an invite code" spellcheck="false" style="min-height: 44px"></textarea>
+          <label for="j-contract">Contract id</label>
+          <input type="text" id="j-contract" required autocomplete="off" placeholder="0x…">
+          <label for="j-node">Member's node</label>
+          <input type="url" id="j-node" required autocomplete="off" placeholder="https://…">
+          <label for="j-agent">Member's agent id</label>
+          <input type="text" id="j-agent" required autocomplete="off" placeholder="0x…">
+          <button type="submit" id="j-submit">Ask to join</button>
+          <div class="status" id="join-status"></div>
+        </form>
+      </section>
+    </div>
+  </main>
+  <script type="module" src="index.mjs"></script>
+</body>
+</html>

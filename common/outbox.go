@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 )
@@ -161,88 +160,4 @@ func (o *Outbox) run() {
 			slog.Warn("send to partner failed", "url", req.URL, "err", err)
 		}
 	}
-}
-
-// Partner is another agent taking part in a contract (Python common/partner.py).
-type Partner struct {
-	Address   string // the partner's node URL
-	PID       string // the partner's agent id
-	MyAddress string // this agent's node URL
-	Me        string // this agent's id
-
-	sender Sender  // for direct requests
-	outbox *Outbox // for queued requests; may be nil if none are made
-}
-
-// NewPartner returns a Partner. sender delivers direct requests (Connect,
-// GetLedger); outbox queues the others (ReplyJoin, Consent).
-func NewPartner(address, pid, myAddress, me string, sender Sender, outbox *Outbox) *Partner {
-	return &Partner{Address: address, PID: pid, MyAddress: myAddress, Me: me, sender: sender, outbox: outbox}
-}
-
-func (p *Partner) url(contract string) string {
-	return strings.TrimRight(p.Address, "/") + "/ibc/app/" + url.PathEscape(p.PID) + "/" + url.PathEscape(contract)
-}
-
-// Connect asks the partner to let this agent join contract (a2a_connect).
-func (p *Partner) Connect(ctx context.Context, contract string, profile any) error {
-	_, err := p.sender.Send(ctx, Request{
-		Method: http.MethodPut,
-		URL:    p.url(contract),
-		Params: map[string]string{"action": "a2a_connect"},
-		JSON: map[string]any{"from": p.Me, "to": p.PID,
-			"msg": map[string]any{"address": p.MyAddress, "pid": p.Me, "profile": profile}},
-	})
-	return err
-}
-
-// ReplyJoin queues the answer to the partner's join request (a2a_reply_join).
-func (p *Partner) ReplyJoin(contract string, status bool) error {
-	return p.queue(Request{
-		Method: http.MethodPut,
-		URL:    p.url(contract),
-		Params: map[string]string{"action": "a2a_reply_join"},
-		JSON: map[string]any{"from": p.Me, "to": p.PID,
-			"msg": map[string]any{"address": p.MyAddress, "pid": p.Me, "status": status}},
-	})
-}
-
-// GetLedger fetches the partner's ledger of contract (a2a_get_ledger) and
-// returns the raw JSON reply.
-func (p *Partner) GetLedger(ctx context.Context, contract string, index int) (json.RawMessage, error) {
-	body, err := p.sender.Send(ctx, Request{
-		Method: http.MethodPost,
-		URL:    p.url(contract),
-		Params: map[string]string{"action": "a2a_get_ledger"},
-		JSON: map[string]any{"from": p.Me, "to": p.PID,
-			"msg": map[string]any{"index": index, "pid": p.Me}},
-	})
-	if err != nil {
-		return nil, err
-	}
-	if !json.Valid(body) {
-		return nil, fmt.Errorf("a2a_get_ledger: reply is not JSON")
-	}
-	return body, nil
-}
-
-// Consent queues a consensus protocol message (a2a_consent).
-func (p *Partner) Consent(contract, step string, data any) error {
-	return p.queue(Request{
-		Method: http.MethodPut,
-		URL:    p.url(contract),
-		Params: map[string]string{"action": "a2a_consent"},
-		JSON:   map[string]any{"from": p.Me, "to": p.PID, "msg": map[string]any{"step": step, "data": data}},
-	})
-}
-
-func (p *Partner) queue(req Request) error {
-	if p.outbox == nil {
-		return errors.New("partner has no outbox")
-	}
-	return p.outbox.Put(req)
-}
-
-func (p *Partner) String() string {
-	return fmt.Sprintf("Partner{id: %s, address: %s}", p.PID, p.Address)
 }

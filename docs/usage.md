@@ -1,33 +1,83 @@
 # Usage guide
 
-This guide takes you from a running node to a deployed contract you can call. It assumes a node is
-running at `http://localhost:2611`; the [README](../README.md) shows how to start one. Every call
-used here is described in full in the [API reference](api.md).
+This guide takes you from a running node to a contract you share with other agents. It assumes a
+node is running at `http://localhost:2611`; the [README](../README.md) shows how to start one.
+Every call used here is described in full in the [API reference](api.md).
 
 - [Concepts](#concepts)
+- [Your key](#your-key)
+- [The web interface](#the-web-interface)
 - [Write a contract](#write-a-contract)
 - [Compile it](#compile-it)
 - [Call ibc from the shell](#call-ibc-from-the-shell)
-- [The same calls with curl](#the-same-calls-with-curl)
 - [Call ibc from JavaScript](#call-ibc-from-javascript)
 - [The example contracts](#the-example-contracts)
-- [Joining another agent's contract](#joining-another-agents-contract)
+- [Sharing a contract](#sharing-a-contract)
+- [Without the helpers: curl](#without-the-helpers-curl)
 - [Common errors](#common-errors)
 
 ## Concepts
 
-- **Agent.** Every request acts as an agent, identified by a string you choose, such as a UUID or
-  a user name. An agent is registered on a node once, with the address at which other nodes can
-  reach it.
-- **Contract.** A program you deploy. Deploying returns the contract's id, which every later call
-  uses. Each contract has its own state, separate from every other contract.
-- **Partners.** The agents who share a contract. Each partner's node keeps its own copy of the
-  contract.
-- **Writes and reads.** A *write* (`contract_write`) is a transaction: it can change the
-  contract's state, it is recorded in the contract's ledger, and its result arrives later on the
-  event stream. A *read* (`contract_read`) changes nothing and answers at once.
+- **Agent.** You, as ibc sees you. Your agent id is the address of your Ethereum key, for example
+  `0x86D637BcBc56F0Dba2b0B5398B4446b5e5330851`. You register it once on the node you choose.
+- **Node.** The server your agent lives on. It runs your contracts and talks to your partners'
+  nodes, but it never holds your key: everything you do is signed by you.
+- **Contract.** A Solidity program you deploy. Deploying returns the contract's id, which every
+  later call uses. Each contract has its own state.
+- **Partners.** The agents who share a contract. Each partner's node keeps its own copy, and the
+  partners agree on the order of every transaction with the [consensus protocol](consensus.md).
+- **Writes and reads.** A *write* (`contract_write`) is a signed transaction: it can change the
+  contract's state, all partners apply it, and its result arrives on the event stream. A *read*
+  (`contract_read`) changes nothing and answers at once. Reads are signed too: the contract sees
+  the reader as `msg.sender`, and can refuse readers it does not want.
 - **Event stream.** A long-lived HTTP connection (`/stream`) on which the node reports the outcome
-  of every deploy, write and join. Open it before you send a write, so you do not miss the result.
+  of every deploy, write, join and leave. Open it before you send a write.
+
+## Your key
+
+Every transaction is signed with your Ethereum key, using EIP-712 (MetaMask's
+`eth_signTypedData_v4`). The node checks each signature, and so does every partner.
+
+- **In a web app**, the user signs in **MetaMask**. The JavaScript client below does that for you.
+- **From the shell**, keep a key in a file and let the `ibc` program sign with it:
+
+  ```sh
+  ./ibc key new ~/.ibc/alice.key        # prints the new key's address: your agent id
+  ./ibc key address ~/.ibc/alice.key    # prints it again
+  ```
+
+  The file holds a private key. Keep it private (it is created readable by you only), and keep a
+  backup: losing it means losing your agent.
+
+When you register, you also authorize your node's own key to sign *consensus blocks* for you. That
+key cannot sign transactions in your name; it only takes part in ordering them.
+
+## The web interface
+
+The node serves a web interface at its own address, for example `http://localhost:2611`. Open it in
+a browser with [MetaMask](https://metamask.io): MetaMask holds your key, and the page asks it to
+sign every call. The node never sees your key.
+
+- **Your contracts.** Connect MetaMask, and register on the node the first time. The page lists
+  your contracts on this node; it cannot list other agents' contracts.
+- **Deploy.** Choose the compiled contract's `.bin` and `.abi` files ([Compile it](#compile-it)
+  shows how to make them), or paste them. The page shows a field for each constructor argument.
+- **Join.** Paste an invite from a member, or enter the contract id, the member's node URL and the
+  member's agent id. The contract's own rules decide.
+- **A contract's page.** Click a contract to see its details and a form for each function in its
+  ABI. *Read* runs a `view` function and shows the result at once; *Send* sends a transaction and
+  shows its result once all members have applied it. Reverts are shown in red. The page also
+  shows an **invite** to give to people who should join, and a button to leave.
+
+Arguments are typed as in [Arguments](#arguments): numbers and addresses as plain text, arrays and
+structs as JSON.
+
+Every call is a MetaMask signature, reads included: listing your contracts, opening a contract, each
+read, each transaction, and the first transaction on a page (which opens the event stream). Session
+keys, which would sign without asking each time, are planned.
+
+MetaMask works with pages at `http://localhost`. To use a node over the network, put it behind
+HTTPS, as with any page that uses a wallet.
 
 ## Write a contract
 
@@ -69,8 +119,8 @@ contract Counter {
 
 | In Solidity | On ibc |
 |---|---|
-| `msg.sender`, `tx.origin` | The calling agent. Its address is `keccak256(agent id)`, last 20 bytes. Every agent always has the same address |
-| `block.timestamp` | The time the node received the request, in seconds |
+| `msg.sender`, `tx.origin` | The agent who signed the transaction: its key's address |
+| `block.timestamp` | The time of the consensus block that carried the transaction, in seconds |
 | `block.number` | How many records the contract has processed |
 | Return values | A write's return value arrives on the event stream; a read's comes back in the HTTP reply |
 | `require` / `revert` messages, custom errors | Become the reply, for example `execution reverted: amount must be positive` or `execution reverted: AlreadyVoted(1)` |
@@ -82,21 +132,43 @@ contract Counter {
 | `block.coinbase`, `block.prevrandao`, `block.basefee`, `blockhash` | Always zero |
 | Gas | Each call may use up to 100 million gas. Nobody pays for it; it only stops runaway code |
 
-Every partner runs the same calls on the same inputs and must reach the same state, so a contract
-cannot see anything that differs between nodes. That is why the fields above are fixed.
+Every partner runs the same transactions in the same order and must reach the same state, so a
+contract cannot see anything that differs between nodes. That is why the fields above are fixed.
 
 Solidity features up to the Osaka fork work, so recent compilers can be used with their default
 settings.
+
+### Who may join, and who may remove
+
+A contract can decide its own membership by defining these functions. ibc calls them when a join or
+a removal is ordered:
+
+```solidity
+/// Called as the joining agent. Return true to let it join.
+function approve_partner(address partner) external view returns (bool);
+
+/// Called as the member who asks to remove another. Return true to remove it.
+function approve_removal(address member) external view returns (bool);
+```
+
+- **Without `approve_partner`**, every join is approved.
+- **Without `approve_removal`**, members cannot remove each other. Any member can always leave on
+  its own.
+
+[`testdata/Club.sol`](../testdata/Club.sol) is an example: the owner invites agents with
+`invite(address)`, only invited agents may join, and only the owner may remove others.
 
 ### Tips
 
 - **Return what the client needs.** A write's return value is the only result the client gets
   back from it, so return the new id or the new value.
-- **Use `view` functions for reads.** Any function can be called with `contract_read`, but only a
-  `view` function is guaranteed not to try to change anything. With `contract_read`, nothing
-  changes anyway: the call runs on a copy of the state, which is then thrown away.
-- **Use `msg.sender` for "me".** An app usually does not know an agent's address. A function like
-  `myVote()` or `whoAmI()` lets the agent ask the contract.
+- **Use `view` functions for reads.** With `contract_read`, nothing changes anyway: the call runs
+  on a copy of the state, which is then thrown away.
+- **Use `msg.sender` for "me".** A function like `myVote()` or `whoAmI()` lets an agent ask the
+  contract about itself.
+- **Decide who may read.** A read's `msg.sender` is whoever signed it, and anyone can sign one. To
+  keep something private, check the reader in the `view` function, for example
+  `require(isMember[msg.sender], "members only")`. A function without a check is public.
 - **Name your parameters.** Arguments are passed by the names in the ABI, so a parameter called
   `amount` is passed as `{"amount": 5}`.
 
@@ -127,16 +199,19 @@ solcjs names its output files after the source path and the contract, for exampl
 
 ## Call ibc from the shell
 
-[`examples/scripts/ibc.sh`](../examples/scripts/ibc.sh) is a small client built on `curl` and
-`jq`. It waits for each write's result on the event stream and prints just the result.
+[`examples/scripts/ibc.sh`](../examples/scripts/ibc.sh) is a small client built on `curl`, `jq`
+and the `ibc` program, which signs with your key file. It waits for each write's result on the
+event stream and prints just the result.
 
 ```sh
 export IBC_URL=http://localhost:2611   # the node (this is the default)
-export IBC_AGENT=alice                 # who you are
+export IBC_KEY=~/.ibc/alice.key        # your key file
+export IBC_BIN=./ibc                   # the ibc program
 alias ibc=examples/scripts/ibc.sh
 
+ibc newkey                             # once: creates IBC_KEY
 ibc register
-# registered alice at http://localhost:2611
+# registered 0x86D637BcBc56F0Dba2b0B5398B4446b5e5330851 at http://localhost:2611
 
 C=$(ibc deploy Counter '{"start": 10}')       # deploys build/Counter.bin, prints the contract id
 
@@ -149,91 +224,40 @@ ibc read "$C" count
 # 15
 ibc read "$C" myContribution
 # 5
-ibc read "$C" owner
-# "0x5dad7600C5D89fE3824fFa99ec1c3eB8BF3b0501"
 ```
 
 Other commands:
 
 ```sh
-ibc exists                 # is IBC_AGENT registered on the node?
-ibc contracts              # the agent's contracts
+ibc whoami                 # your agent id
+ibc exists                 # are you registered on the node?
+ibc contracts              # your contracts
 ibc contract "$C"          # one contract's details
-ibc ledger "$C"            # the records the contract has processed
-ibc stream                 # follow every event of the agent (Ctrl-C to stop)
+ibc stream                 # follow your events (Ctrl-C to stop)
 ```
 
 Run `examples/scripts/ibc.sh` without arguments for the full list.
 
-## The same calls with curl
-
-Without the script, every call is one HTTP request. Open the event stream in one terminal:
-
-```sh
-curl -sN 'http://localhost:2611/stream?agent=alice&contract='
-```
-
-and send the requests from another:
-
-```sh
-IBC=http://localhost:2611
-
-# Register the agent, once per node.
-curl -s -X PUT "$IBC/ibc/app/alice?action=register_agent" \
-  -H 'Content-Type: application/json' -d "{\"address\": \"$IBC\"}"
-
-# Build the deploy message: bytecode, ABI, and constructor arguments by name.
-jq -n --arg address "$IBC" \
-  --arg code "$(cat examples/build/Counter.bin)" \
-  --rawfile abi examples/build/Counter.abi \
-  '{name: "my-counter", contract: "Counter.sol", protocol: "BFT", default_app: "",
-    pid: "alice", address: $address, profile: "",
-    code: $code, abi: $abi, constructor: {start: 10}}' > deploy.json
-
-# Deploy. The reply is the new contract's id.
-CONTRACT=$(curl -s -X PUT "$IBC/ibc/app/alice?action=deploy_contract" \
-  -H 'Content-Type: application/json' -d @deploy.json | jq -r .)
-
-# A write. The reply is a request id; the result appears on the event stream.
-curl -s -X POST "$IBC/ibc/app/alice/$CONTRACT/increment?action=contract_write" \
-  -H 'Content-Type: application/json' -d '{"values": {"amount": 5}}'
-
-# A read. The reply is the result.
-curl -s -X POST "$IBC/ibc/app/alice/$CONTRACT/count?action=contract_read" \
-  -H 'Content-Type: application/json' -d '{"values": {}}'
-```
-
-The URL always has the form `/ibc/app/<agent>/<contract>/<method>?action=<action>`. The agent in
-the URL is the caller: it becomes `msg.sender`.
-
-On the stream, each result is one line:
-
-```
-data: {"request":"f64c…","contract":null,"action":"register_agent","reply":true,"agent":"alice"}
-data: {"request":"520f…","contract":"520f…","action":"deploy_contract","reply":true,"state_root":"0x…","agent":"alice"}
-data: {"request":"c690…","contract":"520f…","action":"contract_write","reply":15,"state_root":"0x…","agent":"alice"}
-```
-
-Match `request` with the id you got when you sent the request. Empty `data:` lines are keep-alives.
-
 ## Call ibc from JavaScript
 
-[`examples/js/ibc.mjs`](../examples/js/ibc.mjs) is a small client without dependencies. It works
-in browsers and in Node.js 18 and later. It opens the event stream for you and resolves each write
-with its result:
+[`web/static/ibc.mjs`](../web/static/ibc.mjs) is a small client without dependencies; the web
+interface uses it, and every node serves it at `/ibc.mjs`. It works
+in browsers and in Node.js 18 and later. It signs through a *signer*: MetaMask in a browser, or
+any object with `getAddress()` and `signTypedData(domain, types, message)`, such as an ethers.js
+wallet. It opens the event stream for you and resolves each write with its result:
 
 ```js
 import { Ibc } from './ibc.mjs';
 
-const ibc = new Ibc('http://localhost:2611', 'alice');
-await ibc.register();
+const ibc = await Ibc.connect('http://localhost:2611', Ibc.metamask(window.ethereum));
+await ibc.register();                    // MetaMask asks the user to sign
 
 const code = await (await fetch('/build/Counter.bin')).text();
 const abi = await (await fetch('/build/Counter.abi')).text();
 const counter = await ibc.deploy({ name: 'my-counter', code, abi, constructor: { start: 10 } });
 
-await ibc.write(counter, 'increment', { amount: 5 });   // 15
-await ibc.read(counter, 'count');                       // 15
+await ibc.write(counter, 'increment', { amount: 5 });   // 15 (one signature)
+await ibc.read(counter, 'count');                       // 15 (one signature)
 
 try {
   await ibc.write(counter, 'increment', { amount: 0 });
@@ -244,21 +268,21 @@ try {
 ibc.close();
 ```
 
+Every call asks the user to approve a signature in MetaMask: each write, deploy, join and leave,
+each read, and opening the event stream. (Session keys, which would sign without asking each
+time, are planned.)
+
 [`examples/js/demo.mjs`](../examples/js/demo.mjs) deploys and calls all three examples from
-Node.js:
+Node.js, signing with an ethers.js wallet:
 
 ```sh
-node examples/js/demo.mjs http://localhost:2611 alice
+cd examples/js && npm install && node demo.mjs http://localhost:2611
 ```
 
-If you would rather write your own client, the pattern is in the
-[API reference](api.md#the-event-stream): open the stream, send the request, and wait for the
-event whose `request` matches the id you got back.
-
 > **Large numbers in JavaScript.** Results are exact JSON numbers. `JSON.parse` keeps integers
-> exactly only up to 2^53. For values that can grow beyond that, such as token amounts in wei,
-> return them as `string` from the contract, or parse the reply with a big-number-aware parser.
-> When you *send* a large integer, pass it as a string: `{"amount": "1000000000000000000000"}`.
+> exactly only up to 2^53. For values that can grow beyond that, return them as `string` from the
+> contract, or parse the reply with a big-number-aware parser. When you *send* a large integer,
+> pass it as a string: `{"amount": "1000000000000000000000"}`.
 
 ## The example contracts
 
@@ -304,11 +328,9 @@ B=$(ibc deploy Board)
 ibc write "$B" post '{"text": "hello ibc"}'
 # 0
 ibc read "$B" getPost '{"id": 0}'
-# {"author":"0x5dad7600C5D89fE3824fFa99ec1c3eB8BF3b0501","text":"hello ibc","time":1793900673}
-ibc read "$B" latest '{"limit": 5}'
-# [{"author":"0x5dad…","text":"hello ibc","time":1793900673}]
+# {"author":"0x86D637BcBc56F0Dba2b0B5398B4446b5e5330851","text":"hello ibc","time":1793900673}
 ibc read "$B" whoAmI
-# "0x5dad7600C5D89fE3824fFa99ec1c3eB8BF3b0501"
+# "0x86D637BcBc56F0Dba2b0B5398B4446b5e5330851"
 ```
 
 A struct comes back as a JSON object keyed by its field names, and an array of structs as an array
@@ -323,37 +345,124 @@ Pass arguments as a JSON object keyed by the parameter names in the ABI:
 | `uint256`, `int64`, … | `5`, or a string: `"5"`, `"0x05"` | `5` |
 | `bool` | `true` | `true` |
 | `string` | `"hello"` | `"hello"` |
-| `address` | `"0x5dad7600C5D89fE3824fFa99ec1c3eB8BF3b0501"` | the same, checksummed |
+| `address` | `"0x86D637BcBc56F0Dba2b0B5398B4446b5e5330851"` | the same, checksummed |
 | `bytes`, `bytes32` | `"0x00ff…"` | `"0x00ff…"` |
 | `string[]`, `uint256[3]` | `["a", "b"]` | `["a", "b"]` |
 | struct | `{"author": "0x…", "text": "hi"}` | the same |
 
 A parameter without a name, such as the key of a `public` mapping's getter, is passed by its
-position: `ibc read "$C" contributions '{"0": "0x5dad…"}'`.
+position: `ibc read "$C" contributions '{"0": "0x86D6…"}'`.
 
-## Joining another agent's contract
+## Sharing a contract
 
-An agent joins a contract by asking one of its partners, on the partner's node:
+Two people, each with an agent on their own node: alice on node 1, bob on node 2.
 
 ```sh
-IBC_AGENT=bob ibc register
-IBC_AGENT=bob ibc join "$C" http://localhost:2611 alice
+# alice, on node 1
+export IBC_URL=http://node1:2611 IBC_KEY=~/.ibc/alice.key
+C=$(ibc deploy Counter '{"start": 10}')
+ibc whoami                       # alice tells bob the contract id and her agent id
+
+# bob, on node 2
+export IBC_URL=http://node2:2611 IBC_KEY=~/.ibc/bob.key
+ibc join "$C" http://node1:2611 0x86D637BcBc56F0Dba2b0B5398B4446b5e5330851
+# joined 0x67bb…
+ibc write "$C" increment '{"amount": 7}'
+# 22
+
+# alice sees bob's write
+ibc read "$C" count
+# 22
 ```
 
-The partner's node answers on bob's event stream with an `a2a_reply_join` event.
+What happens:
 
-> **Not available yet.** Joins are never approved in this version (`approve_partner` is not
-> defined for Solidity contracts yet), and partners do not exchange writes until the consensus
-> protocol is written. For now, only the agent that deployed a contract can use it. Calls by any
-> other agent are answered with `unknown contract`.
+1. Bob's join is a transaction signed by bob. His node passes it to alice's node, and the contract's
+   partners order it like any other transaction.
+2. When it is ordered, the contract decides with its `approve_partner` function (Counter has none,
+   so the join is approved).
+3. Bob's node receives the contract's history from alice's node, replays it, checks that it reaches
+   the same state, and from then on takes part in consensus. Bob's stream reports `join_contract`
+   with `true`; a refused join reports `false`.
+
+While a membership change is being decided, the contract pauses other transactions; they are
+processed right after. To leave:
+
+```sh
+ibc leave "$C"                    # bob leaves
+ibc leave "$C" 0x…                # ask to remove another member (needs approve_removal)
+```
+
+Keep in mind:
+
+- **Partners must be online.** A contract makes progress only while a supermajority of its
+  partners' nodes are reachable; with two partners, both. See the
+  [consensus design](consensus.md#1-goals).
+- **Partners' nodes must reach each other** at the addresses the agents registered.
+
+## Without the helpers: curl
+
+Every call is one HTTP request. A write carries a signed transaction, and a read or the event
+stream a signed query. The `ibc` program signs; `jq` builds the JSON. Open the event stream in one
+terminal (the signed query goes in the URL):
+
+```sh
+curl -sN -G http://localhost:2611/stream \
+  --data-urlencode "auth=$(./ibc sign query -key ~/.ibc/alice.key -action stream)"
+```
+
+and send the requests from another:
+
+```sh
+IBC=http://localhost:2611
+KEY=~/.ibc/alice.key
+ME=$(./ibc key address $KEY)
+NODE_KEY=$(curl -s "$IBC/ibc/app?action=node_info" | jq -r .nodeKey)
+
+# Register: a registration signed with your key.
+./ibc sign registration -key $KEY -node $IBC -node-key $NODE_KEY |
+  curl -s -X PUT "$IBC/ibc/app/$ME?action=register_agent" -H 'Content-Type: application/json' -d @-
+
+# Deploy: a deploy transaction. The reply is the new contract's id.
+BODY=$(jq -cn --arg node $IBC --arg nodeKey $NODE_KEY \
+  --arg code "$(cat examples/build/Counter.bin)" --slurpfile abi examples/build/Counter.abi \
+  '{name: "my-counter", code: $code, abi: $abi[0], constructor: {start: 10}, node: $node, nodeKey: $nodeKey}')
+CONTRACT=$(./ibc sign tx -key $KEY -kind deploy -body "$BODY" |
+  curl -s -X PUT "$IBC/ibc/app/$ME?action=deploy_contract" -H 'Content-Type: application/json' -d @- | jq -r .)
+
+# Write: a call transaction. The reply is its id; the result appears on the event stream.
+./ibc sign tx -key $KEY -kind call -contract $CONTRACT -body '{"method": "increment", "values": {"amount": 5}}' |
+  curl -s -X POST "$IBC/ibc/app/$ME/$CONTRACT/increment?action=contract_write" -H 'Content-Type: application/json' -d @-
+
+# Read: a signed query. The reply is the result.
+./ibc sign query -key $KEY -action contract_read -contract $CONTRACT -body '{"method": "count", "values": {}}' |
+  curl -s -X POST "$IBC/ibc/app/$ME/$CONTRACT/count?action=contract_read" -H 'Content-Type: application/json' -d @-
+```
+
+On the stream, each result is one line:
+
+```
+data: {"request":"0x5d2c…","contract":null,"action":"register_agent","reply":true,"agent":"0x86D6…"}
+data: {"request":"0x67bb…","contract":"0x67bb…","action":"deploy_contract","reply":true,"state_root":"0x…","agent":"0x86D6…"}
+data: {"request":"0x9a00…","contract":"0x67bb…","action":"contract_write","reply":15,"state_root":"0x…","agent":"0x86D6…"}
+```
+
+Match `request` with the id you got when you sent the request. Empty `data:` lines are
+keep-alives.
 
 ## Common errors
 
 | Reply | Meaning |
 |---|---|
-| `{"message": "unknown agent \"alice\""}` | Register the agent first |
-| `{"message": "unknown contract \"…\" of agent \"bob\""}` | This agent does not have the contract on this node. Check the id, and that the agent in the URL is the one who deployed it |
-| `{"message": "no such contract"}` | A read of a contract that does not exist, or whose deployment has not finished yet |
+| `{"message": "… signature does not match the agent"}` | The transaction was changed after it was signed, or signed by another key |
+| `{"message": "transaction signed by 0x…, sent as 0x…"}` | The agent in the URL is not the one who signed |
+| `{"message": "registration authorizes node key 0x…, this node's key is 0x…"}` | Sign the registration with the `nodeKey` from this node's `node_info` |
+| `{"message": "unknown agent \"0x…\""}` | Register first |
+| `{"message": "consensus: unknown contract 0x…"}` | You are not a partner of this contract on this node: check the id, or join it first |
+| `{"message": "no such contract"}` | A read of a contract you do not have, or whose deployment has not finished |
+| `{"message": "this call needs a signed query"}` | Reads, `get_contract(s)` and the event stream are signed: see the [API reference](api.md#queries) |
+| `{"message": "query expired, or its time is wrong: check the clock"}` | Sign the query just before you send it; the node accepts it for 60 seconds |
+| `{"message": "query already used"}` | Every query is accepted once: sign a new one for each call |
 | `"increment: missing argument \"amount\""` | A key in `values` is missing or misspelled. Names must match the ABI exactly |
 | `"increment: unexpected argument \"amout\""` | A key in `values` that the method does not have |
 | `"unknown method \"incremnt\""` | No function with that name in the ABI |

@@ -6,30 +6,43 @@ package node
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethdb"
 
 	"github.com/ouripoupko/ibc-go/common"
 	"github.com/ouripoupko/ibc-go/consensus"
+	"github.com/ouripoupko/ibc-go/consensus/cordial"
 	"github.com/ouripoupko/ibc-go/dispatcher"
 	"github.com/ouripoupko/ibc-go/execution"
+	"github.com/ouripoupko/ibc-go/identity"
+	"github.com/ouripoupko/ibc-go/web"
 )
 
 // Config configures a Node.
 type Config struct {
-	// DataDir holds the Pebble database. Ignored if DB is set.
+	// DataDir holds the Pebble database and the node key (file "nodekey").
 	DataDir string
-	// DB is an already open database (tests use an in-memory one).
+	// DB is an already open database (tests use an in-memory one); then the
+	// node does not open or close one.
 	DB ethdb.Database
-	// Sender delivers requests to partner nodes. Default: HTTP.
+	// NodeKey is the node's block-signing key. Nil: read it from DataDir,
+	// creating it on first start (or a fresh key, if DataDir is empty).
+	NodeKey *ecdsa.PrivateKey
+	// Sender delivers requests to other nodes. Default: HTTP.
 	Sender common.Sender
+	// Params are the consensus rules; zero for the defaults.
+	Params cordial.Params
 }
 
 // Node is a running ibc node.
@@ -37,7 +50,8 @@ type Node struct {
 	db        ethdb.Database
 	ownsDB    bool
 	navigator *execution.Navigator
-	consensus consensus.Protocol
+	consensus *consensus.Router
+	nodeKey   *ecdsa.PrivateKey
 	broker    *dispatcher.Broker
 	handler   http.Handler
 	done      chan struct{} // closed to end the event streams
@@ -56,23 +70,60 @@ func New(cfg Config) (*Node, error) {
 		}
 		n.db, n.ownsDB = db, true
 	}
+	n.nodeKey = cfg.NodeKey
+	if n.nodeKey == nil {
+		var err error
+		if cfg.DataDir != "" {
+			if err := os.MkdirAll(cfg.DataDir, 0o700); err != nil {
+				return nil, err
+			}
+			n.nodeKey, err = identity.LoadOrCreateNodeKey(filepath.Join(cfg.DataDir, "nodekey"))
+		} else {
+			n.nodeKey, err = crypto.GenerateKey()
+		}
+		if err != nil {
+			return nil, errors.Join(err, n.closeDB())
+		}
+	}
 	sender := cfg.Sender
 	if sender == nil {
 		sender = &common.HTTPSender{}
 	}
 	out := &output{broker: n.broker}
-	n.navigator = execution.NewNavigator(execution.Config{DB: n.db, Sender: sender, Output: out})
-	n.consensus = consensus.NewImmediate(n.navigator, n.broker)
+	n.navigator = execution.NewNavigator(execution.Config{DB: n.db, Output: out})
+	n.consensus = consensus.NewRouter(consensus.RouterConfig{
+		NodeKey: n.nodeKey, DB: n.db, Sender: sender, Execution: n.navigator,
+		Publisher: n.broker, Params: cfg.Params,
+	})
 	out.setConsensus(n.consensus)
 	if err := n.navigator.Recover(); err != nil {
 		return nil, errors.Join(fmt.Errorf("recover: %w", err), n.Close())
 	}
-	n.handler = dispatcher.New(n.navigator, n.consensus, n.broker, sender, n.done)
+	if err := n.consensus.Start(); err != nil {
+		return nil, errors.Join(fmt.Errorf("start consensus: %w", err), n.Close())
+	}
+	api := dispatcher.New(n.navigator, n.consensus, n.broker, identity.Address(n.nodeKey), n.done)
+	mux := http.NewServeMux()
+	mux.Handle("/ibc/", api)
+	mux.Handle("/stream", api)
+	mux.Handle("/", web.Handler()) // the web interface
+	n.handler = mux
+	slog.Info("node key", "address", identity.Address(n.nodeKey).Hex())
 	return n, nil
 }
 
-// Handler returns the node's HTTP API.
+// Handler returns the node's HTTP API and its web interface.
 func (n *Node) Handler() http.Handler { return n.handler }
+
+// NodeKey returns the address of the node's block-signing key.
+func (n *Node) NodeKey() string { return identity.Address(n.nodeKey).Hex() }
+
+func (n *Node) closeDB() error {
+	if n.ownsDB {
+		return n.db.Close()
+	}
+	return nil
+}
 
 // Close ends the event streams, applies what is already logged, and closes
 // the database (if the node opened it). It is safe to call more than once.
@@ -128,8 +179,8 @@ func (n *Node) Serve(ctx context.Context, ln net.Listener) error {
 	return errors.Join(err, n.Close())
 }
 
-// output routes execution's outputs: replies to the event stream, join
-// outcomes to consensus.
+// output routes execution's outputs: replies to the event stream, decisions
+// and progress to consensus.
 type output struct {
 	broker *dispatcher.Broker
 	mu     sync.Mutex
@@ -142,13 +193,22 @@ func (o *output) setConsensus(p consensus.Protocol) {
 	o.proto = p
 }
 
+func (o *output) protocol() consensus.Protocol {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.proto
+}
+
 func (o *output) Publish(agent string, reply execution.Reply) { o.broker.Publish(agent, reply) }
 
-func (o *output) Partner(agent string, record execution.Record) {
-	o.mu.Lock()
-	p := o.proto
-	o.mu.Unlock()
-	if p != nil {
-		p.PartnerUpdate(agent, record)
+func (o *output) Decided(agent, contract string, record execution.Record, approved bool) {
+	if p := o.protocol(); p != nil {
+		p.Decided(agent, contract, record, approved)
+	}
+}
+
+func (o *output) Applied(agent, contract string, index uint64, stateRoot string) {
+	if p := o.protocol(); p != nil {
+		p.Applied(agent, contract, index, stateRoot)
 	}
 }

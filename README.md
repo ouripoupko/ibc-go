@@ -6,14 +6,18 @@ runs on a node it chooses, and agents cooperate through contracts. A contract is
 its *partners*, the agents who joined it, never with a global network, and every contract has its
 own isolated state.
 
-This is the Go version of [ibc](https://github.com/ouripoupko/ibc). Contracts run on the **EVM**,
-embedded through [go-ethereum](https://github.com/ethereum/go-ethereum), so you write them in
-Solidity. A node is a single program with its own embedded database.
+This is the Go version of [ibc](https://github.com/ouripoupko/ibc):
 
-> **Work in progress.** A node runs end to end: HTTP API, event stream, contract execution and
-> storage. Consensus between partners is not written yet: for now each node executes only the
-> records it receives itself, and an agent can use only the contracts it deployed. See
-> [what is missing](docs/architecture.md#not-implemented-yet).
+- **Contracts run on the EVM**, embedded through
+  [go-ethereum](https://github.com/ethereum/go-ethereum), so you write them in Solidity.
+- **Partners agree with [Cordial Miners](docs/consensus.md)**, a Byzantine fault-tolerant
+  consensus protocol, run separately for each contract among its partners.
+- **Users sign their own actions** with an Ethereum key, for example in MetaMask. A node never
+  holds anyone's personal key.
+- **A node is a single program** with its own embedded database.
+
+> **Work in progress.** The essentials work end to end, but parts of the design are still to
+> come. See [what is missing](docs/architecture.md#not-implemented-yet).
 
 ## Documentation
 
@@ -24,6 +28,7 @@ Solidity. A node is a single program with its own embedded database.
 | [API reference](docs/api.md) | Every HTTP call, its parameters, replies, events and errors |
 | [Example contracts](examples/) | Counter, Poll and Board in Solidity, with a shell client and a JavaScript client |
 | [Architecture](docs/architecture.md) | How the node works inside, and how to develop it |
+| [Consensus design](docs/consensus.md) | The consensus protocol, Cordial Miners, and how membership changes |
 
 ## Run a node locally
 
@@ -72,12 +77,16 @@ program, `ibc`.
 The node is now serving at `http://localhost:2611`. Check it from another terminal:
 
 ```sh
-curl 'http://localhost:2611/ibc/app/nobody?action=is_exist_agent'
-# false
+curl 'http://localhost:2611/ibc/app?action=node_info'
+# {"nodeKey":"0x57E3339B18e36035656375139A5e66B19dc7D60d"}
 ```
 
-`false` means the node is up and has no agent called `nobody`. Continue with the
-[usage guide](docs/usage.md) to register an agent and deploy a contract.
+The reply is the address of the node's key, which the node uses to sign its consensus blocks.
+
+Open **http://localhost:2611** in a browser with [MetaMask](https://metamask.io) to use the node's
+web interface: register, deploy compiled contracts, join contracts, and call their functions.
+Continue with the [usage guide](docs/usage.md) for the details, and for the shell and JavaScript
+clients.
 
 To stop the node, press Ctrl-C. It finishes the work it has already accepted, then exits. Your data
 stays in the data directory, and the node picks up from there when you start it again.
@@ -87,19 +96,23 @@ stays in the data directory, and the node picks up from there when you start it 
 | Flag | Environment variable | Default | Meaning |
 |---|---|---|---|
 | `-addr` | `IBC_ADDR` | `:2611` | Address and port the node listens on |
-| `-data` | `IBC_DATA` | `data` | Directory of the node's database |
+| `-data` | `IBC_DATA` | `data` | Directory of the node's database and key |
 
 Some things to know about them:
 
 - **Who can reach the node.** The default `:2611` accepts connections from any machine that can
-  reach yours. The node has **no authentication**: anyone who can reach it can act as any agent
-  on it. Use `127.0.0.1:2611` to accept only local connections, as in the example above.
-- **The data directory** holds everything the node knows: agents, contracts, their state and their
-  ledgers. Back it up by copying it while the node is stopped. Only one node can use a data
-  directory at a time.
+  reach yours. Every call that changes or shows an agent's data is signed: writes by the agent,
+  reads by the reader (the contract decides what each reader may see), and messages between
+  nodes by the node's key. Use `127.0.0.1:2611` to accept only local connections, as in the
+  example above.
+- **The data directory** holds everything the node knows: agents, contracts, their state, their
+  ledgers, and the node's key (`nodekey`, readable by you only). Back it up by copying it while
+  the node is stopped. Only one node can use a data directory at a time.
+- **The node key** is created on the first start and identifies the node in consensus. Agents
+  authorize it when they register. It is not anyone's personal key.
 - **The node's address.** When an agent registers, it gives the address at which other nodes reach
-  it, for example `http://localhost:2611`. A partner on another machine must be able to reach that
-  address.
+  it, for example `http://localhost:2611`. Partners on other machines must be able to reach that
+  address: their nodes exchange consensus messages with yours.
 
 ### Run two nodes on one machine
 
@@ -131,12 +144,14 @@ go run ./cmd/ibc -addr 127.0.0.1:2611 -data ~/ibc-data
 ## Project layout
 
 ```
-cmd/ibc/        the program
-node/           wires the parts together
-dispatcher/     HTTP API and event stream
-consensus/      consensus protocol (a stub for now)
-execution/      runs contracts, one goroutine per contract
-common/         EVM state, storage, ledger, partner client
+cmd/ibc/              the program (node, key and signing tools)
+node/                 wires the parts together
+dispatcher/           HTTP API and event stream
+web/                  the web interface, built into the program; the JavaScript client
+consensus/            each contract's protocol; Cordial Miners in consensus/cordial
+execution/            runs contracts, one goroutine per contract
+identity/             signed transactions and registrations (EIP-712)
+common/               EVM state, storage, ledger, outbox
 examples/       example contracts and clients
 docs/           documentation
 ```

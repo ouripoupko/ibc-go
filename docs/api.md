@@ -4,13 +4,15 @@ The complete HTTP interface of an ibc node. For a guided introduction with examp
 [usage guide](usage.md).
 
 - [Conventions](#conventions)
+- [Signatures](#signatures)
 - [Values](#values)
+- [The node](#the-node): `node_info`
 - [Agents](#agents): `register_agent`, `is_exist_agent`
 - [Contracts](#contracts): `deploy_contract`, `get_contracts`, `get_contract`
 - [Calling a contract](#calling-a-contract): `contract_write`, `contract_read`
-- [Joining a contract](#joining-a-contract): `join_contract`
+- [Membership](#membership): `join_contract`, `leave_contract`, `rotate_key`
 - [The event stream](#the-event-stream): `/stream`
-- [Node to node](#node-to-node): `a2a_connect`, `a2a_reply_join`, `a2a_consent`, `a2a_get_ledger`
+- [Node to node](#node-to-node): `a2a_consent`
 - [Objects](#objects): event, contract summary, record
 - [Limits](#limits)
 
@@ -27,24 +29,25 @@ Content-Type: application/json
 <JSON body>
 ```
 
-- `<agent>` is the agent the request acts as. For a contract call it is the caller, which becomes
-  `msg.sender`.
+- `<agent>` is an agent id: the address of the agent's key, such as
+  `0x86D637BcBc56F0Dba2b0B5398B4446b5e5330851`, in any letter case. Signed transactions must name the
+  agent that signed.
 - `<contract>` and `<method>` are given only by the calls that need them. Leave out trailing parts
-  you do not need, as in `/ibc/app/alice?action=register_agent`.
+  you do not need, as in `/ibc/app/0x86D6…?action=register_agent`.
 - The verb and the action together select the call. The same action with another verb is
   unknown.
-- A body is read only if `Content-Type` is `application/json`. Otherwise the request has no body.
+- A body is read only if `Content-Type` is `application/json`.
 
 ### Replies
 
 The reply is always JSON. The HTTP status is `200` for every call that the node could parse, even
 when the call failed; check the reply itself.
 
-- **Errors** in the request (an unknown agent, an unknown contract, an unknown action) come back as
+- **Errors** in the request (a bad signature, an unknown contract, an unknown action) come back as
   an object with a `message`:
 
   ```json
-  {"message": "unknown contract \"9f2c…\" of agent \"bob\""}
+  {"message": "consensus: unknown contract 0x67bb…"}
   ```
 
 - **Contract errors** (a revert, a wrong argument) come back as a string in place of the result:
@@ -54,13 +57,11 @@ when the call failed; check the reply itself.
 
 ### Asynchronous calls
 
-`register_agent`, `deploy_contract`, `contract_write` and the node-to-node calls reply at once with
-a **request id**, a 64-character hex string. Their outcome arrives later as an
-[event](#the-event-stream) whose `request` field holds that id. Open the stream before you send the
-request.
-
-The request id is the SHA-256 of the request record, which includes the time the node received it,
-so every request has a different id.
+`register_agent`, `deploy_contract`, `contract_write`, `join_contract`, `leave_contract` and
+`rotate_key` reply at once with a **request id**: the id of the signed transaction (or
+registration), a `0x`-prefixed hex hash. Their outcome arrives later as an
+[event](#the-event-stream) whose `request` field holds that id. Open the stream before you send
+the request.
 
 ### CORS
 
@@ -68,9 +69,103 @@ Every reply carries `Access-Control-Allow-Origin: *`. `OPTIONS` requests (browse
 answered with status `204`, allowing the methods `GET`, `POST`, `PUT` and `DELETE` and the
 `Content-Type` header.
 
-### Authentication
+### Who may do what
 
-There is none. Anyone who can reach a node can act as any agent on it.
+Every change is signed by the agent that makes it, and checked by the node and by every partner.
+Every read is signed too, as a [query](#queries):
+
+| Call | Who may make it |
+|---|---|
+| `contract_read` | Anyone with a key. The contract sees the signer as `msg.sender`, and decides what to answer |
+| `get_contracts`, `get_contract`, the event stream | The agent itself only |
+| `node_info`, `is_exist_agent` | Anyone, unsigned |
+| Node to node (`a2a_consent`) | Nodes, signed with their node key; see [Node to node](#node-to-node) |
+
+The node never shows one agent's data to another, except what a contract's own functions return.
+The node's operator can still see everything stored on the node.
+
+## Signatures
+
+Agents sign with their Ethereum key, using [EIP-712](https://eips.ethereum.org/EIPS/eip-712)
+typed data: MetaMask's `eth_signTypedData_v4`, or `signTypedData` of ethers.js. The signature is
+the usual 65-byte `0x`-hex string.
+
+```js
+const domain = { name: 'ibc', version: '1' };
+const types = {
+  Transaction: [
+    { name: 'contract', type: 'string' },   // the contract id; "" for a deploy
+    { name: 'kind',     type: 'string' },   // deploy | call | join | leave | rotate_key
+    { name: 'agent',    type: 'address' },  // the signer
+    { name: 'nonce',    type: 'string' },   // random, to make each transaction unique
+    { name: 'body',     type: 'string' },   // JSON text, by kind (below)
+  ],
+  Registration: [
+    { name: 'agent',    type: 'address' },  // the signer
+    { name: 'node',     type: 'string' },   // the node's URL
+    { name: 'nodeKey',  type: 'address' },  // the node's key, from node_info
+    { name: 'nonce',    type: 'string' },
+  ],
+  Query: [
+    { name: 'agent',    type: 'address' },  // the signer: who asks
+    { name: 'action',   type: 'string' },   // contract_read | get_contract | get_contracts | stream
+    { name: 'target',   type: 'string' },   // the agent whose copy is asked: the URL's <agent>
+    { name: 'contract', type: 'string' },   // the URL's <contract>, or ""
+    { name: 'body',     type: 'string' },   // JSON text, by action (below), or ""
+    { name: 'time',     type: 'uint64' },   // unix seconds when signed
+    { name: 'nonce',    type: 'string' },
+  ],
+};
+```
+
+A signed transaction is sent as:
+
+```json
+{
+  "tx": {"contract": "0x67bb…", "kind": "call", "agent": "0x86D6…", "nonce": "9f2c…",
+         "body": "{\"method\":\"increment\",\"values\":{\"amount\":5}}"},
+  "signature": "0x…"
+}
+```
+
+The **transaction id** is the EIP-712 digest of the transaction. A deploy's id is the new contract's
+id. The bodies, by kind:
+
+| Kind | Body |
+|---|---|
+| `deploy` | `{"name", "contract", "protocol", "default_app", "profile", "code", "abi", "constructor", "node", "nodeKey"}`: see [deploy_contract](#deploy_contract) |
+| `call` | `{"method": "increment", "values": {"amount": 5}}` |
+| `join` | `{"node": "<your node's URL>", "nodeKey": "<your node's key>", "profile": …}` |
+| `leave` | `{"member": "<agent id>"}`: yourself to leave, or another member to remove |
+| `rotate_key` | `{"node": "<your new node's URL>", "nodeKey": "<its key>"}` |
+
+### Queries
+
+A query is a signed request to see something. It is never ordered or stored, and its EIP-712 type
+is not a transaction's, so a signed query can never be used as a transaction. A signed query is:
+
+```json
+{
+  "query": {"agent": "0x5B38…", "action": "contract_read", "target": "0x86D6…", "contract": "0x67bb…",
+            "body": "{\"method\":\"count\",\"values\":{}}", "time": 1789000000, "nonce": "4e1a…"},
+  "signature": "0x…"
+}
+```
+
+- `contract_read` sends it as the request body. The other calls send its JSON in the `auth` URL
+  parameter, URL-encoded, because a `GET` (and a browser's `EventSource`) has no body.
+- `action`, `target` and `contract` must be those of the call it is sent with.
+- `time` must be within 60 seconds of the node's clock, and the node accepts each query only once.
+  Sign a new query for every call, including when you reconnect the event stream.
+- Errors: `this call needs a signed query`; `query: signature does not match the agent`;
+  `query for get_contract sent to contract_read` (and the same for agent and contract); `query
+  expired, or its time is wrong: check the clock`; `query already used`; `only agent 0x… may ask
+  this`.
+
+| Action | Body |
+|---|---|
+| `contract_read` | `{"method": "count", "values": {…}}` |
+| `get_contracts`, `get_contract`, `stream` | `""` |
 
 ## Values
 
@@ -88,34 +183,49 @@ position: `"0"`, `"1"`, and so on.
 | `T[]`, `T[N]` | A JSON array. `T[N]` needs exactly N elements | A JSON array |
 | tuple / struct | An object keyed by the component names | An object keyed by the component names |
 
-A function's result is:
-
-- `null` if it returns nothing,
-- the value itself if it returns one value,
-- an array if it returns several values (in the order of the function's `returns`).
+A function's result is `null` if it returns nothing, the value itself if it returns one value, and
+an array if it returns several.
 
 > **JavaScript.** `JSON.parse` keeps integers exact only up to 2^53. Results larger than that are
 > correct in the reply, but lose precision when parsed as JavaScript numbers.
+
+## The node
+
+### `node_info`
+
+```
+GET /ibc/app?action=node_info
+```
+
+**Reply:** `{"nodeKey": "0x57E3…"}`, the address of the node's key. Registrations, deploys and joins
+name it.
 
 ## Agents
 
 ### `register_agent`
 
-Registers an agent on the node, with the address at which other nodes reach it. Registering again
-updates the address.
+Registers an agent on the node. The agent authorizes the node's key to sign consensus blocks for
+it. Registering again updates the registration.
 
 ```
 PUT /ibc/app/<agent>?action=register_agent
-{"address": "http://localhost:2611"}
+{
+  "registration": {"agent": "0x86D6…", "node": "http://localhost:2611",
+                   "nodeKey": "0x57E3…", "nonce": "…"},
+  "signature": "0x…"
+}
 ```
 
-| Body field | Meaning |
+| Field | Meaning |
 |---|---|
-| `address` | The node URL that partners use to reach this agent |
+| `agent` | The agent; must sign, and must be the agent in the URL |
+| `node` | The node's URL, at which partners' nodes reach this agent |
+| `nodeKey` | This node's key, from `node_info` |
 
-**Reply:** a request id.
+**Reply:** a request id. **Event:** `register_agent` with `reply: true` and `contract: null`.
 
-**Event:** `register_agent` with `reply: true` and `contract: null`.
+**Errors:** `signature does not match the agent`; `registration of 0x… sent as 0x…`;
+`registration authorizes node key 0x…, this node's key is 0x…`.
 
 ### `is_exist_agent`
 
@@ -129,57 +239,45 @@ GET /ibc/app/<agent>?action=is_exist_agent
 
 ### `deploy_contract`
 
-Deploys a contract for the agent. The contract runs its constructor with the agent's address as
-`msg.sender`.
+Deploys a contract. The deploying agent is its first partner, and the contract's constructor runs
+with the agent's address as `msg.sender`.
 
 ```
 PUT /ibc/app/<agent>?action=deploy_contract
-{
-  "name": "my-counter",
-  "contract": "Counter.sol",
-  "protocol": "BFT",
-  "default_app": "https://my-app.example.com",
-  "pid": "alice",
-  "address": "http://localhost:2611",
-  "profile": "",
-  "code": "6080604052…",
-  "abi": "[{\"inputs\":[{\"name\":\"start\",\"type\":\"uint256\"}],\"type\":\"constructor\"}, …]",
-  "constructor": {"start": 10}
-}
+{"tx": {"contract": "", "kind": "deploy", "agent": "0x86D6…", "nonce": "…", "body": "<JSON>"}, "signature": "0x…"}
 ```
 
-| Body field | Required | Meaning |
+The body:
+
+| Field | Required | Meaning |
 |---|---|---|
 | `code` | yes | The contract's bytecode as compiled (`.bin`), as hex, with or without `0x` |
-| `abi` | yes | The contract's ABI (`.abi`): the JSON text, or the JSON array itself |
+| `abi` | yes | The contract's ABI (`.abi`), as a JSON array |
 | `constructor` | if the constructor has parameters | The constructor's arguments, as [values](#values) |
-| `pid` | expected | The creating agent's id: the constructor's `msg.sender`, and the contract's first partner. Use the agent in the URL. Not checked: without it, the constructor runs as the agent `""` |
-| `address` | expected | The creating agent's node URL, stored with the first partner. Not checked |
-| `name`, `contract`, `protocol`, `default_app`, `profile` | no | Labels kept with the contract and returned by `get_contract`. ibc does not interpret them yet |
+| `node` | yes | This node's URL |
+| `nodeKey` | yes | This node's key, from `node_info` |
+| `protocol` | no | The consensus protocol: `cordial` (the default; `BFT` means the same) or `immediate`, which orders the creator's own transactions locally, with no partners, for testing |
+| `name`, `contract`, `default_app`, `profile` | no | Labels kept with the contract and returned by `get_contract` |
 
-Any other fields are kept with the contract as well.
-
-**Reply:** a request id, which is also the new contract's id. Use it as `<contract>` in every
-later call.
+**Reply:** the transaction id, which is the new contract's id. Use it as `<contract>` in every later
+call.
 
 **Event:** `deploy_contract`, with `contract` set to the contract's id. `reply` is `true` if the
 contract was deployed, or the error as a string, for example
 `"execution reverted: a poll needs at least two options"` or
-`"constructor: missing argument \"start\""`. A contract whose deployment failed stays failed:
-every later call to it is answered with `"contract deployment failed: <reason>"`.
+`"constructor: missing argument \"start\""`. A contract whose deployment failed stays failed: every
+later call to it is answered with `"contract deployment failed: <reason>"`.
 
-**Errors:**
-
-| Message | Meaning |
-|---|---|
-| `unknown agent "<agent>"` | The agent is not registered on this node |
-| `deploy_contract: empty message` | No body, or the body is not JSON |
+**Errors:** `unknown agent "0x…"` (register first); `deploy names node key 0x…, this node's key is
+0x…`; `consensus: unknown protocol "…"`.
 
 ### `get_contracts`
 
 ```
-GET /ibc/app/<agent>?action=get_contracts
+GET /ibc/app/<agent>?action=get_contracts&auth=<signed query>
 ```
+
+Only the agent itself may ask: the [query](#queries) is signed by `<agent>`.
 
 **Reply:** an array of [contract summaries](#contract-summary), one for each contract the agent
 has on this node, sorted by contract id.
@@ -187,8 +285,10 @@ has on this node, sorted by contract id.
 ### `get_contract`
 
 ```
-GET /ibc/app/<agent>/<contract>?action=get_contract
+GET /ibc/app/<agent>/<contract>?action=get_contract&auth=<signed query>
 ```
+
+Only the agent itself may ask: the [query](#queries) is signed by `<agent>`, for `<contract>`.
 
 **Reply:** the [contract summary](#contract-summary), or `{}` if the agent has no such contract.
 
@@ -196,22 +296,21 @@ GET /ibc/app/<agent>/<contract>?action=get_contract
 
 ### `contract_write`
 
-A transaction: runs a contract function and keeps its changes. The record is added to the
-contract's ledger.
+A transaction: runs a contract function and keeps its changes. All partners apply it, in the order
+the consensus protocol gives.
 
 ```
 POST /ibc/app/<agent>/<contract>/<method>?action=contract_write
-{"values": {"amount": 5}}
+{"tx": {"contract": "<contract>", "kind": "call", "agent": "<agent>", "nonce": "…",
+        "body": "{\"method\":\"<method>\",\"values\":{…}}"}, "signature": "0x…"}
 ```
 
-| Body field | Meaning |
-|---|---|
-| `values` | The function's arguments, as [values](#values). Use `{}` for a function without parameters |
+The contract and method in the URL must match the transaction's.
 
-**Reply:** a request id.
+**Reply:** the transaction id.
 
-**Event:** `contract_write`, with `reply` set to the function's result, or the error as a string.
-If the function fails, nothing it did is kept, and `state_root` is unchanged.
+**Event:** `contract_write`, with `reply` set to the function's result, or the error as a string. If
+the function fails, nothing it did is kept, and `state_root` is unchanged.
 
 | Error reply | Meaning |
 |---|---|
@@ -223,81 +322,112 @@ If the function fails, nothing it did is kept, and `state_root` is unchanged.
 | `"<method>: argument \"<name>\": <problem>"` | A value of the wrong type or out of range |
 | `"out of gas"` | The call used more than 100 million gas |
 | `"contract deployment failed: <reason>"` | The contract's constructor failed |
-| `"get_partners: not implemented"` | Also `approve_partner` and `get_parameters`: built-in methods that are not defined yet |
+| `"get_partners: not implemented"` | Also `get_parameters`: built-in methods that are not defined yet |
 
-**Errors** (request not accepted):
-
-| Message | Meaning |
-|---|---|
-| `unknown contract "<contract>" of agent "<agent>"` | The agent does not have this contract on this node |
+**Errors** (request not accepted): `consensus: unknown contract 0x…` (the agent is not a partner
+of this contract on this node); `transaction signed by 0x…, sent as 0x…`; `signature does not
+match the agent`; `0x… is not a member`.
 
 ### `contract_read`
 
-Runs a contract function without keeping any change, like `eth_call`. Use it for `view`
-functions; any other function can be called too, and its changes are thrown away. Nothing is added
-to the ledger, and no event is sent.
+Runs a contract function without keeping any change, like `eth_call`. Nothing is added to the
+ledger, and no event is sent. The body is a signed [query](#queries):
 
 ```
 POST /ibc/app/<agent>/<contract>/<method>?action=contract_read
-{"values": {"who": "0x5dad7600C5D89fE3824fFa99ec1c3eB8BF3b0501"}}
+{"query": {"agent": "<signer>", "action": "contract_read", "target": "<agent>", "contract": "<contract>",
+           "body": "{\"method\":\"getValue\",\"values\":{\"who\":\"0x86D6…\"}}",
+           "time": 1789000000, "nonce": "…"},
+ "signature": "0x…"}
 ```
 
-The body is the same as for `contract_write`. The function sees the latest state, `msg.sender`
-set to the agent's address, and `block.timestamp` set to the time of the request.
+`<agent>` is whose copy of the contract to read, on this node. Anyone may sign the query: the
+function sees `msg.sender` set to **the signer**, so the contract decides what each reader may see,
+for example with `require(isMember[msg.sender])`. The `<method>` in the URL is optional; if given,
+it must match the query's. The function sees the latest state, and `block.timestamp` set to the
+time of the request.
 
 **Reply:** the function's result, or the error as a string (the same strings as for
 `contract_write`). `{"message": "no such contract"}` if the agent has no such contract, or its
 deployment has not finished yet.
 
-## Joining a contract
+## Membership
+
+A contract's partners change through `join`, `leave` and `rotate_key` transactions, which are
+ordered like every other transaction. While one is being decided, the contract holds back other
+transactions (see [consensus design](consensus.md#10-membership-changes)).
 
 ### `join_contract`
 
-Asks a partner of a contract, on the partner's node, to let this agent join. The node forwards the
-request (`a2a_connect`) to the partner's node and replies once the partner's node has accepted it.
+Asks a partner of a contract to let the agent join. Send it to **your own** node, which passes the
+signed join to the partner's node.
 
 ```
 PUT /ibc/app/<agent>?action=join_contract
-{"contract": "9f2c…", "address": "http://partner-node:2611", "agent": "alice", "profile": ""}
+{
+  "tx": {"contract": "<contract>", "kind": "join", "agent": "<agent>", "nonce": "…",
+         "body": "{\"node\":\"<your node's URL>\",\"nodeKey\":\"<your node's key>\",\"profile\":\"\"}"},
+  "signature": "0x…",
+  "partner": {"address": "<the partner's node URL>", "agent": "<the partner's agent id>"}
+}
 ```
 
-| Body field | Meaning |
-|---|---|
-| `contract` | The contract's id |
-| `address` | The partner's node URL |
-| `agent` | The partner's agent id |
-| `profile` | Anything the partner should know about the joining agent |
+**Reply:** the transaction id, or `null` if the agent already has the contract on this node.
 
-**Reply:** a request id, or `null` if the agent already has the contract on this node.
+**Event:** `join_contract` on the joining agent's stream, with `request` set to the transaction id.
+`reply` is `true` once this node holds the contract and takes part in it, or `false` if the
+contract refused. The decision is the contract's `approve_partner(address)` function, called as the
+joining agent; a contract without it accepts everyone. The partners' own streams see a `join`
+event with the decision.
 
-**Event:** `a2a_reply_join` on the joining agent's stream, when the partner's node answers. `reply`
-is `true` if the join was approved. This event has no request id (`"request": ""`) and
-`contract: null`.
+**Errors:** `join_contract needs partner.address and partner.agent`; the partner's node's errors,
+for example `consensus: unknown contract 0x…`.
 
-> In this version joins are never approved (`reply: false`), because `approve_partner` is not
-> defined for Solidity contracts yet.
+### `leave_contract`
 
-**Errors:**
+Leaves a contract, or asks to remove another member.
 
-| Message | Meaning |
-|---|---|
-| `join_contract needs contract, address and agent` | A body field is missing |
-| `PUT <url>: <status>` or a connection error | The partner's node could not be reached or refused the request |
+```
+PUT /ibc/app/<agent>?action=leave_contract
+{"tx": {"contract": "<contract>", "kind": "leave", "agent": "<agent>", "nonce": "…",
+        "body": "{\"member\":\"<agent id>\"}"}, "signature": "0x…"}
+```
+
+**Reply:** the transaction id. **Event:** `leave`, with `reply` set to the decision. Leaving
+yourself is always approved. Removing another member is decided by the contract's
+`approve_removal(address)` function, called as you; a contract without it refuses.
+
+### `rotate_key`
+
+Moves an agent's part in a contract to another node, or replaces a compromised node key. Send it to
+your current node.
+
+```
+PUT /ibc/app/<agent>?action=rotate_key
+{"tx": {"contract": "<contract>", "kind": "rotate_key", "agent": "<agent>", "nonce": "…",
+        "body": "{\"node\":\"<new node URL>\",\"nodeKey\":\"<new node key>\"}"}, "signature": "0x…"}
+```
+
+**Reply:** the transaction id. **Event:** `rotate_key` with `reply: true`. The new node receives the
+contract's history from the partners and takes over; the old node stops taking part. Register the
+agent on the new node first.
 
 ## The event stream
 
 ```
-GET /stream?agent=<agent>&contract=<contract>[&agent=<agent>&contract=<contract>…]
+GET /stream?auth=<signed query>[&auth=<signed query>…]
 ```
 
 A [Server-Sent Events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events)
 stream of the outcomes of asynchronous calls.
 
-- `agent` and `contract` are repeated and paired by position: the first `agent` with the first
-  `contract`, and so on.
-- An empty `contract` (`contract=`) subscribes to every event of that agent. A contract id
-  subscribes to that contract's events only. A missing `contract` counts as empty.
-- An event is delivered once if it matches any of the pairs.
+- Each `auth` is a [query](#queries) with action `stream`, signed by the agent whose events it
+  subscribes to, with `target` set to that agent. Only the agent itself may open its stream.
+- The query's `contract` chooses the events: empty for every event of the agent, or a contract
+  id for that contract's events only.
+- Repeat `auth` to subscribe to several agents or contracts. An event is delivered once if it
+  matches any of them.
+- A missing, expired or wrong query is refused with status `401` and a `{"message": …}` body.
 
 The stream starts with an empty message (`data: `), which tells you the subscription is active.
 After that every event is one message, and an empty message is sent every 10 seconds to keep the
@@ -306,7 +436,7 @@ connection open:
 ```
 data: 
 
-data: {"request":"c690…","contract":"520f…","action":"contract_write","reply":15,"state_root":"0x…","agent":"alice"}
+data: {"request":"0x9a00…","contract":"0x67bb…","action":"contract_write","reply":15,"state_root":"0x…","agent":"0x86D6…"}
 
 data: 
 ```
@@ -314,15 +444,17 @@ data:
 In a browser, `EventSource` handles the stream:
 
 ```js
-const events = new EventSource('http://localhost:2611/stream?agent=alice&contract=');
+const auth = await ibc.query('stream');   // a signed query; see web/static/ibc.mjs
+const events = new EventSource(`http://localhost:2611/stream?auth=${encodeURIComponent(JSON.stringify(auth))}`);
 events.onmessage = (e) => {
   if (!e.data) return;                 // keep-alive
   const event = JSON.parse(e.data);    // see "Event" below
 };
 ```
 
-If a client falls more than 256 events behind, the node closes its stream. `EventSource`
-reconnects by itself, but the events in between are lost. When the node shuts down, it closes
+If a client falls more than 256 events behind, the node closes its stream, and the events in
+between are lost. `EventSource` reconnects by itself with the same URL, which the node refuses,
+since each query is accepted once: on an error, close it and open a new stream with a new query. When the node shuts down, it closes
 every stream.
 
 ## Node to node
@@ -330,64 +462,35 @@ every stream.
 These calls are sent by nodes to each other, not by apps. They are listed so that a node can be
 implemented or debugged against them.
 
-### `a2a_connect`
-
-A request from another agent to join a contract, sent by its node on `join_contract`.
-
-```
-PUT /ibc/app/<partner>/<contract>?action=a2a_connect
-{"from": "bob", "to": "alice", "msg": {"pid": "bob", "address": "http://bob-node:2611", "profile": ""}}
-```
-
-**Reply:** a request id. **Errors:** `unknown contract …` if the partner does not have the
-contract.
-
-The request is added to the contract's ledger. The partner's node decides, sends its answer to the
-joining agent's node as `a2a_reply_join`, and sends the partner's own stream an `a2a_connect` event
-with `reply` set to the decision.
-
-### `a2a_reply_join`
-
-The answer to a join request.
-
-```
-PUT /ibc/app/<joining agent>/<contract>?action=a2a_reply_join
-{"from": "alice", "to": "bob", "msg": {"pid": "alice", "address": "http://alice-node:2611", "status": false}}
-```
-
-**Reply:** a request id. The joining agent's stream receives an `a2a_reply_join` event with
-`reply` set to `status`.
-
 ### `a2a_consent`
 
-A message of the consensus protocol. The current protocol uses none.
-
-**Reply:** `{"message": "consensus: not supported by this protocol: a2a_consent"}`.
-
-### `a2a_get_ledger`
-
-A contract's ledger: every record the contract has processed, in order.
+The consensus protocol's messages, addressed to an agent's miner of a contract. Every message is
+signed by the sending node's key:
 
 ```
-POST /ibc/app/<agent>/<contract>?action=a2a_get_ledger
-{"msg": {"index": 0}}
+PUT /ibc/app/<agent>/<contract>?action=a2a_consent
+{"msg": {"type": "<type>", …}, "node": "<sending node's key>", "time": 1789000000, "signature": "0x…"}
 ```
 
-| Body field | Meaning |
-|---|---|
-| `msg.index` | Return the records from this position on. The first record is 1. `0` or missing: all |
+- The signature is over `keccak256("ibc a2a v1\n" + agent + "\n" + contract + "\n" + time + "\n" + msg)`,
+  where `agent` is the checksummed address in the URL, `time` is decimal, and `msg` is the exact
+  JSON text of `msg` in the body. It is a 65-byte signature like an agent's, by `node`.
+- `time` is when the message was sent, and must be within 5 minutes of the receiving node's clock.
+  A node signs when it sends, so a message it retries carries a new time.
+- `blocks`, `tx` and `join_result` are accepted from any node: blocks and transactions carry their
+  own signatures. `get_blocks`, `get_from` and `get_ledger` are answered only for a node whose key
+  belongs to a member of the contract's current configuration. A `welcome` must be signed by the
+  welcoming member's node key, as the configuration in it records it.
 
-**Reply:** an object that maps each record's position, as a 15-digit string, to the
-[record](#record). Sorting the keys as strings gives the ledger's order:
-
-```json
-{
-  "000000000000001": {"type": "PUT", "action": "deploy_contract", "agent": "alice", "…": "…"},
-  "000000000000002": {"type": "POST", "action": "contract_write", "method": "increment", "…": "…"}
-}
-```
-
-`{"message": "no such contract"}` if the agent has no such contract.
+| `type` | Fields | Reply |
+|---|---|---|
+| `blocks` | `blocks`: hex RLP encodings of signed blocks | `null` |
+| `get_blocks` | `hashes`: block hashes | `{"blocks": [...]}` |
+| `get_from` | `depth`: a round | `{"blocks": [...]}`: the blocks from that round on |
+| `get_ledger` | none | `{"records": [...]}`: every [record](#record) of the contract, in order. A newcomer's node replays them to build the contract's state |
+| `tx` | `tx`: a signed transaction to put in the miner's mempool (a relayed join, for example) | the transaction id |
+| `welcome` | `config`: the contract's new configuration; `sender`: the welcoming member | `null`; the node then fetches the ledger from the sender (`get_ledger`) and joins |
+| `join_result` | `txId`, `approved: false`: a refused join | `null` |
 
 ## Objects
 
@@ -395,15 +498,15 @@ POST /ibc/app/<agent>/<contract>?action=a2a_get_ledger
 
 | Field | Meaning |
 |---|---|
-| `request` | The request id of the call this event answers. Empty for `a2a_reply_join` |
-| `contract` | The contract's id, or `null` for `register_agent` and `a2a_reply_join` |
-| `action` | `register_agent`, `deploy_contract`, `contract_write`, `a2a_connect` or `a2a_reply_join` |
+| `request` | The id of the request this event answers |
+| `contract` | The contract's id, or `null` for `register_agent` |
+| `action` | `register_agent`, `deploy_contract`, `contract_write`, `join` (a member's view of a join), `leave`, `rotate_key`, or `join_contract` (the joining agent's view) |
 | `reply` | The outcome: the function's result for `contract_write`, `true`/`false` for the others, or an error string |
-| `state_root` | The contract's state root after the call, as a hex hash. All zeros if the contract was never deployed. Absent for `register_agent` and `a2a_reply_join` |
+| `state_root` | The contract's state root after the transaction, as a hex hash. All zeros if the contract was never deployed |
 | `agent` | The subscribed agent the event belongs to |
 
-The state root summarizes the contract's entire state. Partners that processed the same records
-have the same state root.
+The state root summarizes the contract's entire state. Partners that processed the same
+transactions have the same state root.
 
 ### Contract summary
 
@@ -413,28 +516,30 @@ Returned by `get_contracts` and `get_contract`. Fields are present only when the
 |---|---|
 | `id` | The contract's id |
 | `name`, `contract`, `protocol`, `default_app`, `profile` | The labels given at deployment |
-| `pid`, `address` | The creating agent and its node |
-| `code` | The bytecode given at deployment |
-| `abi` | The ABI given at deployment |
-| `evm_address` | The contract's address in its own EVM state. Every contract an agent deploys gets the same address, since each contract has a state of its own |
-| `state_root` | The state root after the last successful write |
-| `block_number` | How many records the contract has processed |
+| `pid` | The creating agent |
+| `address` | The creating agent's node URL |
+| `code`, `abi` | The bytecode and ABI given at deployment |
+| `evm_address` | The contract's address in its own EVM state |
+| `state_root` | The state root after the last successful transaction |
+| `block_number` | How many transactions the contract has processed |
 | `deploy_error` | Why the deployment failed, if it did |
 
 ### Record
 
-A request as the node stores it in a contract's ledger.
+A transaction as the ledger keeps it.
 
 | Field | Meaning |
 |---|---|
-| `type` | The HTTP verb |
-| `action` | The action |
-| `agent` | The agent in the URL |
+| `type` | `TX` |
+| `action` | `deploy_contract`, `contract_write`, `join`, `leave` or `rotate_key` |
+| `agent` | The signing agent |
 | `contract` | The contract's id |
-| `method` | The method in the URL, if any |
-| `message` | The request body, as sent |
-| `timestamp` | When the node received the request: `YYYYMMDDHHMMSSffffff`, UTC, with microseconds |
-| `hash_code` | The request id |
+| `method` | For `contract_write`, the function |
+| `message` | The transaction's body, decoded |
+| `timestamp` | The time of the consensus block that carried it: `YYYYMMDDHHMMSSffffff`, UTC |
+| `hash_code` | The transaction id |
+| `index` | Its position in the contract's ledger |
+| `tx` | The signed transaction itself, so anyone can check the agent's signature |
 
 ## Limits
 
@@ -444,4 +549,4 @@ A request as the node stores it in a contract's ledger.
 | Gas per call | 100,000,000 |
 | Events a stream client may fall behind | 256 |
 | Event stream keep-alive | every 10 seconds |
-| Partner request timeout (`join_contract`) | 30 seconds |
+| Requests to other nodes | 30 seconds |

@@ -1,6 +1,7 @@
 package execution
 
 import (
+	"crypto/ecdsa"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,9 +13,11 @@ import (
 	ethcommon "github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/vm"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethdb"
 
 	"github.com/ouripoupko/ibc-go/common"
+	"github.com/ouripoupko/ibc-go/identity"
 )
 
 const (
@@ -25,13 +28,12 @@ const (
 )
 
 // agent is one partner running the contract: its own document, store,
-// ledger and sender.
+// ledger.
 type agent struct {
 	me     string
 	doc    *common.MemoryDocument
 	db     ethdb.Database
 	ledger *MemoryLedger
-	sender *common.RecordingSender
 	exec   *ContractExecution
 }
 
@@ -65,10 +67,8 @@ func newAgent(t *testing.T, me string) *agent {
 		doc:    common.NewMemoryDocument(deployMessage(t)),
 		db:     rawdb.NewMemoryDatabase(),
 		ledger: &MemoryLedger{},
-		sender: &common.RecordingSender{},
 	}
-	a.exec = NewContractExecution(a.doc, contract, me, "http://"+me+".example", a.db, a.ledger, a.sender)
-	t.Cleanup(a.exec.Close)
+	a.exec = NewContractExecution(a.doc, contract, me, a.db, a.ledger)
 	ok, err := a.exec.Create(Record{
 		Type: "PUT", Action: "deploy_contract", Agent: alice,
 		Timestamp: createdAt, HashCode: contract,
@@ -317,7 +317,7 @@ func TestBuiltinStubsNotImplemented(t *testing.T) {
 	root := a.exec.State().Root()
 	doc := a.doc.Snapshot()
 
-	for _, method := range []string{common.MethodGetPartners, common.MethodApprovePartner, common.MethodGetParameters} {
+	for _, method := range []string{common.MethodGetPartners, common.MethodGetParameters} {
 		for _, shouldLog := range []bool{true, false} {
 			res, err := a.exec.Call(writeRecord(t, bob, method, `{}`, "20240102030500000000"), shouldLog)
 			if !errors.Is(err, common.ErrNotImplemented) {
@@ -331,68 +331,163 @@ func TestBuiltinStubsNotImplemented(t *testing.T) {
 	if a.exec.State().Root() != root {
 		t.Error("root changed")
 	}
-	// The three logged calls are ledger records, so each advances the block
+	// The two logged calls are ledger records, so each advances the block
 	// number (the cursor); nothing else in the document changes.
 	after := a.doc.Snapshot()
-	if after[common.KeyBlockNumber] != uint64(4) {
-		t.Errorf("block_number = %v, want 4 (deploy + 3 logged stub calls)", after[common.KeyBlockNumber])
+	if after[common.KeyBlockNumber] != uint64(3) {
+		t.Errorf("block_number = %v, want 3 (deploy + 2 logged stub calls)", after[common.KeyBlockNumber])
 	}
 	delete(after, common.KeyBlockNumber)
 	delete(doc, common.KeyBlockNumber)
 	if !reflect.DeepEqual(after, doc) {
 		t.Errorf("document changed: %v -> %v", doc, after)
 	}
-	if n := len(a.ledger.All()); n != 4 {
-		t.Errorf("ledger has %d records, want 4", n)
-	}
-}
-
-func TestJoinNotApprovedUntilApprovePartnerIsDefined(t *testing.T) {
-	a := newAgent(t, alice)
-	root := a.exec.State().Root()
-	join := record(t, `{"type":"PUT","action":"a2a_connect","contract":"contract-hash-1",
-		"message":{"from":"carol-pid","to":"alice-pid",
-		"msg":{"pid":"carol-pid","address":"http://carol.example","profile":{"name":"Carol"}}},
-		"timestamp":"20240102030500000000","hash_code":"j1"}`)
-
-	approved, err := a.exec.Join(join)
-	if err != nil || approved {
-		t.Fatalf("Join = %v, %v; want false, nil", approved, err)
-	}
-	if ok, _ := a.doc.GetSubCollection(PartnersCollection).Has("carol-pid"); ok {
-		t.Error("carol was added as a partner")
-	}
-	if a.exec.State().Root() != root {
-		t.Error("join changed the root")
-	}
-
-	// An existing partner is not approved again; a join addressed to another
-	// agent sends no reply.
-	if approved, err := a.exec.Join(record(t, `{"message":{"to":"someone-else",
-		"msg":{"pid":"alice-pid","address":"http://alice.example"}}}`)); err != nil || approved {
-		t.Fatalf("Join(existing) = %v, %v", approved, err)
-	}
-
-	a.exec.Close() // flushes the reply queue
-	reqs := a.sender.Requests()
-	if len(reqs) != 1 {
-		t.Fatalf("sent %d replies, want 1: %+v", len(reqs), reqs)
-	}
-	want := common.Request{
-		Method: "PUT",
-		URL:    "http://carol.example/ibc/app/carol-pid/" + contract,
-		Params: map[string]string{"action": "a2a_reply_join"},
-		JSON: map[string]any{"from": alice, "to": "carol-pid",
-			"msg": map[string]any{"address": "http://alice-pid.example", "pid": alice, "status": false}},
-	}
-	if fmt.Sprint(reqs[0]) != fmt.Sprint(want) {
-		t.Errorf("reply = %+v\nwant    %+v", reqs[0], want)
-	}
 	if n := len(a.ledger.All()); n != 3 {
 		t.Errorf("ledger has %d records, want 3", n)
 	}
-	if _, err := a.exec.Join(join); !errors.Is(err, common.ErrOutboxClosed) {
-		t.Errorf("Join after Close: err = %v, want ErrOutboxClosed", err)
+}
+
+// signedRecord builds the record of a transaction signed by key, as
+// consensus hands it to execution.
+func signedRecord(t *testing.T, key *ecdsa.PrivateKey, kind, contractID, body, timestamp string) Record {
+	t.Helper()
+	stx, err := identity.Sign(identity.Transaction{Contract: contractID, Kind: kind,
+		Agent: identity.Address(key), Nonce: identity.NewNonce(), Body: body}, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := stx.Verify()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := Record{Action: ActionForKind[kind], Contract: contractID, Agent: stx.Tx.Agent.Hex(),
+		HashCode: id.Hex(), Timestamp: timestamp, Tx: &stx}
+	if kind == identity.KindCall {
+		var call identity.CallBody
+		if err := DecodeJSON([]byte(body), &call); err != nil {
+			t.Fatal(err)
+		}
+		rec.Method, rec.Message.Values = call.Method, call.Values
+	}
+	return rec
+}
+
+// apply logs a record and applies it, as the navigator does.
+func (a *agent) apply(t *testing.T, rec Record) Outcome {
+	t.Helper()
+	if err := a.ledger.Log(rec); err != nil {
+		t.Fatal(err)
+	}
+	var out Outcome
+	if err := a.exec.Replay(func(o Outcome) { out = o }); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func newKey(t *testing.T) *ecdsa.PrivateKey {
+	k, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return k
+}
+
+func joinBody(key *ecdsa.PrivateKey) string {
+	return fmt.Sprintf(`{"node":"http://node.example","nodeKey":%q,"profile":"p"}`, identity.Address(key).Hex())
+}
+
+// A contract without approve_partner and approve_removal: joins are
+// approved, leaving oneself is approved, removing others is refused.
+func TestMembershipDecisionsByDefault(t *testing.T) {
+	a := newAgent(t, alice)
+	carol := newKey(t)
+	partners := a.doc.GetSubCollection(PartnersCollection)
+	ts := "20240102030500000000"
+
+	join := signedRecord(t, carol, identity.KindJoin, contract, joinBody(newKey(t)), ts)
+	if out := a.apply(t, join); out.Decision == nil || !*out.Decision || out.Value != true {
+		t.Fatalf("join outcome = %+v", out)
+	}
+	if ok, _ := partners.Has(identity.Address(carol).Hex()); !ok {
+		t.Fatal("carol was not added as a partner")
+	}
+	if approved, known, _ := Decision(a.doc, join.HashCode); !known || !approved {
+		t.Fatalf("stored decision = %v, %v", approved, known)
+	}
+
+	removal := signedRecord(t, carol, identity.KindLeave, contract,
+		fmt.Sprintf(`{"member":%q}`, common.AgentAddress(alice).Hex()), ts)
+	if out := a.apply(t, removal); out.Decision == nil || *out.Decision {
+		t.Fatalf("removing another member without approve_removal: %+v", out)
+	}
+
+	newNode := newKey(t)
+	rotate := signedRecord(t, carol, identity.KindRotateKey, contract,
+		fmt.Sprintf(`{"node":"http://new.example","nodeKey":%q}`, identity.Address(newNode).Hex()), ts)
+	if out := a.apply(t, rotate); out.Decision == nil || !*out.Decision {
+		t.Fatalf("rotate outcome = %+v", out)
+	}
+	p, _ := partners.Document(identity.Address(carol).Hex()).Fields()
+	if p["nodeKey"] != identity.Address(newNode).Hex() || p["address"] != "http://new.example" {
+		t.Fatalf("partner after rotation = %v", p)
+	}
+
+	leave := signedRecord(t, carol, identity.KindLeave, contract,
+		fmt.Sprintf(`{"member":%q}`, identity.Address(carol).Hex()), ts)
+	if out := a.apply(t, leave); out.Decision == nil || !*out.Decision {
+		t.Fatalf("leave outcome = %+v", out)
+	}
+	if ok, _ := partners.Has(identity.Address(carol).Hex()); ok {
+		t.Fatal("carol is still a partner after leaving")
+	}
+	// Decisions do not touch the EVM state, but each advances the cursor.
+	if bn, _ := a.doc.Get(common.KeyBlockNumber); bn != uint64(5) {
+		t.Fatalf("block_number = %v, want 5", bn)
+	}
+}
+
+// The Club contract decides: only invited agents join, only the owner removes.
+func TestMembershipPolicies(t *testing.T) {
+	owner, bob, carol := newKey(t), newKey(t), newKey(t)
+	bin, _ := os.ReadFile("../testdata/Club.bin")
+	abiJSON, _ := os.ReadFile("../testdata/Club.abi")
+	doc := common.NewMemoryDocument(map[string]any{
+		common.KeyPID: identity.Address(owner).Hex(), common.KeyAddress: "http://owner.example",
+		common.KeyCode: strings.TrimSpace(string(bin)), common.KeyABI: string(abiJSON),
+	})
+	a := &agent{me: alice, doc: doc, db: rawdb.NewMemoryDatabase(), ledger: &MemoryLedger{}}
+	a.exec = NewContractExecution(a.doc, contract, alice, a.db, a.ledger)
+	if ok, err := a.exec.Create(Record{Action: ActionDeployContract, Timestamp: createdAt}); err != nil || !ok {
+		t.Fatalf("Create = %v, %v", ok, err)
+	}
+	ts := "20240102030500000000"
+	invite := signedRecord(t, owner, identity.KindCall, contract,
+		fmt.Sprintf(`{"method":"invite","values":{"who":%q}}`, identity.Address(bob).Hex()), ts)
+	if out := a.apply(t, invite); out.Err != nil {
+		t.Fatalf("invite: %v", out.Err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		key  *ecdsa.PrivateKey
+		want bool
+	}{{"uninvited carol", carol, false}, {"invited bob", bob, true}} {
+		out := a.apply(t, signedRecord(t, tc.key, identity.KindJoin, contract, joinBody(newKey(t)), ts))
+		if out.Decision == nil || *out.Decision != tc.want {
+			t.Errorf("%s joins: %+v, want %v", tc.name, out, tc.want)
+		}
+	}
+	remove := func(by, member *ecdsa.PrivateKey) bool {
+		out := a.apply(t, signedRecord(t, by, identity.KindLeave, contract,
+			fmt.Sprintf(`{"member":%q}`, identity.Address(member).Hex()), ts))
+		return out.Decision != nil && *out.Decision
+	}
+	if remove(bob, owner) {
+		t.Error("bob removed the owner")
+	}
+	if !remove(owner, bob) {
+		t.Error("the owner could not remove bob")
 	}
 }
 
@@ -402,11 +497,8 @@ func TestReloadAfterRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	root := a.exec.State().Root()
-	a.exec.Close()
-
 	// As navigator.get_contract does: a new ContractExecution, then Run.
-	reloaded := NewContractExecution(a.doc, contract, alice, "http://alice.example", a.db, a.ledger, a.sender)
-	defer reloaded.Close()
+	reloaded := NewContractExecution(a.doc, contract, alice, a.db, a.ledger)
 	if err := reloaded.Run(); err != nil {
 		t.Fatal(err)
 	}
@@ -423,8 +515,7 @@ func TestContractsDoNotShareState(t *testing.T) {
 	db := rawdb.NewMemoryDatabase()
 	open := func(hash string) *ContractExecution {
 		doc := common.NewMemoryDocument(deployMessage(t))
-		c := NewContractExecution(doc, hash, alice, "http://alice.example", db, &MemoryLedger{}, &common.RecordingSender{})
-		t.Cleanup(c.Close)
+		c := NewContractExecution(doc, hash, alice, db, &MemoryLedger{})
 		if _, err := c.Create(Record{Agent: alice, Timestamp: createdAt}); err != nil {
 			t.Fatal(err)
 		}
@@ -461,7 +552,7 @@ func TestPebbleEndToEndAcrossRestart(t *testing.T) {
 	if err := doc.Update(deployMessage(t)); err != nil { // as deploy_contract stores the message
 		t.Fatal(err)
 	}
-	c := NewContractExecution(doc, contract, alice, "http://alice.example", db, ChainLedger{ledger}, &common.RecordingSender{})
+	c := NewContractExecution(doc, contract, alice, db, ChainLedger{ledger})
 	if ok, err := c.Create(Record{Agent: alice, Timestamp: createdAt, HashCode: contract}); err != nil || !ok {
 		t.Fatalf("Create = %v, %v", ok, err)
 	}
@@ -470,19 +561,17 @@ func TestPebbleEndToEndAcrossRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	root := res.StateRoot
-	if _, err := c.Join(record(t, `{"message":{"to":"alice-pid",
-		"msg":{"pid":"carol-pid","address":"http://carol.example"}},"timestamp":"20240102030600000000"}`)); err != nil {
-		t.Fatal(err)
+	res, err = c.Call(writeRecord(t, alice, "setThenFail", `{"value": 1}`, "20240102030600000000"), true)
+	if !errors.Is(err, vm.ErrExecutionReverted) || res.StateRoot != root {
+		t.Fatalf("reverting write: %v, root %s", err, res.StateRoot)
 	}
-	c.Close()
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
 
 	db, doc, ledger = open()
 	defer db.Close()
-	c = NewContractExecution(doc, contract, alice, "http://alice.example", db, ChainLedger{ledger}, &common.RecordingSender{})
-	defer c.Close()
+	c = NewContractExecution(doc, contract, alice, db, ChainLedger{ledger})
 	if err := c.Run(); err != nil {
 		t.Fatalf("Run after restart: %v", err)
 	}
@@ -497,7 +586,7 @@ func TestPebbleEndToEndAcrossRestart(t *testing.T) {
 		t.Fatalf("creator partner after restart: %v, %v", ok, err)
 	}
 	if n, err := ledger.Len(); err != nil || n != 3 {
-		t.Fatalf("ledger length after restart = %d, %v; want 3 (deploy, write, join)", n, err)
+		t.Fatalf("ledger length after restart = %d, %v; want 3 (deploy, write, reverted write)", n, err)
 	}
 	first, _, _ := ledger.Get(1)
 	if r, err := DecodeRecord(first); err != nil || r.HashCode != contract {

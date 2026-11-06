@@ -1,7 +1,6 @@
-// Package execution holds ContractExecution, the counterpart of the Python
-// ContractExecution in ibc (execution/contract_execution.py), and the
-// Navigator that feeds it, the counterpart of execution_navigator.py and
-// execution_service.py.
+// Package execution runs contracts: ContractExecution applies a contract's
+// ordered records to its EVM state, and the Navigator gives each contract
+// its own goroutine, fed from the contract's ledger.
 package execution
 
 import (
@@ -12,6 +11,7 @@ import (
 	"github.com/ethereum/go-ethereum/ethdb"
 
 	"github.com/ouripoupko/ibc-go/common"
+	"github.com/ouripoupko/ibc-go/identity"
 )
 
 // PartnersCollection is the name of the contract document's partners
@@ -57,43 +57,29 @@ func (l ChainLedger) Records(from uint64, fn func(uint64, Record) error) error {
 // ContractExecution is one contract instance on this agent.
 //
 // The contract's block number is its cursor: the index of the last ledger
-// record applied. Every record that is logged is applied exactly once and
-// advances it by one, whatever the outcome, so Replay knows where to resume
-// after a restart.
+// record applied. Every logged record is applied exactly once and advances
+// it by one, whatever the outcome, so Replay knows where to resume.
 type ContractExecution struct {
 	contractDoc common.Document
 	hashCode    string
 	me          string
-	myAddress   string
 	ledger      Ledger
 	partnersDB  common.Collection
 	state       *common.State
-	outbox      *common.Outbox
 }
 
-// NewContractExecution creates the execution of the contract hashCode,
-// owned by agent me (reachable at myAddress). Python passed the navigator
-// to the State only for read(), which is dropped; db takes its place: the
-// node's database, in which the contract's EVM state gets its own key range
-// (common.ContractDatabase). sender delivers the join replies to partners.
-func NewContractExecution(contractDoc common.Document, hashCode, me, myAddress string,
-	db ethdb.Database, ledger Ledger, sender common.Sender) *ContractExecution {
+// NewContractExecution creates the execution of contract hashCode for agent
+// me. Its EVM state lives in db, in the contract's own key range.
+func NewContractExecution(contractDoc common.Document, hashCode, me string, db ethdb.Database, ledger Ledger) *ContractExecution {
 	partnersDB := contractDoc.GetSubCollection(PartnersCollection)
 	return &ContractExecution{
 		contractDoc: contractDoc,
 		hashCode:    hashCode,
 		me:          me,
-		myAddress:   myAddress,
 		ledger:      ledger,
 		partnersDB:  partnersDB,
 		state:       common.NewState(contractDoc, partnersDB, common.ContractDatabase(db, me, hashCode)),
-		outbox:      common.NewOutbox(sender),
 	}
-}
-
-// Close stops the outbox after it has sent every queued reply.
-func (c *ContractExecution) Close() {
-	c.outbox.Close()
 }
 
 // State returns the contract's state.
@@ -130,7 +116,7 @@ func (c *ContractExecution) create(record Record) (bool, error) {
 	}
 	address, _ := fields[common.KeyAddress].(string)
 	pid, _ := fields[common.KeyPID].(string)
-	if err := c.Connect(address, pid, fields[common.KeyProfile]); err != nil {
+	if err := c.Connect(address, pid, fields[common.KeyProfile], fields["nodeKey"]); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -148,71 +134,15 @@ func (c *ContractExecution) Run() error {
 	return c.state.Run(pid, timestamp)
 }
 
-// Join logs and applies a partner's request to join the contract
-// (a2a_connect) and returns whether it was approved. If this agent is the
-// addressee, the decision is sent back to the requesting agent.
-func (c *ContractExecution) Join(record Record) (bool, error) {
-	if !c.state.Ready() {
-		return false, common.ErrNotRunning
-	}
-	if err := c.ledger.Log(record); err != nil {
-		return false, err
-	}
-	return c.join(record)
-}
-
-func (c *ContractExecution) join(record Record) (bool, error) {
-	message := record.Message
-	msg := message.Msg
-	if msg == nil {
-		msg = &JoinMsg{}
-	}
-	approve := false
-	isPartner, err := c.partnersDB.Has(msg.PID)
-	if err != nil {
-		return false, err
-	}
-	if isPartner {
-		if _, err := c.state.Advance(); err != nil {
-			return false, err
-		}
-	} else {
-		// TODO: approve_partner is a stub until its semantics are defined for
-		// Solidity contracts. It returns ErrNotImplemented, which is treated
-		// as "not approved" for now. In Python it returned True by default.
-		_, err := c.state.Call(message.To, common.MethodApprovePartner,
-			map[string]any{"partner": msg.PID}, record.Timestamp)
-		if err != nil && !isDeterministic(err) {
-			return false, err
-		}
-	}
-	// TODO: the partners collection is not part of the state root, so a crash
-	// between Connect and the block number update above can make a replayed
-	// join see the partner as existing. Once approve_partner is defined, keep
-	// the partner list in the contract's EVM state.
-	if approve {
-		if err := c.Connect(msg.Address, msg.PID, msg.Profile); err != nil {
-			return false, err
-		}
-	}
-	if message.To == c.me {
-		partner := common.NewPartner(msg.Address, msg.PID, c.myAddress, c.me, nil, c.outbox)
-		if err := partner.ReplyJoin(c.hashCode, approve); err != nil {
-			return approve, err
-		}
-	}
-	return approve, nil
-}
-
-// Connect adds a partner to the contract.
-func (c *ContractExecution) Connect(address, pid string, profile any) error {
-	return c.partnersDB.Document(pid).Update(map[string]any{"address": address, "profile": profile})
+// Connect adds a partner to the contract's partners collection.
+func (c *ContractExecution) Connect(address, pid string, profile, nodeKey any) error {
+	return c.partnersDB.Document(pid).Update(map[string]any{"address": address, "profile": profile, "nodeKey": nodeKey})
 }
 
 // Call executes a contract method. With shouldLog the record is logged and
 // executed as a write transaction; without it the call is read-only
-// (eth_call) and changes nothing. A failing call returns a *common.ContractError,
-// whose Error() is the reply Python produced with str(e).
+// (eth_call) and changes nothing. A failing call returns a
+// *common.ContractError, whose Error() is the reply.
 func (c *ContractExecution) Call(record Record, shouldLog bool) (common.Result, error) {
 	if !shouldLog {
 		return c.state.View(record.Agent, record.Method, record.Message.Values, record.Timestamp)
@@ -230,18 +160,19 @@ func (c *ContractExecution) Call(record Record, shouldLog bool) (common.Result, 
 type Outcome struct {
 	Index  uint64
 	Record Record
-	// Value is the reply: true for a deploy, the approval for a join, the
-	// decoded return value for a write.
+	// Value is the reply: true for a deploy, the decision for a membership
+	// change, the decoded return value for a write.
 	Value  any
 	Result common.Result
 	// Err is a deterministic failure (every partner gets the same one).
 	Err error
+	// Decision is set for a membership change: whether it was approved.
+	Decision *bool
 }
 
 // Replay applies, in order, every ledger record after the cursor, calling
-// fn with each outcome. It is the normal way records are executed by the
-// Navigator, and also recovers after a crash. It stops at the first
-// infrastructure error, leaving that record to be applied by a later Replay.
+// fn with each outcome. It stops at the first infrastructure error, leaving
+// that record to be applied by a later Replay.
 func (c *ContractExecution) Replay(fn func(Outcome)) error {
 	cursor, err := c.cursor()
 	if err != nil {
@@ -277,14 +208,16 @@ func (c *ContractExecution) apply(index uint64, record Record) (Outcome, error) 
 			break
 		}
 		out.Value, err = c.create(record)
-	case ActionConnect:
-		if !c.state.Ready() {
-			return out, common.ErrNotRunning
-		}
-		out.Value, err = c.join(record)
 	case ActionWrite:
 		out.Result, err = c.state.Call(record.Agent, record.Method, record.Message.Values, record.Timestamp)
 		out.Value = out.Result.Value
+	case ActionJoin, ActionLeave, ActionRotateKey:
+		var approved bool
+		approved, out.Result, err = c.decide(record)
+		if err == nil {
+			out.Decision = &approved
+			out.Value = approved
+		}
 	default:
 		out.Result, err = c.state.Advance()
 		out.Err = fmt.Errorf("unknown action %q", record.Action)
@@ -299,6 +232,68 @@ func (c *ContractExecution) apply(index uint64, record Record) (Outcome, error) 
 		out.Result = common.Result{StateRoot: c.state.Root(), BlockNumber: c.state.BlockNumber()}
 	}
 	return out, nil
+}
+
+// decide applies a membership change (§10 of docs/consensus.md):
+//   - join: the contract's approve_partner(joiner), called as the joiner;
+//     approved if the contract has no such function;
+//   - leave: always approved for oneself; removing another member calls the
+//     contract's approve_removal(member) as the requester, and is refused if
+//     the contract has no such function;
+//   - rotate_key: approved.
+//
+// The decision is stored with the cursor, and the partners collection is
+// updated after it.
+func (c *ContractExecution) decide(record Record) (bool, common.Result, error) {
+	if record.Tx == nil {
+		return false, common.Result{}, fmt.Errorf("%s record without its transaction", record.Action)
+	}
+	body, err := record.Tx.Tx.ParseBody()
+	if err != nil {
+		return false, common.Result{}, err
+	}
+	agent := record.Tx.Tx.Agent
+	id := record.HashCode
+	var approved bool
+	var res common.Result
+	switch b := body.(type) {
+	case *identity.JoinBody:
+		approved, res, err = c.state.Decide(agent.Hex(), common.MethodApprovePartner, agent, record.Timestamp, id, true)
+		if err == nil && approved {
+			err = c.Connect(b.Node, agent.Hex(), b.Profile, b.NodeKey.Hex())
+		}
+	case *identity.LeaveBody:
+		if b.Member == agent {
+			approved, res, err = c.state.Decide(agent.Hex(), "", b.Member, record.Timestamp, id, true)
+		} else {
+			approved, res, err = c.state.Decide(agent.Hex(), common.MethodApproveRemoval, b.Member, record.Timestamp, id, false)
+		}
+		if err == nil && approved {
+			err = c.partnersDB.Delete(b.Member.Hex())
+		}
+	case *identity.RotateKeyBody:
+		approved, res, err = c.state.Decide(agent.Hex(), "", agent, record.Timestamp, id, true)
+		if err == nil && approved {
+			err = c.partnersDB.Document(agent.Hex()).Update(map[string]any{"address": b.Node, "nodeKey": b.NodeKey.Hex()})
+		}
+	default:
+		return false, common.Result{}, fmt.Errorf("%s record with a %T body", record.Action, body)
+	}
+	return approved, res, err
+}
+
+// Decision returns the stored decision on a membership change.
+func Decision(doc common.Document, id string) (approved, known bool, err error) {
+	fields, err := doc.Fields()
+	if err != nil {
+		return false, false, err
+	}
+	v, ok := fields[common.KeyDecisionPrefix+id]
+	if !ok {
+		return false, false, nil
+	}
+	approved, _ = v.(bool)
+	return approved, true, nil
 }
 
 // cursor returns the index of the last applied ledger record.

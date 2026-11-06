@@ -1,0 +1,216 @@
+// Shared code of the web interface's pages: connecting MetaMask, small DOM
+// helpers, and forms built from a contract's ABI.
+//
+// Everything shown comes from the node or from contracts, so it is always
+// inserted as text (textContent), never as HTML.
+import { Ibc, IbcError } from './ibc.mjs';
+
+export { IbcError };
+
+/** Connects to this node as the MetaMask account's agent. */
+export async function connect() {
+  if (!window.ethereum) {
+    throw new Error('MetaMask was not found. Install it, or open this page in a browser that has it.');
+  }
+  const ibc = await Ibc.connect(location.origin, Ibc.metamask(window.ethereum));
+  window.ethereum.on?.('accountsChanged', () => location.reload());
+  return ibc;
+}
+
+export const $ = (selector, root = document) => root.querySelector(selector);
+
+/** Creates an element: el('td', { class: 'id' }, 'text', child, …). */
+export function el(tag, attrs = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(attrs)) {
+    if (value === undefined || value === null || value === false) continue;
+    if (key.startsWith('on')) node.addEventListener(key.slice(2), value);
+    else if (key === 'class') node.className = value;
+    else node.setAttribute(key, value === true ? '' : value);
+  }
+  for (const child of children.flat()) {
+    if (child === undefined || child === null) continue;
+    node.append(child instanceof Node ? child : String(child));
+  }
+  return node;
+}
+
+/** Shows a status line: kind is '', 'ok' or 'bad'. */
+export function status(node, text, kind = '') {
+  node.textContent = text;
+  node.className = `status ${kind}`.trim();
+}
+
+/** Runs fn while button is disabled; shows a thrown error in statusNode. */
+export async function busy(button, statusNode, fn) {
+  button.disabled = true;
+  try {
+    return await fn();
+  } catch (err) {
+    status(statusNode, errorText(err), 'bad');
+  } finally {
+    button.disabled = false;
+  }
+}
+
+/** A readable message for an error from MetaMask, the node or the network. */
+export function errorText(err) {
+  if (err?.code === 4001) return 'You declined the signature in MetaMask.';
+  if (err instanceof TypeError && /fetch/i.test(err.message)) return 'The node could not be reached.';
+  return err?.message ?? String(err);
+}
+
+/** Pretty JSON for a result. */
+export function pretty(value) {
+  return typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+}
+
+/** Errors come back from contracts as strings in place of a result. */
+export function isErrorReply(value) {
+  return typeof value === 'string' && /^(execution reverted|out of gas|contract deployment failed|unknown method|\w+: (missing|unexpected) argument|\w+: argument )/.test(value);
+}
+
+export function short(id) {
+  return typeof id === 'string' && id.length > 14 ? `${id.slice(0, 8)}…${id.slice(-4)}` : id;
+}
+
+/** Reads a file input as text. */
+export function readFile(input) {
+  const file = input.files?.[0];
+  return file ? file.text() : Promise.resolve(null);
+}
+
+// Invites: a member shares the contract id, its node and its agent id, so
+// another agent can ask to join from its own node.
+
+export function encodeInvite(invite) {
+  const bytes = new TextEncoder().encode(JSON.stringify(invite));
+  return btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+export function decodeInvite(code) {
+  const b64 = code.trim().replace(/-/g, '+').replace(/_/g, '/');
+  const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+  const invite = JSON.parse(new TextDecoder().decode(bytes));
+  if (!invite?.contract || !invite?.node || !invite?.agent) throw new Error('not an ibc invite');
+  return invite;
+}
+
+// ABI forms.
+
+/** Parses ABI JSON text (an array, or an object with an "abi" array). */
+export function parseAbi(text) {
+  const abi = JSON.parse(text);
+  const list = Array.isArray(abi) ? abi : abi?.abi;
+  if (!Array.isArray(list)) throw new Error('the ABI must be a JSON array');
+  return list;
+}
+
+/** The type as Solidity writes it, with tuple components spelled out. */
+export function typeName(param) {
+  if (!param.type.startsWith('tuple')) return param.type;
+  const inner = (param.components ?? []).map((c) => `${typeName(c)} ${c.name}`.trim()).join(', ');
+  return `(${inner})${param.type.slice(5)}`;
+}
+
+export function signature(fn) {
+  const ins = (fn.inputs ?? []).map((p) => `${typeName(p)} ${p.name ?? ''}`.trim()).join(', ');
+  const outs = (fn.outputs ?? []).map((p) => `${typeName(p)} ${p.name ?? ''}`.trim()).join(', ');
+  return `${fn.name ?? 'constructor'}(${ins})${outs ? ` returns (${outs})` : ''}`;
+}
+
+export function isRead(fn) {
+  return fn.stateMutability === 'view' || fn.stateMutability === 'pure' || fn.constant === true;
+}
+
+/**
+ * Builds the inputs for a list of ABI parameters. Returns the element and a
+ * read() that returns the values object the API expects, keyed by name (or
+ * by position for unnamed parameters), or throws a readable error.
+ */
+export function paramInputs(params = []) {
+  const fields = params.map((param, i) => {
+    const key = param.name || String(i);
+    const id = `p-${Math.random().toString(36).slice(2)}`;
+    const label = el('label', { for: id }, param.name || `#${i}`, ' ', el('span', { class: 'type' }, typeName(param)));
+    let input;
+    let read;
+    if (param.type === 'bool') {
+      input = el('input', { type: 'checkbox', id });
+      read = () => input.checked;
+      return { key, node: el('label', { class: 'check' }, input, param.name || `#${i}`, ' ', el('span', { class: 'type' }, 'bool')), read };
+    }
+    if (param.type.endsWith(']') || param.type.startsWith('tuple')) {
+      input = el('textarea', { id, placeholder: placeholderFor(param), spellcheck: 'false' });
+      read = () => {
+        try {
+          return JSON.parse(input.value);
+        } catch {
+          throw new Error(`${param.name || `#${i}`}: enter JSON, for example ${placeholderFor(param)}`);
+        }
+      };
+    } else {
+      input = el('input', { type: 'text', id, placeholder: placeholderFor(param), spellcheck: 'false', autocomplete: 'off' });
+      read = () => {
+        const v = input.value.trim();
+        if (v === '' && !param.type.startsWith('string')) throw new Error(`${param.name || `#${i}`} is empty`);
+        return param.type === 'string' ? input.value : v; // integers go as strings: exact at any size
+      };
+    }
+    return { key, node: el('div', {}, label, input), read };
+  });
+  return {
+    node: el('div', {}, fields.map((f) => f.node)),
+    read() {
+      return Object.fromEntries(fields.map((f) => [f.key, f.read()]));
+    },
+  };
+}
+
+function placeholderFor(param) {
+  const t = param.type;
+  if (t.endsWith(']')) {
+    const base = { ...param, type: t.slice(0, t.lastIndexOf('[')) };
+    return `[${placeholderFor(base)}, …]`;
+  }
+  if (t.startsWith('tuple')) {
+    const parts = (param.components ?? []).map((c) => `"${c.name}": ${placeholderFor(c)}`);
+    return `{${parts.join(', ')}}`;
+  }
+  if (t === 'address') return '"0x…"';
+  if (t.startsWith('uint') || t.startsWith('int')) return '42';
+  if (t.startsWith('bytes')) return '"0x…"';
+  if (t === 'string') return '"text"';
+  return t;
+}
+
+/**
+ * A form for one function. run(values) performs the call and returns its
+ * result; the form shows the result, or the error.
+ */
+export function functionForm(fn, actionLabel, run) {
+  const inputs = paramInputs(fn.inputs);
+  const result = el('pre', { class: 'result hidden' });
+  const button = el('button', { type: 'submit', class: isRead(fn) ? 'secondary' : '' }, actionLabel);
+  const form = el('form', { class: 'fn' },
+    el('h3', {}, fn.name),
+    el('div', { class: 'sig' }, signature(fn)),
+    inputs.node, button, result);
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    button.disabled = true;
+    result.className = 'result';
+    result.textContent = isRead(fn) ? 'Reading… (sign the query in MetaMask)' : 'Sending… (sign the transaction in MetaMask)';
+    try {
+      const value = await run(inputs.read());
+      result.textContent = pretty(value);
+      result.className = `result ${isErrorReply(value) ? 'bad' : 'ok'}`;
+    } catch (err) {
+      result.textContent = errorText(err);
+      result.className = 'result bad';
+    } finally {
+      button.disabled = false;
+    }
+  });
+  return form;
+}

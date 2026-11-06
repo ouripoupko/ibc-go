@@ -1,6 +1,5 @@
-// Package dispatcher is the node's HTTP API: the counterpart of Python's
-// ibc.py (Flask app, /ibc/app and /stream) and dispatcher/navigator.py.
-// docs/blockchain-api.md in the Python repo describes the protocol.
+// Package dispatcher is the node's HTTP API (/ibc/app and the /stream
+// event stream), described in docs/api.md.
 package dispatcher
 
 import (
@@ -14,28 +13,29 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
+
+	ethcommon "github.com/ethereum/go-ethereum/common"
 
 	"github.com/ouripoupko/ibc-go/common"
 	"github.com/ouripoupko/ibc-go/consensus"
 	"github.com/ouripoupko/ibc-go/execution"
+	"github.com/ouripoupko/ibc-go/identity"
 )
 
 // Actions handled by the dispatcher itself.
 const (
-	actionIsExistAgent = "is_exist_agent"
-	actionGetContracts = "get_contracts"
-	actionGetContract  = "get_contract"
-	actionJoinContract = "join_contract"
-	actionRead         = "contract_read"
-	actionGetLedger    = "a2a_get_ledger"
+	actionNodeInfo      = "node_info"
+	actionIsExistAgent  = "is_exist_agent"
+	actionGetContracts  = "get_contracts"
+	actionGetContract   = "get_contract"
+	actionJoinContract  = "join_contract"
+	actionLeaveContract = "leave_contract"
+	actionRotateKey     = "rotate_key"
+	actionRead          = "contract_read"
+	actionStream        = "stream"
 )
-
-// ledgerKeyWidth pads ledger indexes in a2a_get_ledger replies, so that
-// sorting the keys as strings (as Python's consensus did) keeps their order.
-const ledgerKeyWidth = 15
 
 // maxBody bounds a request body.
 const maxBody = 16 << 20
@@ -48,16 +48,18 @@ type Dispatcher struct {
 	navigator *execution.Navigator
 	consensus consensus.Protocol
 	broker    *Broker
-	sender    common.Sender
+	nodeKey   ethcommon.Address
 	done      <-chan struct{}
 	mux       *http.ServeMux
+	guard     *guard
 }
 
-// New returns a Dispatcher. sender makes the direct partner calls
-// (join_contract). Event streams end when done is closed.
+// New returns a Dispatcher. nodeKey is the address of the node's key, which
+// agents authorize when they register. Event streams end when done is closed.
 func New(navigator *execution.Navigator, protocol consensus.Protocol, broker *Broker,
-	sender common.Sender, done <-chan struct{}) *Dispatcher {
-	d := &Dispatcher{navigator: navigator, consensus: protocol, broker: broker, sender: sender, done: done}
+	nodeKey ethcommon.Address, done <-chan struct{}) *Dispatcher {
+	d := &Dispatcher{navigator: navigator, consensus: protocol, broker: broker, nodeKey: nodeKey, done: done,
+		guard: newGuard()}
 	d.mux = http.NewServeMux()
 	d.mux.HandleFunc("/ibc/app", d.handleApp)
 	d.mux.HandleFunc("/ibc/app/{path...}", d.handleApp)
@@ -65,8 +67,7 @@ func New(navigator *execution.Navigator, protocol consensus.Protocol, broker *Br
 	return d
 }
 
-// ServeHTTP adds the CORS headers (Python used Flask-CORS) and answers
-// preflight requests.
+// ServeHTTP adds the CORS headers and answers preflight requests.
 func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h := w.Header()
 	h.Set("Access-Control-Allow-Origin", "*")
@@ -80,7 +81,7 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	d.mux.ServeHTTP(w, r)
 }
 
-// handleApp serves /ibc/app/<identity>/<contract>/<method>?action=<action>.
+// handleApp serves /ibc/app/<agent>/<contract>/<method>?action=<action>.
 func (d *Dispatcher) handleApp(w http.ResponseWriter, r *http.Request) {
 	var parts [3]string
 	segments := strings.Split(r.PathValue("path"), "/")
@@ -89,8 +90,10 @@ func (d *Dispatcher) handleApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	copy(parts[:], segments)
+	// An agent id that is an address is written in its checksummed form.
+	parts[0] = canonicalAgent(parts[0])
 
-	msg, err := readMessage(r)
+	body, msg, err := readBody(r)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, message(err.Error()))
 		return
@@ -108,28 +111,40 @@ func (d *Dispatcher) handleApp(w http.ResponseWriter, r *http.Request) {
 
 	if record.Action != execution.ActionConsent {
 		slog.Info("request", "hash", short(record.HashCode), "agent", record.Agent,
-			"action", record.Action, "contract", record.Contract, "method", record.Method)
+			"action", record.Action, "contract", short(record.Contract), "method", record.Method)
 	}
-	reply, err := d.handle(r.Context(), record)
+	reply, err := d.handle(r.Context(), record, body, r.URL.Query().Get("auth"))
 	if err != nil {
-		slog.Warn("request failed", "hash", short(record.HashCode), "action", record.Action, "err", err)
+		if record.Action != execution.ActionConsent {
+			slog.Warn("request failed", "hash", short(record.HashCode), "action", record.Action, "err", err)
+		}
 		reply = message(err.Error())
 	}
 	writeJSON(w, http.StatusOK, reply)
 }
 
-// handle runs an action. Like Python, errors in the request itself come
-// back as JSON values with status 200, not as HTTP errors.
-func (d *Dispatcher) handle(ctx context.Context, record execution.Record) (any, error) {
+// handle runs an action. auth is the signed query of a GET, from the URL.
+// Errors in the request itself come back as JSON values with status 200,
+// not as HTTP errors.
+func (d *Dispatcher) handle(ctx context.Context, record execution.Record, body []byte, auth string) (any, error) {
 	type route struct{ method, action string }
 	switch (route{record.Type, record.Action}) {
+	case route{http.MethodGet, actionNodeInfo}:
+		return map[string]any{"nodeKey": d.nodeKey.Hex()}, nil
+
 	case route{http.MethodGet, actionIsExistAgent}:
 		return d.navigator.AgentExists(record.Agent)
 
 	case route{http.MethodGet, actionGetContracts}:
+		if err := d.ownerQuery(auth, record, actionGetContracts); err != nil {
+			return nil, err
+		}
 		return d.navigator.Contracts(record.Agent)
 
 	case route{http.MethodGet, actionGetContract}:
+		if err := d.ownerQuery(auth, record, actionGetContract); err != nil {
+			return nil, err
+		}
 		summary, ok, err := d.navigator.Contract(record.Agent, record.Contract)
 		if err != nil || !ok {
 			return map[string]any{}, err
@@ -137,121 +152,180 @@ func (d *Dispatcher) handle(ctx context.Context, record execution.Record) (any, 
 		return summary, nil
 
 	case route{http.MethodPut, execution.ActionRegisterAgent}:
-		// Not a consensus matter: straight to execution, as in Python.
-		if err := d.navigator.Submit(record.Agent, record); err != nil {
-			return nil, err
-		}
-		return record.HashCode, nil
+		return d.registerAgent(record, body)
 
 	case route{http.MethodPut, execution.ActionDeployContract}:
-		record.Contract = record.HashCode
-		if err := d.consensus.Submit(record.Agent, record); err != nil {
-			return nil, err
-		}
-		return record.HashCode, nil
+		return d.submit(record, body, identity.KindDeploy)
+
+	case route{http.MethodPost, execution.ActionWrite}:
+		return d.submit(record, body, identity.KindCall)
+
+	case route{http.MethodPut, actionLeaveContract}:
+		return d.submit(record, body, identity.KindLeave)
+
+	case route{http.MethodPut, actionRotateKey}:
+		return d.submit(record, body, identity.KindRotateKey)
 
 	case route{http.MethodPut, actionJoinContract}:
-		return d.joinContract(ctx, record)
-
-	case route{http.MethodPut, execution.ActionConnect},
-		route{http.MethodPut, execution.ActionReplyJoin},
-		route{http.MethodPut, execution.ActionConsent},
-		route{http.MethodPost, execution.ActionWrite}:
-		if err := d.consensus.Submit(record.Agent, record); err != nil {
-			return nil, err
+		var req struct {
+			identity.SignedTx
+			Partner struct {
+				Address string `json:"address"`
+				Agent   string `json:"agent"`
+			} `json:"partner"`
 		}
-		return record.HashCode, nil
+		if err := json.Unmarshal(body, &req); err != nil {
+			return nil, fmt.Errorf("join_contract: %w", err)
+		}
+		if req.Partner.Address == "" || req.Partner.Agent == "" {
+			return nil, errors.New("join_contract needs partner.address and partner.agent")
+		}
+		if have, err := d.navigator.ContractExists(record.Agent, req.Tx.Contract); err != nil || have {
+			return nil, err // null: this agent already has the contract
+		}
+		return d.consensus.RelayJoin(ctx, record.Agent, req.SignedTx, req.Partner.Address, req.Partner.Agent)
+
+	case route{http.MethodPut, execution.ActionConsent}:
+		return d.consensus.Receive(ctx, record.Agent, record.Contract, body)
 
 	case route{http.MethodPost, actionRead}:
-		result, err := d.navigator.Read(record.Agent, record)
+		caller, err := d.readQuery(&record, body)
+		if err != nil {
+			return nil, err
+		}
+		result, err := d.navigator.Read(record.Agent, caller, record)
 		if errors.Is(err, execution.ErrUnknownContract) {
 			return message("no such contract"), nil
 		}
 		if err != nil {
 			var ce *common.ContractError
 			if errors.As(err, &ce) || errors.Is(err, common.ErrNotImplemented) {
-				return err.Error(), nil // as Python returned str(e)
+				return err.Error(), nil
 			}
 			return nil, err
 		}
 		return result.Value, nil
-
-	case route{http.MethodPost, actionGetLedger}:
-		return d.getLedger(record)
 	}
 	return nil, fmt.Errorf("unknown action %q for %s", record.Action, record.Type)
 }
 
-// joinContract asks a partner's node to let this agent join a contract
-// (Python navigator.join_contract). The outcome arrives later as
-// a2a_reply_join. A contract this agent already has is answered with null.
-func (d *Dispatcher) joinContract(ctx context.Context, record execution.Record) (any, error) {
-	f := record.Message.Fields
-	contract, _ := f["contract"].(string)
-	address, _ := f["address"].(string)
-	agent, _ := f["agent"].(string)
-	if contract == "" || address == "" || agent == "" {
-		return nil, errors.New("join_contract needs contract, address and agent")
-	}
-	have, err := d.navigator.ContractExists(record.Agent, contract)
+// ownerQuery checks the signed query of a call that only the agent itself
+// may make.
+func (d *Dispatcher) ownerQuery(auth string, record execution.Record, action string) error {
+	sq, err := parseQuery([]byte(auth))
 	if err != nil {
-		return nil, err
+		return err
 	}
-	if have {
-		slog.Warn("double join", "agent", record.Agent, "contract", contract)
-		return nil, nil
-	}
-	myAddress, err := d.navigator.AgentAddress(record.Agent)
-	if err != nil {
-		return nil, err
-	}
-	partner := common.NewPartner(address, agent, myAddress, record.Agent, d.sender, nil)
-	if err := partner.Connect(ctx, contract, f["profile"]); err != nil {
-		return nil, err
-	}
-	return record.HashCode, nil
+	return d.guard.owner(sq, action, record.Agent, record.Contract)
 }
 
-// getLedger serves a2a_get_ledger: the contract's records with index >= the
-// requested index, keyed by zero-padded index.
-func (d *Dispatcher) getLedger(record execution.Record) (any, error) {
-	exists, err := d.navigator.ContractExists(record.Agent, record.Contract)
+// readQuery checks a contract_read's signed query and puts the call it signs
+// into record. It returns the signer, the read's msg.sender.
+func (d *Dispatcher) readQuery(record *execution.Record, body []byte) (string, error) {
+	sq, err := parseQuery(body)
 	if err != nil {
+		return "", err
+	}
+	if sq == nil {
+		return "", errNoQuery
+	}
+	signer, err := d.guard.check(*sq, actionRead, record.Agent, record.Contract)
+	if err != nil {
+		return "", err
+	}
+	var call struct {
+		Method string         `json:"method"`
+		Values map[string]any `json:"values"`
+	}
+	if err := execution.DecodeJSON([]byte(sq.Query.Body), &call); err != nil {
+		return "", fmt.Errorf("contract_read body: %w", err)
+	}
+	if call.Method == "" {
+		return "", errors.New("contract_read body needs a method")
+	}
+	if record.Method != "" && record.Method != call.Method {
+		return "", fmt.Errorf("query reads %s, sent to %s", call.Method, record.Method)
+	}
+	record.Method = call.Method
+	record.Message = execution.Message{Values: call.Values}
+	return signer.Hex(), nil
+}
+
+// registerAgent registers an agent from its signed registration: the agent
+// authorizes this node, by its key, to act for it.
+func (d *Dispatcher) registerAgent(record execution.Record, body []byte) (any, error) {
+	var sr identity.SignedRegistration
+	if err := json.Unmarshal(body, &sr); err != nil {
+		return nil, fmt.Errorf("register_agent: %w", err)
+	}
+	id, err := sr.Verify()
+	if err != nil {
+		return nil, fmt.Errorf("register_agent: %w", err)
+	}
+	reg := sr.Registration
+	if reg.Agent.Hex() != record.Agent {
+		return nil, fmt.Errorf("registration of %s sent as %s", reg.Agent.Hex(), record.Agent)
+	}
+	if reg.NodeKey != d.nodeKey {
+		return nil, fmt.Errorf("registration authorizes node key %s, this node's key is %s", reg.NodeKey.Hex(), d.nodeKey.Hex())
+	}
+	record.HashCode = id.Hex()
+	record.Message.Fields = map[string]any{"address": reg.Node, "nodeKey": reg.NodeKey.Hex()}
+	if err := d.navigator.Submit(record.Agent, record); err != nil {
 		return nil, err
 	}
-	if !exists {
-		return message("no such contract"), nil
+	return id.Hex(), nil
+}
+
+// submit hands a signed transaction of the expected kind to consensus.
+func (d *Dispatcher) submit(record execution.Record, body []byte, kind string) (any, error) {
+	var stx identity.SignedTx
+	if err := json.Unmarshal(body, &stx); err != nil {
+		return nil, fmt.Errorf("%s: %w", record.Action, err)
 	}
-	var from uint64
-	if msg, ok := record.Message.Fields["msg"].(map[string]any); ok {
-		if n, ok := msg["index"].(json.Number); ok {
-			if v, err := strconv.ParseUint(n.String(), 10, 64); err == nil {
-				from = v
+	if stx.Tx.Kind != kind {
+		return nil, fmt.Errorf("%s needs a %s transaction, got %q", record.Action, kind, stx.Tx.Kind)
+	}
+	if kind == identity.KindCall {
+		if record.Contract != "" && !strings.EqualFold(record.Contract, stx.Tx.Contract) {
+			return nil, fmt.Errorf("transaction for contract %s sent to %s", stx.Tx.Contract, record.Contract)
+		}
+		if record.Method != "" {
+			var call identity.CallBody
+			if err := execution.DecodeJSON([]byte(stx.Tx.Body), &call); err == nil && call.Method != record.Method {
+				return nil, fmt.Errorf("transaction calls %s, sent to %s", call.Method, record.Method)
 			}
 		}
 	}
-	entries, err := d.navigator.Ledger(record.Agent, record.Contract, from)
-	if err != nil {
-		return nil, err
-	}
-	out := make(map[string]json.RawMessage, len(entries))
-	for _, e := range entries {
-		out[fmt.Sprintf("%0*d", ledgerKeyWidth, e.Index)] = e.Record
-	}
-	return out, nil
+	return d.consensus.SubmitTx(record.Agent, stx)
 }
 
-// handleStream serves /stream?agent=<id>&contract=<id|”>&..., the
-// Server-Sent Events stream of replies.
+// handleStream serves /stream?auth=<signed query>&auth=..., the Server-Sent
+// Events stream of replies. Each signed query, with action "stream", opens
+// the stream of its agent (its target), for its contract or for all of them;
+// only the agent itself may sign it.
 func (d *Dispatcher) handleStream(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
-	agents, contracts := q["agent"], q["contract"]
-	scopes := make([]Scope, len(agents))
-	for i, agent := range agents {
-		scopes[i].Agent = agent
-		if i < len(contracts) {
-			scopes[i].Contract = contracts[i]
+	auths := r.URL.Query()["auth"]
+	if len(auths) == 0 {
+		writeJSON(w, http.StatusUnauthorized, message(errNoQuery.Error()))
+		return
+	}
+	scopes := make([]Scope, len(auths))
+	agents := make([]string, len(auths))
+	for i, auth := range auths {
+		sq, err := parseQuery([]byte(auth))
+		if err == nil && sq == nil {
+			err = errNoQuery
 		}
+		if err == nil {
+			err = d.guard.owner(sq, actionStream, sq.Query.Target, sq.Query.Contract)
+		}
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, message(err.Error()))
+			return
+		}
+		scopes[i] = Scope{Agent: canonicalAgent(sq.Query.Target), Contract: sq.Query.Contract}
+		agents[i] = scopes[i].Agent
 	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -309,25 +383,25 @@ func writeEvent(w io.Writer, f http.Flusher, ev any) bool {
 	return true
 }
 
-// readMessage decodes a JSON body; like Flask's get_json, anything that is
-// not declared as JSON gives a null message.
-func readMessage(r *http.Request) (execution.Message, error) {
+// readBody reads a JSON body. Like Flask's get_json, anything that is not
+// declared as JSON gives no body and a null message.
+func readBody(r *http.Request) ([]byte, execution.Message, error) {
 	var msg execution.Message
 	mediaType, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if mediaType != "application/json" {
-		return msg, nil
+		return nil, msg, nil
 	}
 	body, err := io.ReadAll(http.MaxBytesReader(nil, r.Body, maxBody))
 	if err != nil {
-		return msg, fmt.Errorf("read body: %w", err)
+		return nil, msg, fmt.Errorf("read body: %w", err)
 	}
 	if len(strings.TrimSpace(string(body))) == 0 {
-		return msg, nil
+		return nil, msg, nil
 	}
 	if err := json.Unmarshal(body, &msg); err != nil {
-		return msg, fmt.Errorf("invalid JSON body: %w", err)
+		return nil, msg, fmt.Errorf("invalid JSON body: %w", err)
 	}
-	return msg, nil
+	return body, msg, nil
 }
 
 // Timestamp formats t as a record timestamp, YYYYMMDDHHMMSSffffff in UTC.

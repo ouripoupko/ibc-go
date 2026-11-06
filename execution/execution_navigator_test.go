@@ -11,21 +11,24 @@ import (
 
 	ethcommon "github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/rawdb"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethdb"
 
 	"github.com/ouripoupko/ibc-go/common"
+	"github.com/ouripoupko/ibc-go/identity"
 )
 
 // recordingOutput collects what the navigator publishes.
 type recordingOutput struct {
-	mu       sync.Mutex
-	replies  []Reply
-	partners []Record
-	signal   chan struct{}
+	mu      sync.Mutex
+	replies []Reply
+	decided map[string]bool // record hash -> approved
+	applied map[string]uint64
+	signal  chan struct{}
 }
 
 func newRecordingOutput() *recordingOutput {
-	return &recordingOutput{signal: make(chan struct{}, 1)}
+	return &recordingOutput{signal: make(chan struct{}, 1), decided: map[string]bool{}, applied: map[string]uint64{}}
 }
 
 func (o *recordingOutput) Publish(_ string, r Reply) {
@@ -38,10 +41,16 @@ func (o *recordingOutput) Publish(_ string, r Reply) {
 	}
 }
 
-func (o *recordingOutput) Partner(_ string, r Record) {
+func (o *recordingOutput) Decided(_, _ string, r Record, approved bool) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	o.partners = append(o.partners, r)
+	o.decided[r.HashCode] = approved
+}
+
+func (o *recordingOutput) Applied(_, contract string, index uint64, _ string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.applied[contract] = index
 }
 
 // wait returns once at least n replies were published.
@@ -92,9 +101,9 @@ func indexed(r Record, index uint64) Record {
 	return r
 }
 
-func newNavigator(t *testing.T, db ethdb.Database, out Output, sender common.Sender) *Navigator {
+func newNavigator(t *testing.T, db ethdb.Database, out Output) *Navigator {
 	t.Helper()
-	n := NewNavigator(Config{DB: db, Sender: sender, Output: out})
+	n := NewNavigator(Config{DB: db, Output: out})
 	t.Cleanup(n.Close)
 	return n
 }
@@ -128,7 +137,7 @@ func contractDoc(db ethdb.Database) common.Document {
 func TestNavigatorAppliesRecordsInOrder(t *testing.T) {
 	db := rawdb.NewMemoryDatabase()
 	out := newRecordingOutput()
-	n := newNavigator(t, db, out, &common.RecordingSender{})
+	n := newNavigator(t, db, out)
 	deployed(t, n, out)
 
 	for i := uint64(2); i <= 21; i++ {
@@ -155,7 +164,7 @@ func TestNavigatorAppliesRecordsInOrder(t *testing.T) {
 
 func TestNavigatorIgnoresRedeliveryAndRejectsGaps(t *testing.T) {
 	out := newRecordingOutput()
-	n := newNavigator(t, rawdb.NewMemoryDatabase(), out, &common.RecordingSender{})
+	n := newNavigator(t, rawdb.NewMemoryDatabase(), out)
 	deployed(t, n, out)
 
 	w := indexed(writeRecord(t, bob, "setValue", `{"value": 1}`, "20240102030500000000"), 2)
@@ -178,7 +187,7 @@ func TestNavigatorIgnoresRedeliveryAndRejectsGaps(t *testing.T) {
 
 func TestNavigatorRejectsUnknownTargets(t *testing.T) {
 	db := rawdb.NewMemoryDatabase()
-	n := newNavigator(t, db, nil, &common.RecordingSender{})
+	n := newNavigator(t, db, nil)
 
 	if err := n.Submit(alice, deployRecord(t, `{}`)); !errors.Is(err, ErrUnknownAgent) {
 		t.Errorf("deploy for unregistered agent: %v", err)
@@ -195,35 +204,32 @@ func TestNavigatorRejectsUnknownTargets(t *testing.T) {
 	}
 }
 
-func TestNavigatorJoinHandsStatusBackToConsensus(t *testing.T) {
+func TestNavigatorReportsDecisionsAndProgress(t *testing.T) {
 	out := newRecordingOutput()
-	sender := &common.RecordingSender{}
-	n := newNavigator(t, rawdb.NewMemoryDatabase(), out, sender)
+	n := newNavigator(t, rawdb.NewMemoryDatabase(), out)
 	deployed(t, n, out)
 
-	join := record(t, `{"type":"PUT","action":"a2a_connect","contract":"contract-hash-1","agent":"alice-pid",
-		"message":{"from":"carol-pid","to":"alice-pid","msg":{"pid":"carol-pid","address":"http://carol.example"}},
-		"timestamp":"20240102030500000000","hash_code":"j1","index":2}`)
+	carol, _ := crypto.GenerateKey()
+	nodeKey, _ := crypto.GenerateKey()
+	join := signedRecord(t, carol, identity.KindJoin, contract, joinBody(nodeKey), "20240102030500000000")
+	join.Index = 2
 	mustSubmit(t, n, join)
 	replies := out.wait(t, 3)
-	if replies[2].Reply != false || replies[2].Action != ActionConnect {
+	if replies[2].Reply != true || replies[2].Action != ActionJoin {
 		t.Fatalf("join reply = %+v", replies[2])
 	}
 	out.mu.Lock()
-	partners := out.partners
+	approved, ok := out.decided[join.HashCode]
+	applied := out.applied[contract]
 	out.mu.Unlock()
-	if len(partners) != 1 || partners[0].Action != ActionPartner || partners[0].Status == nil || *partners[0].Status ||
-		partners[0].Message.Msg.PID != "carol-pid" {
-		t.Fatalf("int_partner records = %+v", partners)
+	if !ok || !approved {
+		t.Fatalf("decision reported = %v, %v", approved, ok)
 	}
-	n.Close() // flushes the contract's outbox
-	reqs := sender.Requests()
-	if len(reqs) != 1 || reqs[0].Params["action"] != "a2a_reply_join" ||
-		reqs[0].URL != "http://carol.example/ibc/app/carol-pid/"+contract {
-		t.Fatalf("join replies sent = %+v", reqs)
+	if applied != 2 {
+		t.Fatalf("applied index reported = %d, want 2", applied)
 	}
-	if msg := reqs[0].JSON.(map[string]any)["msg"].(map[string]any); msg["address"] != node {
-		t.Fatalf("reply_join carries my address %v, want the registered %s", msg["address"], node)
+	if a, known, err := n.Decision(alice, contract, join.HashCode); err != nil || !known || !a {
+		t.Fatalf("Decision = %v, %v, %v", a, known, err)
 	}
 }
 
@@ -234,7 +240,7 @@ func TestNavigatorFailedDeployIsStoredAndNotRetried(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := newRecordingOutput()
-	n := NewNavigator(Config{DB: db, Sender: &common.RecordingSender{}, Output: out})
+	n := NewNavigator(Config{DB: db, Output: out})
 	mustSubmit(t, n, registerRecord(t, "reg"))
 	mustSubmit(t, n, deployRecord(t, `{"initialName":"registry"}`)) // missing "start"
 	mustSubmit(t, n, indexed(writeRecord(t, bob, "setValue", `{"value": 1}`, createdAt), 2))
@@ -259,7 +265,7 @@ func TestNavigatorFailedDeployIsStoredAndNotRetried(t *testing.T) {
 	}
 	defer db.Close()
 	out = newRecordingOutput()
-	n = newNavigator(t, db, out, &common.RecordingSender{})
+	n = newNavigator(t, db, out)
 	if err := n.Recover(); err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +286,7 @@ func TestNavigatorRecoverAfterCrash(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := newRecordingOutput()
-	n := NewNavigator(Config{DB: db, Sender: &common.RecordingSender{}, Output: out})
+	n := NewNavigator(Config{DB: db, Output: out})
 	deployed(t, n, out)
 	mustSubmit(t, n, indexed(writeRecord(t, bob, "setValue", `{"value": 1}`, "20240102030500000000"), 2))
 	out.wait(t, 3)
@@ -289,7 +295,7 @@ func TestNavigatorRecoverAfterCrash(t *testing.T) {
 	// Crash 1: write #3 was committed to the state but the document still
 	// has the old cursor and root.
 	before, _ := contractDoc(db).Fields()
-	n = NewNavigator(Config{DB: db, Sender: &common.RecordingSender{}, Output: out})
+	n = NewNavigator(Config{DB: db, Output: out})
 	mustSubmit(t, n, indexed(writeRecord(t, bob, "setValue", `{"value": 2}`, "20240102030600000000"), 3))
 	replies := out.wait(t, 4)
 	wantRoot := replies[3].StateRoot
@@ -314,7 +320,7 @@ func TestNavigatorRecoverAfterCrash(t *testing.T) {
 	}
 	defer db.Close()
 	out = newRecordingOutput()
-	n = newNavigator(t, db, out, &common.RecordingSender{})
+	n = newNavigator(t, db, out)
 	if err := n.Recover(); err != nil {
 		t.Fatal(err)
 	}
@@ -334,8 +340,7 @@ func TestNavigatorRecoverAfterCrash(t *testing.T) {
 
 func TestNavigatorClosesIdleContracts(t *testing.T) {
 	out := newRecordingOutput()
-	n := NewNavigator(Config{DB: rawdb.NewMemoryDatabase(), Sender: &common.RecordingSender{},
-		Output: out, IdleTimeout: 20 * time.Millisecond})
+	n := NewNavigator(Config{DB: rawdb.NewMemoryDatabase(), Output: out, IdleTimeout: 20 * time.Millisecond})
 	t.Cleanup(n.Close)
 	deployed(t, n, out)
 
@@ -354,7 +359,7 @@ func TestNavigatorClosesIdleContracts(t *testing.T) {
 
 func TestNavigatorCloseDrainsSubmittedRecords(t *testing.T) {
 	out := newRecordingOutput()
-	n := NewNavigator(Config{DB: rawdb.NewMemoryDatabase(), Sender: &common.RecordingSender{}, Output: out})
+	n := NewNavigator(Config{DB: rawdb.NewMemoryDatabase(), Output: out})
 	deployed(t, n, out)
 	for i := uint64(2); i <= 51; i++ {
 		mustSubmit(t, n, indexed(writeRecord(t, bob, "setValue", `{"value": 1}`, "20240102030500000000"), i))

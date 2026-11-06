@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
 	"sync"
 	"testing"
 )
@@ -50,34 +49,6 @@ func (n *partnerNode) received() []received {
 	return append([]received(nil), n.got...)
 }
 
-func TestPartnerDirectRequests(t *testing.T) {
-	node := newPartnerNode(t, `{"1":{"action":"deploy_contract"}}`)
-	p := NewPartner(node.URL, "bob", "http://alice.example", "alice", &HTTPSender{}, nil)
-	ctx := context.Background()
-
-	if err := p.Connect(ctx, "c1", map[string]any{"name": "Alice"}); err != nil {
-		t.Fatal(err)
-	}
-	ledger, err := p.GetLedger(ctx, "c1", 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(ledger) != node.resp {
-		t.Errorf("GetLedger = %s", ledger)
-	}
-
-	got := node.received()
-	want := []received{
-		{"PUT", "/ibc/app/bob/c1", "a2a_connect", map[string]any{"from": "alice", "to": "bob",
-			"msg": map[string]any{"address": "http://alice.example", "pid": "alice", "profile": map[string]any{"name": "Alice"}}}},
-		{"POST", "/ibc/app/bob/c1", "a2a_get_ledger", map[string]any{"from": "alice", "to": "bob",
-			"msg": map[string]any{"index": 0.0, "pid": "alice"}}},
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("received %+v\nwant     %+v", got, want)
-	}
-}
-
 func TestHTTPSenderReportsErrorStatus(t *testing.T) {
 	node := newPartnerNode(t, "")
 	_, err := (&HTTPSender{}).Send(context.Background(),
@@ -90,13 +61,9 @@ func TestHTTPSenderReportsErrorStatus(t *testing.T) {
 func TestOutboxSendsInOrderAndFlushesOnClose(t *testing.T) {
 	node := newPartnerNode(t, "")
 	outbox := NewOutbox(&HTTPSender{})
-	p := NewPartner(node.URL, "bob", "http://alice.example", "alice", nil, outbox)
-
-	if err := p.ReplyJoin("c1", true); err != nil {
-		t.Fatal(err)
-	}
-	for _, step := range []string{"PRE_PREPARE", "PREPARE", "COMMIT"} {
-		if err := p.Consent("c1", step, map[string]any{"n": 1}); err != nil {
+	for _, step := range []string{"first", "second", "third"} {
+		if err := outbox.Put(Request{Method: "PUT", URL: node.URL + "/ibc/app/bob/c1",
+			Params: map[string]string{"action": "a2a_consent"}, JSON: map[string]any{"step": step}}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -104,20 +71,16 @@ func TestOutboxSendsInOrderAndFlushesOnClose(t *testing.T) {
 	outbox.Close() // idempotent
 
 	got := node.received()
-	if len(got) != 4 {
-		t.Fatalf("received %d requests, want 4", len(got))
+	if len(got) != 3 {
+		t.Fatalf("received %d requests, want 3", len(got))
 	}
-	if got[0].Action != "a2a_reply_join" || got[0].Body["msg"].(map[string]any)["status"] != true {
-		t.Errorf("first request = %+v", got[0])
-	}
-	for i, step := range []string{"PRE_PREPARE", "PREPARE", "COMMIT"} {
-		r := got[i+1]
-		if r.Method != "PUT" || r.Action != "a2a_consent" || r.Body["msg"].(map[string]any)["step"] != step {
-			t.Errorf("request %d = %+v, want consent %s", i+1, r, step)
+	for i, step := range []string{"first", "second", "third"} {
+		if got[i].Method != "PUT" || got[i].Action != "a2a_consent" || got[i].Body["step"] != step {
+			t.Errorf("request %d = %+v, want step %s", i, got[i], step)
 		}
 	}
-	if err := p.Consent("c1", "PREPARE", nil); !errors.Is(err, ErrOutboxClosed) {
-		t.Fatalf("Consent after Close: %v", err)
+	if err := outbox.Put(Request{URL: node.URL}); !errors.Is(err, ErrOutboxClosed) {
+		t.Fatalf("Put after Close: %v", err)
 	}
 }
 

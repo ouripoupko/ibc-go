@@ -22,16 +22,6 @@ func (n *Navigator) AgentExists(agent string) (bool, error) {
 	return n.agents.Has(agent)
 }
 
-// AgentAddress returns the node address agent registered with.
-func (n *Navigator) AgentAddress(agent string) (string, error) {
-	fields, err := n.agents.Document(agent).Fields()
-	if err != nil {
-		return "", err
-	}
-	address, _ := fields["address"].(string)
-	return address, nil
-}
-
 // ContractExists reports whether agent has the contract on this node.
 func (n *Navigator) ContractExists(agent, contract string) (bool, error) {
 	return n.contracts(agent).Has(contract)
@@ -99,7 +89,7 @@ func (n *Navigator) Ledger(agent, contract string, from uint64) ([]LedgerEntry, 
 // Read runs a read-only call (contract_read, eth_call semantics) on the
 // latest applied state of agent's contract. It never deploys: a contract
 // whose deploy record has not been applied yet is reported as unknown.
-func (n *Navigator) Read(agent string, record Record) (common.Result, error) {
+func (n *Navigator) Read(agent, caller string, record Record) (common.Result, error) {
 	doc := n.contracts(agent).Document(record.Contract)
 	fields, err := doc.Fields()
 	if err != nil {
@@ -113,5 +103,5 @@ func (n *Navigator) Read(agent string, record Record) (common.Result, error) {
 	if err := st.Run("", ""); err != nil && !isDeterministic(err) {
 		return common.Result{}, err
 	}
-	return st.View(record.Agent, record.Method, record.Message.Values, record.Timestamp)
+	return st.View(caller, record.Method, record.Message.Values, record.Timestamp)
 }

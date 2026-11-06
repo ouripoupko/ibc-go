@@ -44,15 +44,16 @@ type Reply struct {
 type Output interface {
 	// Publish delivers a reply to the agent's clients (the SSE stream).
 	Publish(agent string, reply Reply)
-	// Partner hands a join outcome back to consensus: the a2a_connect
-	// record with Status set and Action int_partner.
-	Partner(agent string, record Record)
+	// Decided reports to consensus how a membership change was decided.
+	Decided(agent, contract string, record Record, approved bool)
+	// Applied reports to consensus that the record at index was applied,
+	// and the contract's state root after it.
+	Applied(agent, contract string, index uint64, stateRoot string)
 }
 
 // Config configures a Navigator.
 type Config struct {
 	DB     ethdb.Database // the node's database
-	Sender common.Sender  // delivers join replies to partners
 	Output Output         // may be nil
 	// IdleTimeout closes a contract's goroutine after this long without
 	// records. Default 60 seconds, as in Python.
@@ -127,7 +128,7 @@ func (n *Navigator) Submit(agent string, record Record) error {
 		if err := n.storeContract(agent, record); err != nil {
 			return err
 		}
-	case ActionConnect, ActionWrite:
+	case ActionWrite, ActionJoin, ActionLeave, ActionRotateKey:
 		exists, err := n.contracts(agent).Has(record.Contract)
 		if err != nil {
 			return err
@@ -150,10 +151,12 @@ func (n *Navigator) Submit(agent string, record Record) error {
 	return nil
 }
 
-// registerAgent stores the agent's address (Python register_agent).
+// registerAgent stores the agent's node address and node key, from the
+// agent's signed registration (checked by the dispatcher).
 func (n *Navigator) registerAgent(agent string, record Record) error {
 	address, _ := record.Message.Fields["address"].(string)
-	if err := n.agents.Document(agent).Update(map[string]any{"address": address}); err != nil {
+	nodeKey, _ := record.Message.Fields["nodeKey"].(string)
+	if err := n.agents.Document(agent).Update(map[string]any{"address": address, "nodeKey": nodeKey}); err != nil {
 		return err
 	}
 	n.cfg.Output.Publish(agent, Reply{Request: record.HashCode, Action: record.Action, Reply: true})
@@ -279,8 +282,6 @@ func (n *Navigator) run(key workerKey, w *worker) {
 		n.mu.Unlock()
 		return
 	}
-	defer exec.Close()
-
 	idle := time.NewTimer(n.cfg.IdleTimeout)
 	defer idle.Stop()
 	var retry <-chan time.Time
@@ -310,21 +311,16 @@ func (n *Navigator) run(key workerKey, w *worker) {
 }
 
 func (n *Navigator) open(key workerKey) (*ContractExecution, error) {
-	agentFields, err := n.agents.Document(key.agent).Fields()
-	if err != nil {
-		return nil, err
-	}
-	myAddress, _ := agentFields["address"].(string)
 	doc := n.contracts(key.agent).Document(key.contract)
 	ledger := ChainLedger{n.ledger(key.agent, key.contract)}
-	return NewContractExecution(doc, key.contract, key.agent, myAddress, n.cfg.DB, ledger, n.cfg.Sender), nil
+	return NewContractExecution(doc, key.contract, key.agent, n.cfg.DB, ledger), nil
 }
 
 func (n *Navigator) replay(key workerKey, exec *ContractExecution) error {
 	return exec.Replay(func(out Outcome) { n.report(key.agent, out) })
 }
 
-// report publishes an outcome, and hands join outcomes back to consensus.
+// report publishes an outcome, and tells consensus about decisions and progress.
 func (n *Navigator) report(agent string, out Outcome) {
 	contract := out.Record.Contract
 	reply := Reply{
@@ -337,15 +333,33 @@ func (n *Navigator) report(agent string, out Outcome) {
 	if out.Err != nil {
 		reply.Reply = out.Err.Error()
 	}
-	if out.Record.Action == ActionConnect {
-		approved, _ := out.Value.(bool)
-		record := out.Record
-		record.Status = &approved
-		record.Action = ActionPartner
-		n.cfg.Output.Partner(agent, record)
-		reply.Reply = approved
+	if out.Decision != nil {
+		n.cfg.Output.Decided(agent, contract, out.Record, *out.Decision)
 	}
+	n.cfg.Output.Applied(agent, contract, out.Index, out.Result.StateRoot.Hex())
 	n.cfg.Output.Publish(agent, reply)
+}
+
+// Progress returns the index of the last record applied in agent's
+// contract, and the state root after it.
+func (n *Navigator) Progress(agent, contract string) (uint64, string, error) {
+	doc := n.contracts(agent).Document(contract)
+	cursor, err := readCursor(doc)
+	if err != nil {
+		return 0, "", err
+	}
+	fields, err := doc.Fields()
+	if err != nil {
+		return 0, "", err
+	}
+	root, _ := fields[common.KeyStateRoot].(string)
+	return cursor, root, nil
+}
+
+// Decision returns how a membership change of agent's contract was decided,
+// and false if it has not been applied yet.
+func (n *Navigator) Decision(agent, contract, id string) (approved, known bool, err error) {
+	return Decision(n.contracts(agent).Document(contract), id)
 }
 
 // activeWorkers returns the number of contract goroutines (for tests).
@@ -357,5 +371,6 @@ func (n *Navigator) activeWorkers() int {
 
 type discardOutput struct{}
 
-func (discardOutput) Publish(string, Reply)  {}
-func (discardOutput) Partner(string, Record) {}
+func (discardOutput) Publish(string, Reply)                  {}
+func (discardOutput) Decided(string, string, Record, bool)   {}
+func (discardOutput) Applied(string, string, uint64, string) {}

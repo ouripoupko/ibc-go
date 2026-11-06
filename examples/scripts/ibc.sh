@@ -1,22 +1,28 @@
 #!/usr/bin/env bash
-# A small command-line client for an ibc node, built on curl and jq.
+# A small command-line client for an ibc node, built on curl, jq and the
+# ibc program (which signs with your key file; apps use MetaMask instead).
 #
 #   export IBC_URL=http://localhost:2611   # the node (this is the default)
-#   export IBC_AGENT=alice                 # who you are (required)
+#   export IBC_KEY=~/.ibc/alice.key        # your root key file (required)
+#   export IBC_BIN=./ibc                   # the ibc program (default: ibc on the PATH)
 #
-#   ibc.sh register                              register IBC_AGENT on the node
-#   ibc.sh exists                                is IBC_AGENT registered?
+#   ibc.sh newkey                                create the key file IBC_KEY
+#   ibc.sh whoami                                your agent id (the key's address)
+#   ibc.sh register                              register yourself on the node
+#   ibc.sh exists                                are you registered?
 #   ibc.sh deploy NAME [CONSTRUCTOR_JSON]        deploy build/NAME.bin; prints the contract id
 #   ibc.sh write CONTRACT METHOD [VALUES_JSON]   a transaction; waits for and prints its result
-#   ibc.sh read CONTRACT METHOD [VALUES_JSON]    a read-only call; prints its result
-#   ibc.sh contracts                             list IBC_AGENT's contracts
+#   ibc.sh read CONTRACT METHOD [VALUES_JSON] [OWNER]
+#                                                a read-only call, signed by you, of your copy
+#                                                (or OWNER's copy on this node); prints its result
+#   ibc.sh join CONTRACT MEMBER_URL MEMBER_ID    ask a member to let you join; waits for the answer
+#   ibc.sh leave CONTRACT [MEMBER_ID]            leave a contract (or ask to remove a member)
+#   ibc.sh contracts                             list your contracts
 #   ibc.sh contract CONTRACT                     one contract's summary
-#   ibc.sh join CONTRACT PARTNER_URL PARTNER_AGENT   ask a partner to let IBC_AGENT join
-#   ibc.sh ledger CONTRACT [FROM_INDEX]          the contract's ledger records
-#   ibc.sh stream [CONTRACT]                     follow the event stream (Ctrl-C to stop)
+#   ibc.sh stream [CONTRACT]                     follow your event stream (Ctrl-C to stop)
 #
 # Example:
-#   ibc.sh register
+#   ibc.sh newkey && ibc.sh register
 #   C=$(ibc.sh deploy Counter '{"start": 10}')
 #   ibc.sh write "$C" increment '{"amount": 5}'     # -> 15
 #   ibc.sh read "$C" count                          # -> 15
@@ -24,11 +30,17 @@ set -euo pipefail
 
 IBC_URL=${IBC_URL:-http://localhost:2611}
 IBC_URL=${IBC_URL%/}
+IBC_BIN=${IBC_BIN:-ibc}
 BUILD=${IBC_BUILD:-$(cd "$(dirname "$0")/.." && pwd)/build}
-TIMEOUT=${IBC_TIMEOUT:-30}
+TIMEOUT=${IBC_TIMEOUT:-60}
 
 die() { echo "ibc.sh: $*" >&2; exit 1; }
-need_agent() { [ -n "${IBC_AGENT:-}" ] || die "set IBC_AGENT to your agent id"; }
+need_key() {
+    [ -n "${IBC_KEY:-}" ] || die "set IBC_KEY to your key file (create it with: ibc.sh newkey)"
+    [ -f "$IBC_KEY" ] || die "no key file $IBC_KEY (create it with: ibc.sh newkey)"
+    AGENT=$("$IBC_BIN" key address "$IBC_KEY")
+}
+node_key() { request GET "" node_info | jq -r .nodeKey; }
 
 # request VERB PATH ACTION [BODY]: one call to /ibc/app.
 request() {
@@ -49,16 +61,35 @@ fail_on_message() {
     fi
 }
 
+# sign KIND CONTRACT BODY_JSON: a transaction signed with IBC_KEY.
+sign() {
+    "$IBC_BIN" sign tx -key "$IBC_KEY" -kind "$1" -contract "$2" -body "$3"
+}
+
+# query ACTION CONTRACT [BODY_JSON] [TARGET]: a query signed with IBC_KEY.
+query() {
+    "$IBC_BIN" sign query -key "$IBC_KEY" -action "$1" -contract "$2" -body "${3:-}" -target "${4:-}"
+}
+
+# signed_get PATH ACTION CONTRACT: a GET whose signed query goes in the URL.
+signed_get() {
+    curl -sS -G "$IBC_URL/ibc/app/$1" --data-urlencode "action=$2" --data-urlencode "auth=$(query "$2" "$3")"
+}
+
+# stream_url SCOPE: the URL of your event stream, for one contract or all.
+stream_url() {
+    echo "$IBC_URL/stream?auth=$(query stream "$1" | jq -sRr @uri)"
+}
+
 # submit_and_wait SCOPE VERB PATH ACTION BODY: sends a request whose outcome
 # arrives on the event stream, and prints that event.
 submit_and_wait() {
     local scope=$1 verb=$2 path=$3 action=$4 body=$5
     local events
     events=$(mktemp)
-    curl -sN "$IBC_URL/stream?agent=$IBC_AGENT&contract=$scope" >"$events" &
+    curl -sN "$(stream_url "$scope")" >"$events" &
     local stream=$!
     trap 'kill $stream 2>/dev/null; rm -f "$events"' RETURN
-    # Wait for the stream's first (empty) message: we are subscribed.
     for _ in $(seq 100); do [ -s "$events" ] && break; sleep 0.05; done
     [ -s "$events" ] || die "could not open the event stream at $IBC_URL"
 
@@ -66,6 +97,7 @@ submit_and_wait() {
     ack=$(request "$verb" "$path" "$action" "$body")
     fail_on_message "$ack"
     ack=$(jq -r . <<<"$ack")
+    [ "$ack" = "null" ] && die "nothing to do (already done?)"
     for _ in $(seq $((TIMEOUT * 20))); do
         local event
         event=$(sed -n 's/^data: //p' "$events" | jq -c --arg r "$ack" 'select(.request == $r)' 2>/dev/null | head -n 1)
@@ -79,81 +111,95 @@ submit_and_wait() {
 }
 
 cmd=${1:-}
-[ -n "$cmd" ] || { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
+[ -n "$cmd" ] || { sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
 shift
 
 case "$cmd" in
+newkey)
+    [ -n "${IBC_KEY:-}" ] || die "set IBC_KEY to the key file to create"
+    mkdir -p "$(dirname "$IBC_KEY")"
+    "$IBC_BIN" key new "$IBC_KEY"
+    ;;
+whoami)
+    need_key
+    echo "$AGENT"
+    ;;
 register)
-    need_agent
-    request PUT "$IBC_AGENT" register_agent "$(jq -n --arg a "$IBC_URL" '{address: $a}')" >/dev/null
-    echo "registered $IBC_AGENT at $IBC_URL"
+    need_key
+    body=$("$IBC_BIN" sign registration -key "$IBC_KEY" -node "$IBC_URL" -node-key "$(node_key)")
+    submit_and_wait "" PUT "$AGENT" register_agent "$body" >/dev/null
+    echo "registered $AGENT at $IBC_URL"
     ;;
 exists)
-    need_agent
-    request GET "$IBC_AGENT" is_exist_agent
+    need_key
+    request GET "$AGENT" is_exist_agent
     ;;
 deploy)
-    need_agent
+    need_key
     name=${1:?usage: ibc.sh deploy NAME [CONSTRUCTOR_JSON]}
     ctor=${2:-{\}}
     [ -f "$BUILD/$name.bin" ] || die "no $BUILD/$name.bin (run examples/scripts/compile.sh)"
-    body=$(jq -n --arg pid "$IBC_AGENT" --arg address "$IBC_URL" --arg name "$name" \
+    body=$(jq -cn --arg name "$name" --arg node "$IBC_URL" --arg nodeKey "$(node_key)" \
         --arg code "$(tr -d '[:space:]' <"$BUILD/$name.bin")" \
-        --rawfile abi "$BUILD/$name.abi" --argjson ctor "$ctor" \
-        '{name: $name, contract: ($name + ".sol"), protocol: "BFT", default_app: "",
-          pid: $pid, address: $address, profile: "",
-          code: $code, abi: $abi, constructor: $ctor}')
-    event=$(submit_and_wait "" PUT "$IBC_AGENT" deploy_contract "$body")
+        --slurpfile abi "$BUILD/$name.abi" --argjson ctor "$ctor" \
+        '{name: $name, contract: ($name + ".sol"), default_app: "", profile: "",
+          code: $code, abi: $abi[0], constructor: $ctor, node: $node, nodeKey: $nodeKey}')
+    event=$(submit_and_wait "" PUT "$AGENT" deploy_contract "$(sign deploy "" "$body")")
     [ "$(jq -r .reply <<<"$event")" = "true" ] || die "deploy failed: $(jq -r .reply <<<"$event")"
     jq -r .contract <<<"$event"
     ;;
 write)
-    need_agent
+    need_key
     contract=${1:?usage: ibc.sh write CONTRACT METHOD [VALUES_JSON]}
     method=${2:?usage: ibc.sh write CONTRACT METHOD [VALUES_JSON]}
     values=${3:-{\}}
-    event=$(submit_and_wait "$contract" POST "$IBC_AGENT/$contract/$method" contract_write \
-        "$(jq -n --argjson v "$values" '{values: $v}')")
+    body=$(jq -cn --arg m "$method" --argjson v "$values" '{method: $m, values: $v}')
+    event=$(submit_and_wait "$contract" POST "$AGENT/$contract/$method" contract_write "$(sign call "$contract" "$body")")
     jq -c .reply <<<"$event"
     ;;
 read)
-    need_agent
+    need_key
     contract=${1:?usage: ibc.sh read CONTRACT METHOD [VALUES_JSON]}
     method=${2:?usage: ibc.sh read CONTRACT METHOD [VALUES_JSON]}
     values=${3:-{\}}
-    reply=$(request POST "$IBC_AGENT/$contract/$method" contract_read "$(jq -n --argjson v "$values" '{values: $v}')")
+    owner=${4:-$AGENT}
+    body=$(jq -cn --arg m "$method" --argjson v "$values" '{method: $m, values: $v}')
+    reply=$(request POST "$owner/$contract/$method" contract_read "$(query contract_read "$contract" "$body" "$owner")")
     fail_on_message "$reply"
     jq -c . <<<"$reply"
     ;;
+join)
+    need_key
+    contract=${1:?usage: ibc.sh join CONTRACT MEMBER_URL MEMBER_ID}
+    member_url=${2:?usage: ibc.sh join CONTRACT MEMBER_URL MEMBER_ID}
+    member=${3:?usage: ibc.sh join CONTRACT MEMBER_URL MEMBER_ID}
+    tx=$(sign join "$contract" "$(jq -cn --arg node "$IBC_URL" --arg nodeKey "$(node_key)" \
+        '{node: $node, nodeKey: $nodeKey, profile: ""}')")
+    body=$(jq -c --arg url "$member_url" --arg agent "$member" '. + {partner: {address: $url, agent: $agent}}' <<<"$tx")
+    event=$(submit_and_wait "" PUT "$AGENT" join_contract "$body")
+    [ "$(jq -r .reply <<<"$event")" = "true" ] || die "join refused"
+    echo "joined $contract"
+    ;;
+leave)
+    need_key
+    contract=${1:?usage: ibc.sh leave CONTRACT [MEMBER_ID]}
+    member=${2:-$AGENT}
+    tx=$(sign leave "$contract" "$(jq -cn --arg m "$member" '{member: $m}')")
+    event=$(submit_and_wait "$contract" PUT "$AGENT" leave_contract "$tx")
+    jq -c .reply <<<"$event"
+    ;;
 contracts)
-    need_agent
-    request GET "$IBC_AGENT" get_contracts | jq '[.[] | {id, name, contract, evm_address, block_number}]'
+    need_key
+    signed_get "$AGENT" get_contracts "" | jq '[.[] | {id, name, contract, evm_address, block_number}]'
     ;;
 contract)
-    need_agent
-    request GET "$IBC_AGENT/${1:?usage: ibc.sh contract CONTRACT}" get_contract | jq 'del(.code, .abi)'
-    ;;
-join)
-    need_agent
-    contract=${1:?usage: ibc.sh join CONTRACT PARTNER_URL PARTNER_AGENT}
-    partner_url=${2:?usage: ibc.sh join CONTRACT PARTNER_URL PARTNER_AGENT}
-    partner=${3:?usage: ibc.sh join CONTRACT PARTNER_URL PARTNER_AGENT}
-    reply=$(request PUT "$IBC_AGENT" join_contract "$(jq -n --arg c "$contract" --arg a "$partner_url" \
-        --arg p "$partner" '{contract: $c, address: $a, agent: $p, profile: ""}')")
-    fail_on_message "$reply"
-    [ "$reply" = "null" ] && die "$IBC_AGENT already has contract $contract"
-    echo "join request sent; the answer arrives on the event stream as a2a_reply_join"
-    ;;
-ledger)
-    need_agent
-    contract=${1:?usage: ibc.sh ledger CONTRACT [FROM_INDEX]}
-    request POST "$IBC_AGENT/$contract" a2a_get_ledger "$(jq -n --argjson i "${2:-0}" '{msg: {index: $i}}')" |
-        jq 'to_entries | map({index: (.key | tonumber), action: .value.action, agent: .value.agent,
-                              method: .value.method, timestamp: .value.timestamp})'
+    need_key
+    contract=${1:?usage: ibc.sh contract CONTRACT}
+    signed_get "$AGENT/$contract" get_contract "$contract" | jq 'del(.code, .abi)'
     ;;
 stream)
-    need_agent
-    curl -sN "$IBC_URL/stream?agent=$IBC_AGENT&contract=${1:-}" | sed -un 's/^data: \(..*\)/\1/p'
+    need_key
+    curl -sN "$(stream_url "${1:-}")" | sed -un 's/^data: \(..*\)/\1/p'
     ;;
 *)
     die "unknown command $cmd (run without arguments for help)"

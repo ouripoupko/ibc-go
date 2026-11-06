@@ -1,0 +1,12 @@
+{
+  "name": "ibc-examples",
+  "private": true,
+  "type": "module",
+  "description": "Example ibc clients. ibc.mjs has no dependencies; the demo signs with an ethers.js wallet.",
+  "scripts": {
+    "demo": "node demo.mjs"
+  },
+  "dependencies": {
+    "ethers": "6.13.4"
+  }
+}

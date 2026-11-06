@@ -93,6 +93,10 @@ func (c *kvCollection) Has(key string) (bool, error) {
 	return c.Document(key).Exists()
 }
 
+func (c *kvCollection) Delete(key string) error {
+	return c.store.db.Delete(c.Document(key).(*kvDocument).dbKey())
+}
+
 func (c *kvCollection) Keys() ([]string, error) {
 	prefix := c.prefix()
 	it := c.store.db.NewIterator(prefix, nil)

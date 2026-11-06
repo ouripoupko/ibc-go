@@ -1,15 +1,18 @@
 // Deploys the example contracts and calls them, with the client in ibc.mjs.
+// In a browser you would sign with MetaMask; here an ethers.js wallet signs.
 //
-//   node examples/js/demo.mjs [node-url] [agent]
+//   cd examples/js && npm install          # once: installs ethers
+//   node demo.mjs [node-url]
 //
-// Defaults: http://localhost:2611 and a fresh agent id. Run the node first
-// (see the README) and compile the examples (examples/scripts/compile.sh).
+// The default node is http://localhost:2611. Run the node first (see the
+// README). Set IBC_PRIVATE_KEY to use a fixed key; otherwise a new one is
+// made for each run.
 import { readFile } from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
+import { Wallet } from 'ethers';
 import { Ibc } from './ibc.mjs';
 
 const url = process.argv[2] ?? 'http://localhost:2611';
-const agent = process.argv[3] ?? `demo-${randomUUID()}`;
+const wallet = process.env.IBC_PRIVATE_KEY ? new Wallet(process.env.IBC_PRIVATE_KEY) : Wallet.createRandom();
 const build = new URL('../build/', import.meta.url);
 
 async function load(name) {
@@ -20,9 +23,9 @@ async function load(name) {
   };
 }
 
-const ibc = new Ibc(url, agent);
+const ibc = await Ibc.connect(url, wallet);
 try {
-  console.log('agent', agent, 'registered:', await ibc.register());
+  console.log('agent', ibc.agent, 'registered:', await ibc.register());
 
   const counter = await ibc.deploy({ ...(await load('Counter')), constructor: { start: 10 } });
   console.log('Counter', counter);

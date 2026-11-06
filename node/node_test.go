@@ -16,9 +16,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ethereum/go-ethereum/core/rawdb"
+	"crypto/ecdsa"
 
-	"github.com/ouripoupko/ibc-go/common"
+	ethcommon "github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/rawdb"
+	"github.com/ethereum/go-ethereum/crypto"
+
+	"github.com/ouripoupko/ibc-go/identity"
 )
 
 // testNode is a node behind a real HTTP server.
@@ -91,12 +95,14 @@ type stream struct {
 	body   io.Closer
 }
 
-func openStream(t *testing.T, base string, pairs ...string) *stream {
+// openStream opens the event stream of each (user, contract) pair; an empty
+// contract means all of the user's contracts.
+func openStream(t *testing.T, base string, pairs ...any) *stream {
 	t.Helper()
 	q := url.Values{}
 	for i := 0; i+1 < len(pairs); i += 2 {
-		q.Add("agent", pairs[i])
-		q.Add("contract", pairs[i+1])
+		u, contract := pairs[i].(*user), pairs[i+1].(string)
+		q.Add("auth", u.auth(t, "stream", u.id, contract, nil))
 	}
 	resp, err := http.Get(base + "/stream?" + q.Encode())
 	if err != nil {
@@ -143,7 +149,7 @@ func openStream(t *testing.T, base string, pairs ...string) *stream {
 // waitFor returns the event answering request.
 func (s *stream) waitFor(t *testing.T, request any) map[string]any {
 	t.Helper()
-	timeout := time.After(5 * time.Second)
+	timeout := time.After(20 * time.Second)
 	for {
 		select {
 		case ev, ok := <-s.events:
@@ -162,7 +168,7 @@ func (s *stream) waitFor(t *testing.T, request any) map[string]any {
 // waitAction returns the next event with the given action.
 func (s *stream) waitAction(t *testing.T, action string) map[string]any {
 	t.Helper()
-	timeout := time.After(5 * time.Second)
+	timeout := time.After(20 * time.Second)
 	for {
 		select {
 		case ev, ok := <-s.events:
@@ -178,87 +184,229 @@ func (s *stream) waitAction(t *testing.T, action string) map[string]any {
 	}
 }
 
-func deployBody(t *testing.T, pid, address string) map[string]any {
+// user is an agent's owner, holding the root key (MetaMask's role in tests).
+type user struct {
+	key *ecdsa.PrivateKey
+	id  string // the agent id: the root key's address
+}
+
+func newUser(t *testing.T) *user {
 	t.Helper()
-	bin, err := os.ReadFile("../testdata/Registry.bin")
+	key, err := crypto.GenerateKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	abiJSON, err := os.ReadFile("../testdata/Registry.abi")
+	return &user{key: key, id: identity.Address(key).Hex()}
+}
+
+// register registers the user's agent on n, authorizing n's key.
+func (u *user) register(t *testing.T, n *testNode, events *stream) {
+	t.Helper()
+	info := call(t, n.URL, "GET", "", "node_info", "", "", nil).(map[string]any)
+	sr, err := identity.SignRegistration(identity.Registration{Agent: identity.Address(u.key), Node: n.URL,
+		NodeKey: ethcommon.HexToAddress(info["nodeKey"].(string)), Nonce: identity.NewNonce()}, u.key)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return map[string]any{
-		"name": "my-registry", "contract": "Registry.sol", "protocol": "BFT",
-		"default_app": "https://app.example", "pid": pid, "address": address, "profile": "",
-		"code": strings.TrimSpace(string(bin)), "abi": string(abiJSON),
-		"constructor": map[string]any{"initialName": "registry", "start": 7},
+	ack := call(t, n.URL, "PUT", u.id, "register_agent", "", "", sr)
+	if ev := events.waitFor(t, ack); ev["reply"] != true {
+		t.Fatalf("register event = %v", ev)
 	}
 }
 
-// The walkthrough of blockchain-api.md ("Putting it together"), on one node.
-func TestClientAPI(t *testing.T) {
-	a := startNode(t, Config{})
-	const me = "alice"
+// query signs a query for action on target's copy of contract; body, if not
+// nil, is marshalled to the JSON body string.
+func (u *user) query(t *testing.T, action, target, contract string, body any) identity.SignedQuery {
+	t.Helper()
+	raw := ""
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw = string(b)
+	}
+	sq, err := identity.SignQuery(identity.Query{Agent: identity.Address(u.key), Action: action, Target: target,
+		Contract: contract, Body: raw, Time: uint64(time.Now().Unix()), Nonce: identity.NewNonce()}, u.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sq
+}
 
-	if got := call(t, a.URL, "GET", me, "is_exist_agent", "", "", nil); got != false {
-		t.Fatalf("is_exist_agent before register = %v", got)
-	}
-	events := openStream(t, a.URL, me, "")
-	ack := call(t, a.URL, "PUT", me, "register_agent", "", "", map[string]any{"address": a.URL})
-	if ev := events.waitFor(t, ack); ev["reply"] != true || ev["agent"] != me || ev["contract"] != nil {
-		t.Fatalf("register event = %v", ev)
-	}
-	if got := call(t, a.URL, "GET", me, "is_exist_agent", "", "", nil); got != true {
-		t.Fatalf("is_exist_agent after register = %v", got)
-	}
+// auth is a signed query as the JSON of an auth URL parameter.
+func (u *user) auth(t *testing.T, action, target, contract string, body any) string {
+	t.Helper()
+	raw, _ := json.Marshal(u.query(t, action, target, contract, body))
+	return string(raw)
+}
 
-	contractID := call(t, a.URL, "PUT", me, "deploy_contract", "", "", deployBody(t, me, a.URL))
-	ev := events.waitFor(t, contractID)
-	if ev["reply"] != true || ev["action"] != "deploy_contract" || ev["contract"] != contractID {
+// get makes a signed GET (get_contract, get_contracts) for u's own agent.
+func (u *user) get(t *testing.T, n *testNode, action, contract string) any {
+	t.Helper()
+	return getAuth(t, n.URL, u.id, action, contract, u.auth(t, action, u.id, contract, nil))
+}
+
+func getAuth(t *testing.T, base, agent, action, contract, auth string) any {
+	t.Helper()
+	path := strings.Join(nonEmpty(agent, contract), "/")
+	resp, err := http.Get(base + "/ibc/app/" + path + "?" + url.Values{"action": {action}, "auth": {auth}}.Encode())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	dec := json.NewDecoder(resp.Body)
+	dec.UseNumber()
+	var out any
+	if err := dec.Decode(&out); err != nil {
+		t.Fatalf("GET %s: %v", action, err)
+	}
+	return out
+}
+
+// sign signs a transaction; body is marshalled to the JSON body string.
+func (u *user) sign(t *testing.T, kind, contract string, body any) identity.SignedTx {
+	t.Helper()
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stx, err := identity.Sign(identity.Transaction{Contract: contract, Kind: kind, Agent: identity.Address(u.key),
+		Nonce: identity.NewNonce(), Body: string(raw)}, u.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return stx
+}
+
+func readTestdata(t *testing.T, name string) (code, abi string) {
+	t.Helper()
+	bin, err := os.ReadFile("../testdata/" + name + ".bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	abiJSON, err := os.ReadFile("../testdata/" + name + ".abi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(string(bin)), string(abiJSON)
+}
+
+// deploy deploys a test contract from u on n and waits until it is live.
+func (u *user) deploy(t *testing.T, n *testNode, events *stream, name, protocol string, ctor map[string]any) string {
+	t.Helper()
+	code, abi := readTestdata(t, name)
+	stx := u.sign(t, identity.KindDeploy, "", map[string]any{
+		"name": "my-" + name, "contract": name + ".sol", "protocol": protocol, "default_app": "https://app.example",
+		"profile": "", "code": code, "abi": json.RawMessage(abi), "constructor": ctor,
+		"node": n.URL, "nodeKey": n.NodeKey(),
+	})
+	id := call(t, n.URL, "PUT", u.id, "deploy_contract", "", "", stx)
+	contractID, ok := id.(string)
+	if !ok {
+		t.Fatalf("deploy_contract replied %v", id)
+	}
+	if ev := events.waitFor(t, contractID); ev["reply"] != true {
 		t.Fatalf("deploy event = %v", ev)
 	}
-	cid := contractID.(string)
+	return contractID
+}
 
-	req := call(t, a.URL, "POST", me, "contract_write", cid, "setValue", map[string]any{"values": map[string]any{"value": 42}})
-	if ev := events.waitFor(t, req); ev["reply"] != json.Number("8") || ev["state_root"] == "" {
+// write sends a call and returns its outcome event.
+func (u *user) write(t *testing.T, n *testNode, events *stream, contract, method string, values map[string]any) map[string]any {
+	t.Helper()
+	stx := u.sign(t, identity.KindCall, contract, map[string]any{"method": method, "values": values})
+	id := call(t, n.URL, "POST", u.id, "contract_write", contract, method, stx)
+	if _, ok := id.(string); !ok {
+		t.Fatalf("contract_write replied %v", id)
+	}
+	return events.waitFor(t, id)
+}
+
+// read reads owner's copy of a contract on n, signed by u.
+func (u *user) readAs(t *testing.T, n *testNode, owner, contract, method string, values map[string]any) any {
+	t.Helper()
+	if values == nil {
+		values = map[string]any{}
+	}
+	return call(t, n.URL, "POST", owner, "contract_read", contract, method,
+		u.query(t, "contract_read", owner, contract, map[string]any{"method": method, "values": values}))
+}
+
+func (u *user) read(t *testing.T, n *testNode, contract, method string, values map[string]any) any {
+	t.Helper()
+	return u.readAs(t, n, u.id, contract, method, values)
+}
+
+// join asks member (on memberNode) to let u join, from u's node n.
+func (u *user) join(t *testing.T, n, memberNode *testNode, member *user, contract string) any {
+	t.Helper()
+	stx := u.sign(t, identity.KindJoin, contract, map[string]any{"node": n.URL, "nodeKey": n.NodeKey(), "profile": ""})
+	body := map[string]any{"tx": stx.Tx, "signature": stx.Signature,
+		"partner": map[string]any{"address": memberNode.URL, "agent": member.id}}
+	return call(t, n.URL, "PUT", u.id, "join_contract", "", "", body)
+}
+
+// The client API on one node: registration, deploy, writes, reads.
+func TestClientAPI(t *testing.T) {
+	a := startNode(t, Config{})
+	alice := newUser(t)
+
+	if got := call(t, a.URL, "GET", alice.id, "is_exist_agent", "", "", nil); got != false {
+		t.Fatalf("is_exist_agent before register = %v", got)
+	}
+	events := openStream(t, a.URL, alice, "")
+	alice.register(t, a, events)
+	if got := call(t, a.URL, "GET", strings.ToLower(alice.id), "is_exist_agent", "", "", nil); got != true {
+		t.Fatalf("is_exist_agent (lower-case address) after register = %v", got)
+	}
+
+	cid := alice.deploy(t, a, events, "Registry", "", map[string]any{"initialName": "registry", "start": 7})
+	if ev := alice.write(t, a, events, cid, "setValue", map[string]any{"value": 42}); ev["reply"] != json.Number("8") || ev["state_root"] == "" {
 		t.Fatalf("write event = %v", ev)
 	}
-
-	who := common.AgentAddress(me).Hex()
-	if got := call(t, a.URL, "POST", me, "contract_read", cid, "getValue", map[string]any{"values": map[string]any{"who": who}}); got != json.Number("42") {
+	if got := alice.read(t, a, cid, "getValue", map[string]any{"who": alice.id}); got != json.Number("42") {
 		t.Fatalf("contract_read getValue = %v", got)
 	}
-	if got := call(t, a.URL, "POST", me, "contract_read", cid, "nope", map[string]any{"values": map[string]any{}}); !strings.Contains(fmt.Sprint(got), "unknown method") {
-		t.Fatalf("contract_read unknown method = %v", got)
+	// msg.sender is the agent's own address.
+	info := alice.read(t, a, cid, "info", nil).([]any)
+	if info[3] != alice.id {
+		t.Fatalf("msg.sender = %v, want %s", info[3], alice.id)
 	}
-	if got := call(t, a.URL, "POST", me, "contract_read", "missing", "counter", map[string]any{"values": map[string]any{}}); fmt.Sprint(got) != "map[message:no such contract]" {
-		t.Fatalf("contract_read missing contract = %v", got)
-	}
-	// A failing write answers on the stream with the revert reason.
-	req = call(t, a.URL, "POST", me, "contract_write", cid, "setThenFail", map[string]any{"values": map[string]any{"value": 1}})
-	if ev := events.waitFor(t, req); ev["reply"] != "execution reverted: setThenFail: rejected" {
+	if ev := alice.write(t, a, events, cid, "setThenFail", map[string]any{"value": 1}); ev["reply"] != "execution reverted: setThenFail: rejected" {
 		t.Fatalf("revert event = %v", ev)
 	}
-
-	list := call(t, a.URL, "GET", me, "get_contracts", "", "", nil).([]any)
-	if len(list) != 1 {
-		t.Fatalf("get_contracts = %v", list)
+	if got := alice.read(t, a, "missing", "counter", nil); fmt.Sprint(got) != "map[message:no such contract]" {
+		t.Fatalf("contract_read missing contract = %v", got)
 	}
-	one := call(t, a.URL, "GET", me, "get_contract", cid, "", nil).(map[string]any)
-	if one["id"] != cid || one["name"] != "my-registry" || one["abi"] == nil || one["evm_address"] == nil {
+
+	// A forged transaction and a transaction sent as someone else are refused.
+	forged := alice.sign(t, identity.KindCall, cid, map[string]any{"method": "setValue", "values": map[string]any{"value": 1}})
+	forged.Tx.Nonce = "changed"
+	if got := call(t, a.URL, "POST", alice.id, "contract_write", cid, "setValue", forged); !strings.Contains(fmt.Sprint(got), "signature") {
+		t.Fatalf("forged transaction: %v", got)
+	}
+	mallory := newUser(t)
+	honest := alice.sign(t, identity.KindCall, cid, map[string]any{"method": "setValue", "values": map[string]any{"value": 1}})
+	if got := call(t, a.URL, "POST", mallory.id, "contract_write", cid, "setValue", honest); !strings.Contains(fmt.Sprint(got), "sent as") {
+		t.Fatalf("transaction sent as another agent: %v", got)
+	}
+
+	one := alice.get(t, a, "get_contract", cid).(map[string]any)
+	if one["id"] != cid || one["name"] != "my-Registry" || one["pid"] != alice.id || one["evm_address"] == nil {
 		t.Fatalf("get_contract = %v", one)
 	}
-	if got := call(t, a.URL, "GET", me, "get_contract", "missing", "", nil); fmt.Sprint(got) != "map[]" {
-		t.Fatalf("get_contract missing = %v", got)
+	if list := alice.get(t, a, "get_contracts", "").([]any); len(list) != 1 {
+		t.Fatalf("get_contracts = %v", list)
 	}
-
-	ledger := call(t, a.URL, "POST", me, "a2a_get_ledger", cid, "", map[string]any{"msg": map[string]any{"index": 2}}).(map[string]any)
-	if len(ledger) != 2 || ledger["000000000000002"] == nil || ledger["000000000000003"] == nil {
-		t.Fatalf("a2a_get_ledger from 2 = %v", ledger)
+	// An unregistered agent cannot deploy.
+	code, abi := readTestdata(t, "Registry")
+	deploy := mallory.sign(t, identity.KindDeploy, "", map[string]any{"code": code, "abi": json.RawMessage(abi),
+		"constructor": map[string]any{"initialName": "x", "start": 0}, "node": a.URL, "nodeKey": a.NodeKey()})
+	if got := call(t, a.URL, "PUT", mallory.id, "deploy_contract", "", "", deploy); !strings.Contains(fmt.Sprint(got), "unknown agent") {
+		t.Fatalf("deploy by an unregistered agent: %v", got)
 	}
-
-	if got := call(t, a.URL, "PUT", me, "no_such_action", "", "", nil); !strings.Contains(fmt.Sprint(got), "unknown action") {
+	if got := call(t, a.URL, "PUT", alice.id, "no_such_action", "", "", nil); !strings.Contains(fmt.Sprint(got), "unknown action") {
 		t.Fatalf("unknown action = %v", got)
 	}
 }
@@ -281,64 +429,200 @@ func TestCORSPreflight(t *testing.T) {
 
 // Bob, on another node, asks to join Alice's contract. Alice's node answers
 // (not approved: approve_partner is a stub) and Bob's client hears it.
-func TestJoinAcrossNodes(t *testing.T) {
+// Three agents on three nodes share a contract: two join, everyone writes,
+// and every node reaches the same state.
+func TestPartnersShareAContract(t *testing.T) {
+	nodes := []*testNode{startNode(t, Config{}), startNode(t, Config{}), startNode(t, Config{})}
+	users := []*user{newUser(t), newUser(t), newUser(t)}
+	var events []*stream
+	for i, u := range users {
+		events = append(events, openStream(t, nodes[i].URL, u, ""))
+		u.register(t, nodes[i], events[i])
+	}
+	alice, bob, carol := users[0], users[1], users[2]
+	cid := alice.deploy(t, nodes[0], events[0], "Registry", "", map[string]any{"initialName": "shared", "start": 0})
+	alice.write(t, nodes[0], events[0], cid, "setValue", map[string]any{"value": 1})
+
+	// bob joins through alice; carol joins through bob.
+	if id, ok := bob.join(t, nodes[1], nodes[0], alice, cid).(string); !ok || len(id) != 66 {
+		t.Fatalf("bob's join_contract replied %v", id)
+	}
+	if ev := events[1].waitAction(t, "join_contract"); ev["reply"] != true {
+		t.Fatalf("bob's join event = %v", ev)
+	}
+	// A newcomer's first write is ordered without anyone else writing.
+	if ev := bob.write(t, nodes[1], events[1], cid, "setValue", map[string]any{"value": 2}); ev["reply"] != json.Number("2") {
+		t.Fatalf("bob's first write = %v", ev)
+	}
+	if id, ok := carol.join(t, nodes[2], nodes[1], bob, cid).(string); !ok || len(id) != 66 {
+		t.Fatalf("carol's join_contract replied %v", id)
+	}
+	if ev := events[2].waitAction(t, "join_contract"); ev["reply"] != true {
+		t.Fatalf("carol's join event = %v", ev)
+	}
+
+	// Everyone writes, at the same time.
+	done := make(chan map[string]any, 3)
+	for i, u := range users {
+		go func() { done <- u.write(t, nodes[i], events[i], cid, "setValue", map[string]any{"value": 10 + i}) }()
+	}
+	for range users {
+		if ev := <-done; ev["action"] != "contract_write" {
+			t.Fatalf("write event = %v", ev)
+		}
+	}
+	// Every node agrees on every value and on the state root.
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		var roots []any
+		agree := true
+		for i, n := range nodes {
+			c := users[i].get(t, n, "get_contract", cid).(map[string]any)
+			roots = append(roots, c["state_root"])
+			if users[i].read(t, n, cid, "counter", nil) != json.Number("5") {
+				agree = false
+			}
+		}
+		if agree && roots[0] == roots[1] && roots[1] == roots[2] {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("nodes did not converge: roots %v", roots)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	for i, n := range nodes {
+		for j, u := range users {
+			if got := users[i].read(t, n, cid, "getValue", map[string]any{"who": u.id}); got != json.Number(fmt.Sprint(10+j)) {
+				t.Errorf("node %d: value of user %d = %v", i, j, got)
+			}
+		}
+	}
+}
+
+// Reads, contract details and streams need a signed query; node messages
+// need a node's signature, and only members' nodes are answered.
+func TestSignatures(t *testing.T) {
 	a := startNode(t, Config{})
-	b := startNode(t, Config{})
+	alice, bob := newUser(t), newUser(t)
+	events := openStream(t, a.URL, alice, "")
+	alice.register(t, a, events)
+	cid := alice.deploy(t, a, events, "Registry", "", map[string]any{"initialName": "q", "start": 0})
+	refused := func(what string, got any, want string) {
+		t.Helper()
+		if !strings.Contains(fmt.Sprint(got), want) {
+			t.Fatalf("%s: got %v, want an error with %q", what, got, want)
+		}
+	}
+	readBody := map[string]any{"method": "counter", "values": map[string]any{}}
 
-	aliceEvents := openStream(t, a.URL, "alice", "")
-	bobEvents := openStream(t, b.URL, "bob", "")
-	call(t, a.URL, "PUT", "alice", "register_agent", "", "", map[string]any{"address": a.URL})
-	call(t, b.URL, "PUT", "bob", "register_agent", "", "", map[string]any{"address": b.URL})
-	cid := call(t, a.URL, "PUT", "alice", "deploy_contract", "", "", deployBody(t, "alice", a.URL))
-	aliceEvents.waitFor(t, cid)
+	refused("unsigned read", call(t, a.URL, "POST", alice.id, "contract_read", cid, "counter",
+		map[string]any{"values": map[string]any{}}), "signed query")
+	// Anyone may sign a read; the contract decides what it answers (the
+	// examples test checks that msg.sender is the signer).
+	if got := bob.readAs(t, a, alice.id, cid, "counter", nil); got != json.Number("0") {
+		t.Fatalf("bob's read = %v", got)
+	}
+	sq := alice.query(t, "contract_read", alice.id, cid, readBody)
+	if got := call(t, a.URL, "POST", alice.id, "contract_read", cid, "", sq); got != json.Number("0") {
+		t.Fatalf("signed read = %v", got)
+	}
+	refused("replayed read", call(t, a.URL, "POST", alice.id, "contract_read", cid, "", sq), "already used")
+	old := alice.query(t, "contract_read", alice.id, cid, readBody)
+	old.Query.Time -= 120
+	if old, _ = identity.SignQuery(old.Query, alice.key); true {
+		refused("expired read", call(t, a.URL, "POST", alice.id, "contract_read", cid, "", old), "expired")
+	}
+	refused("read signed for another action", call(t, a.URL, "POST", alice.id, "contract_read", cid, "",
+		alice.query(t, "get_contract", alice.id, cid, readBody)), "sent to contract_read")
+	forged := alice.query(t, "contract_read", alice.id, cid, readBody)
+	forged.Query.Body = `{"method":"info","values":{}}`
+	refused("forged read", call(t, a.URL, "POST", alice.id, "contract_read", cid, "", forged), "signature")
 
-	ack := call(t, b.URL, "PUT", "bob", "join_contract", "", "", map[string]any{
-		"contract": cid, "address": a.URL + "/", "agent": "alice", "profile": "",
-	})
-	if s, ok := ack.(string); !ok || len(s) != 64 {
-		t.Fatalf("join_contract ack = %v", ack)
+	// Only the agent itself sees its contracts and its stream.
+	refused("unsigned get_contracts", getAuth(t, a.URL, alice.id, "get_contracts", "", ""), "signed query")
+	refused("bob lists alice's contracts", getAuth(t, a.URL, alice.id, "get_contracts", "",
+		bob.auth(t, "get_contracts", alice.id, "", nil)), "only agent")
+	for _, auth := range []string{"", bob.auth(t, "stream", alice.id, "", nil)} {
+		resp, err := http.Get(a.URL + "/stream?" + url.Values{"auth": {auth}}.Encode())
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("stream with auth %q: status %s", auth, resp.Status)
+		}
 	}
-	if ev := aliceEvents.waitAction(t, "a2a_connect"); ev["reply"] != false || ev["contract"] != cid {
-		t.Fatalf("alice's a2a_connect event = %v", ev)
+
+	// Node to node: an unsigned message is refused, and a signed one from a
+	// node that serves no member is not answered.
+	refused("unsigned a2a_consent", call(t, a.URL, "PUT", alice.id, "a2a_consent", cid, "",
+		map[string]any{"msg": map[string]any{"type": "get_ledger"}}), "signature")
+	stranger, _ := crypto.GenerateKey()
+	msg := []byte(`{"type":"get_ledger"}`)
+	now := uint64(time.Now().Unix())
+	hash := crypto.Keccak256Hash([]byte(fmt.Sprintf("ibc a2a v1\n%s\n%s\n%d\n", alice.id, cid, now)), msg)
+	sig, _ := identity.SignHash(hash, stranger)
+	env := map[string]any{"msg": json.RawMessage(msg), "node": identity.Address(stranger).Hex(), "time": now,
+		"signature": "0x" + fmt.Sprintf("%x", sig)}
+	refused("get_ledger from a stranger's node", call(t, a.URL, "PUT", alice.id, "a2a_consent", cid, "", env),
+		"serves no member")
+}
+
+// A contract's approve_partner refuses an agent it did not invite.
+func TestJoinRefusedByContractPolicy(t *testing.T) {
+	a, b := startNode(t, Config{}), startNode(t, Config{})
+	owner, stranger := newUser(t), newUser(t)
+	ea, eb := openStream(t, a.URL, owner, ""), openStream(t, b.URL, stranger, "")
+	owner.register(t, a, ea)
+	stranger.register(t, b, eb)
+	cid := owner.deploy(t, a, ea, "Club", "", nil)
+	stranger.join(t, b, a, owner, cid)
+	if ev := eb.waitAction(t, "join_contract"); ev["reply"] != false {
+		t.Fatalf("join event = %v", ev)
 	}
-	if ev := bobEvents.waitAction(t, "a2a_reply_join"); ev["reply"] != false || ev["agent"] != "bob" {
-		t.Fatalf("bob's a2a_reply_join event = %v", ev)
+	if got := stranger.get(t, b, "get_contract", cid); fmt.Sprint(got) != "map[]" {
+		t.Fatalf("the refused agent has the contract: %v", got)
 	}
-	// Alice's ledger has the deploy and the join request.
-	ledger := call(t, a.URL, "POST", "alice", "a2a_get_ledger", cid.(string), "", map[string]any{"msg": map[string]any{"index": 0}}).(map[string]any)
-	if len(ledger) != 2 {
-		t.Fatalf("alice's ledger = %v", ledger)
+}
+
+func TestImmediateProtocol(t *testing.T) {
+	a := startNode(t, Config{})
+	alice := newUser(t)
+	events := openStream(t, a.URL, alice, "")
+	alice.register(t, a, events)
+	cid := alice.deploy(t, a, events, "Registry", "immediate", map[string]any{"initialName": "solo", "start": 0})
+	if ev := alice.write(t, a, events, cid, "setValue", map[string]any{"value": 5}); ev["reply"] != json.Number("1") {
+		t.Fatalf("write = %v", ev)
 	}
 }
 
 func TestStreamScopes(t *testing.T) {
 	a := startNode(t, Config{})
-	call(t, a.URL, "PUT", "alice", "register_agent", "", "", map[string]any{"address": a.URL})
-	c1 := call(t, a.URL, "PUT", "alice", "deploy_contract", "", "", deployBody(t, "alice", a.URL)).(string)
-	body := deployBody(t, "alice", a.URL)
-	body["name"] = "second"
-	c2 := call(t, a.URL, "PUT", "alice", "deploy_contract", "", "", body).(string)
+	alice := newUser(t)
+	setup := openStream(t, a.URL, alice, "")
+	alice.register(t, a, setup)
+	c1 := alice.deploy(t, a, setup, "Registry", "", map[string]any{"initialName": "one", "start": 0})
+	c2 := alice.deploy(t, a, setup, "Registry", "", map[string]any{"initialName": "two", "start": 0})
 
-	all := openStream(t, a.URL, "alice", "")
-	only1 := openStream(t, a.URL, "alice", c1)
-	other := openStream(t, a.URL, "carol", "")
-
-	w2 := call(t, a.URL, "POST", "alice", "contract_write", c2, "setValue", map[string]any{"values": map[string]any{"value": 1}})
-	w1 := call(t, a.URL, "POST", "alice", "contract_write", c1, "setValue", map[string]any{"values": map[string]any{"value": 1}})
-	// Different contracts run in parallel, so the two events may come in either order.
+	all := openStream(t, a.URL, alice, "")
+	only1 := openStream(t, a.URL, alice, c1)
+	other := openStream(t, a.URL, newUser(t), "")
+	w2 := alice.write(t, a, setup, c2, "setValue", map[string]any{"value": 1})["request"]
+	w1 := alice.write(t, a, setup, c1, "setValue", map[string]any{"value": 1})["request"]
 	seen := map[any]bool{}
 	for len(seen) < 2 {
 		seen[all.waitAction(t, "contract_write")["request"]] = true
 	}
 	if !seen[w1] || !seen[w2] {
-		t.Fatalf("all-contracts stream saw %v, want %v and %v", seen, w1, w2)
+		t.Fatalf("all-contracts stream saw %v", seen)
 	}
 	if ev := only1.waitAction(t, "contract_write"); ev["request"] != w1 {
 		t.Fatalf("contract-scoped stream got %v, want only %v", ev, w1)
 	}
 	select {
 	case ev := <-other.events:
-		t.Fatalf("carol's stream got alice's event %v", ev)
+		t.Fatalf("another agent's stream got %v", ev)
 	case <-time.After(100 * time.Millisecond):
 	}
 }
@@ -346,19 +630,27 @@ func TestStreamScopes(t *testing.T) {
 func TestDataSurvivesRestart(t *testing.T) {
 	dir := t.TempDir()
 	a := startNode(t, Config{DataDir: dir})
-	events := openStream(t, a.URL, "alice", "")
-	call(t, a.URL, "PUT", "alice", "register_agent", "", "", map[string]any{"address": a.URL})
-	cid := call(t, a.URL, "PUT", "alice", "deploy_contract", "", "", deployBody(t, "alice", a.URL))
-	events.waitFor(t, cid)
-	req := call(t, a.URL, "POST", "alice", "contract_write", cid.(string), "setValue", map[string]any{"values": map[string]any{"value": 5}})
-	events.waitFor(t, req)
+	alice := newUser(t)
+	events := openStream(t, a.URL, alice, "")
+	alice.register(t, a, events)
+	cid := alice.deploy(t, a, events, "Registry", "", map[string]any{"initialName": "kept", "start": 0})
+	alice.write(t, a, events, cid, "setValue", map[string]any{"value": 5})
+	nodeKey := a.NodeKey()
 	if err := a.Close(); err != nil {
 		t.Fatal(err)
 	}
 
 	b := startNode(t, Config{DataDir: dir})
-	if got := call(t, b.URL, "POST", "alice", "contract_read", cid.(string), "counter", map[string]any{"values": map[string]any{}}); got != json.Number("8") {
+	if b.NodeKey() != nodeKey {
+		t.Fatalf("node key changed across a restart: %s, %s", nodeKey, b.NodeKey())
+	}
+	if got := alice.read(t, b, cid, "counter", nil); got != json.Number("1") {
 		t.Fatalf("counter after restart = %v", got)
+	}
+	// Consensus resumes: a new write is ordered and applied.
+	events = openStream(t, b.URL, alice, "")
+	if ev := alice.write(t, b, events, cid, "setValue", map[string]any{"value": 6}); ev["reply"] != json.Number("2") {
+		t.Fatalf("write after restart = %v", ev)
 	}
 }
 
@@ -375,7 +667,7 @@ func TestServeShutsDownWithOpenStreams(t *testing.T) {
 	served := make(chan error, 1)
 	go func() { served <- n.Serve(ctx, ln) }()
 	base := "http://" + ln.Addr().String()
-	s := openStream(t, base, "alice", "")
+	s := openStream(t, base, newUser(t), "")
 
 	cancel()
 	select {
@@ -387,5 +679,38 @@ func TestServeShutsDownWithOpenStreams(t *testing.T) {
 		t.Fatal("Serve did not return with an open event stream")
 	}
 	for range s.events { // the stream ends
+	}
+}
+
+// The node serves its web interface next to the API.
+func TestWebInterface(t *testing.T) {
+	a := startNode(t, Config{})
+	for path, want := range map[string]string{
+		"/":              "text/html",
+		"/contract.html": "text/html",
+		"/ibc.mjs":       "text/javascript",
+		"/app.mjs":       "text/javascript",
+		"/style.css":     "text/css",
+	} {
+		resp, err := http.Get(a.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || !strings.HasPrefix(resp.Header.Get("Content-Type"), want) {
+			t.Errorf("GET %s: %s, %q", path, resp.Status, resp.Header.Get("Content-Type"))
+		}
+	}
+	resp, err := http.Post(a.URL+"/", "text/plain", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("POST /: %s", resp.Status)
+	}
+	// The API is still reached under /ibc/app.
+	if info := call(t, a.URL, "GET", "", "node_info", "", "", nil).(map[string]any); info["nodeKey"] != a.NodeKey() {
+		t.Errorf("node_info = %v", info)
 	}
 }

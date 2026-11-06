@@ -35,6 +35,8 @@ type Collection interface {
 	Has(key string) (bool, error)
 	// Keys returns the keys of all existing documents, sorted.
 	Keys() ([]string, error)
+	// Delete removes the document at key, if it exists.
+	Delete(key string) error
 }
 
 // MemoryDocument is an in-memory Document, for tests and development.
@@ -134,6 +136,13 @@ func (c *MemoryCollection) Has(key string) (bool, error) {
 		return false, nil
 	}
 	return d.Exists()
+}
+
+func (c *MemoryCollection) Delete(key string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.docs, key)
+	return nil
 }
 
 func (c *MemoryCollection) Keys() ([]string, error) {

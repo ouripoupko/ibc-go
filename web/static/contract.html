@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ibc · Contract</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <h1><a href="./">ibc</a> <span id="title-name" class="hint"></span></h1>
+    <div class="who" id="who">Not connected</div>
+  </header>
+  <main>
+    <p><a href="./">← Your contracts</a></p>
+
+    <section class="card" id="connect-card">
+      <h2>Connect</h2>
+      <p>Connect MetaMask, then sign a query to open this contract.</p>
+      <button id="connect">Connect MetaMask</button>
+      <div class="status" id="connect-status"></div>
+    </section>
+
+    <div id="contract-area" class="hidden">
+      <section class="card">
+        <h2 id="name"></h2>
+        <dl class="details" id="details"></dl>
+      </section>
+
+      <section class="card">
+        <h2>Invite</h2>
+        <p class="hint">Give this code to someone who should join. They paste it on the ibc page of
+          their own node. The contract's rules decide whether they may join.</p>
+        <div class="row">
+          <code id="invite" class="mono" style="overflow-wrap: anywhere; flex: 1"></code>
+          <button class="secondary" id="copy-invite">Copy</button>
+        </div>
+      </section>
+
+      <section class="card" id="reads-card">
+        <h2>Read</h2>
+        <p class="hint">A read changes nothing. You sign a query; the contract sees you as
+          <code>msg.sender</code>.</p>
+        <div id="reads"></div>
+      </section>
+
+      <section class="card" id="writes-card">
+        <h2>Transactions</h2>
+        <p class="hint">A transaction is ordered with the other members and applied by all of them.
+          The result appears when it has been applied.</p>
+        <div id="writes"></div>
+      </section>
+
+      <section class="card">
+        <h2>Events</h2>
+        <p class="hint">The outcomes of this contract's transactions, from when the event stream
+          opened (with your first transaction on this page).</p>
+        <ul class="events" id="events"><li class="hint">None yet.</li></ul>
+      </section>
+
+      <section class="card">
+        <h2>Leave</h2>
+        <p class="hint">Leave this contract. The other members decide, by the contract's rules.</p>
+        <button class="danger" id="leave">Leave the contract</button>
+        <div class="status" id="leave-status"></div>
+      </section>
+    </div>
+  </main>
+  <script type="module" src="contract.mjs"></script>
+</body>
+</html>

@@ -1,0 +1,365 @@
+# Consensus design
+
+This is the design of ibc's consensus protocol, Cordial Miners, as implemented in
+[`consensus/cordial`](../consensus/cordial). It is based on the paper by Keidar, Naor, Poupko and
+Shapiro, *Cordial Miners: Fast and Efficient Consensus for Every Eventuality* (DISC 2023), and
+follows the engineering choices of the
+[CordialMiners prototype](https://github.com/ouripoupko/CordialMiners). Every place where it
+differs from the prototype is listed in [§11](#11-deviations-from-the-prototype), together with the
+one prototype rule kept despite an open question.
+
+Terms follow the paper: miner, block, blocklace, depth (round), cordial, supermajority, approve,
+ratify, super-ratify, wave, leader, final, τ.
+
+- [1. Goals](#1-goals)
+- [2. Contracts, protocols and miners](#2-contracts-protocols-and-miners)
+- [3. Keys and signatures](#3-keys-and-signatures)
+- [4. Transactions](#4-transactions)
+- [5. Blocks](#5-blocks)
+- [6. The blocklace](#6-the-blocklace)
+- [7. Rounds, leaders and ordering](#7-rounds-leaders-and-ordering)
+- [8. Dissemination](#8-dissemination)
+- [9. From τ to execution](#9-from-τ-to-execution)
+- [10. Membership changes](#10-membership-changes)
+- [11. Deviations from the prototype](#11-deviations-from-the-prototype)
+- [12. Decisions](#12-decisions)
+- [13. Not in this version](#13-not-in-this-version)
+
+## 1. Goals
+
+- **Safety.** All correct partners of a contract execute the same sequence of transactions, and so
+  reach the same state roots.
+- **Liveness.** Every transaction submitted by a correct partner is eventually executed, while a
+  supermajority of partners is correct, online and connected.
+- **Fault tolerance.** A contract with *n* partners tolerates *f* = ⌊(n−1)/3⌋ Byzantine partners.
+- **Self-sovereignty.** Only an agent can create its own transactions. Nodes never hold an agent's
+  personal key.
+
+Where safety and liveness compete, this design gives up liveness. In particular, a contract stops
+making progress while fewer than a supermajority of its partners are online, and a membership
+change freezes the contract until the change is final (§10).
+
+A set of miners is a **supermajority** if it has more than (n+f)/2 members:
+
+| n | 1 | 2 | 3 | 4 | 5 | 7 | 10 |
+|---|---|---|---|---|---|---|---|
+| f | 0 | 0 | 0 | 1 | 1 | 2 | 3 |
+| supermajority | 1 | 2 | 2 | 3 | 4 | 5 | 7 |
+
+There is no limit on the number of partners, and no optimization for large contracts:
+dissemination is all-to-all.
+
+## 2. Contracts, protocols and miners
+
+- **Each contract chooses its consensus protocol** when it is deployed, with the deploy's
+  `protocol` field, and keeps it for its lifetime:
+  - `cordial` (the default, also used for an empty field and for the Python value `BFT`) is this
+    protocol;
+  - `immediate` orders the creator's transactions locally, with no partners. It exists for testing.
+- **Each contract has its own blocklace.** Its miners are exactly the contract's partners (agents).
+  Contracts never wait for each other.
+- **An agent's miner runs on the agent's node.** A node runs one miner per (agent, contract). Two
+  partners hosted on the same node are two miners.
+
+## 3. Keys and signatures
+
+All keys are secp256k1, the curve of Ethereum.
+
+| Key | Held by | Signs |
+|---|---|---|
+| An agent's **root key** | The agent, in MetaMask (or any Ethereum wallet) | Transactions and the agent's registration |
+| The **node key** | The node; one per node, created on first start | Blocks |
+
+- **The agent id is the root key's address** (`0x…`, 40 hex digits). It is also the agent's
+  `msg.sender` in contracts.
+- **Nodes never hold personal keys.** A node signs blocks only, with its own key.
+- **An agent authorizes its node by registering.** The registration names the node and its node key
+  and is signed by the agent. Contracts learn a member's node key from the member's deploy or join
+  transaction, which is signed by the member's root key.
+- **A node cannot forge an agent's transactions.** It can delay or drop them, and it can misbehave
+  in consensus. A misbehaving node is replaced with a `rotate_key` transaction (§10).
+
+## 4. Transactions
+
+A transaction is signed by the agent's root key with EIP-712 (`eth_signTypedData_v4` in
+MetaMask), so the wallet shows the fields before signing.
+
+```
+domain:  { name: "ibc", version: "1" }
+Transaction {
+  contract: string    the contract id; empty for a deploy
+  kind:     string    deploy | call | join | leave | rotate_key
+  agent:    address   the signer
+  nonce:    string    random, so equal requests are still different transactions
+  body:     string    JSON, by kind:
+              deploy:     { name, contract, protocol, default_app, profile,
+                            code, abi, constructor, node, nodeKey }
+              call:       { method, values }
+              join:       { node, nodeKey, profile }
+              leave:      { member }
+              rotate_key: { nodeKey }
+}
+```
+
+- The **transaction id** is the EIP-712 digest. A deploy's id is the new contract's id.
+- A transaction is **valid** if the signature recovers `agent`, the body parses, and it belongs
+  to the contract. That depends only on the transaction, so every correct miner agrees.
+- **Each transaction is executed at most once.** τ's output skips transaction ids it has already
+  output (§9).
+- A transaction's **time** is the time of the block that carries it; that is `block.timestamp`.
+
+## 5. Blocks
+
+```
+Block {
+  contract    the contract id
+  config      the index of the membership configuration (§10)
+  creator     the agent's address
+  depth       the block's round
+  time        the creator's clock, unix microseconds
+  pointers    hashes of earlier blocks
+  payload     signed transactions
+  stateRoot   the creator's state root after the last output it executed (cross-check)
+  signature   by the node key the configuration holds for the creator
+}
+```
+
+Blocks are encoded with RLP. A block's hash is the keccak256 of its encoding without the signature.
+
+### Validity
+
+A block is added to the blocklace only if every check passes. Each check depends only on the
+block, the blocks it points to and its configuration, so all correct miners agree.
+
+1. **Configuration.** `config` is a configuration the miner knows, `creator` is one of its members,
+   and the signature recovers that member's node key.
+2. **Pointers.** All pointed blocks are present (otherwise the block waits in a buffer, §8), and
+   they are blocks of the same configuration. The exception is the configuration's anchor (§10).
+3. **The first round of a configuration** (depth 0 for configuration 0; the anchor's depth + 1
+   otherwise): the block points to nothing (configuration 0) or to exactly the anchor.
+4. **Later rounds:**
+   - **Cordial.** The pointers include blocks of depth − 1 from a supermajority of the members.
+   - **One pointer per creator.** No two pointers refer to blocks of the same creator, and every
+     pointed block has a smaller depth.
+   - **Self-chain** (from the prototype). At most one pointer refers to the creator's own block. A
+     correct miner always points to its previous block; a block with none starts a new chain, and
+     two chains of one creator are an equivocation.
+5. **Time.** `time` is at least the time of every pointed block.
+6. **Payload.** Every transaction is valid (§4) and belongs to the contract. `call`, `leave` and
+   `rotate_key` transactions are by members; a `deploy` appears only in the creator's first block
+   of configuration 0.
+
+## 6. The blocklace
+
+Each miner keeps the blocklace of its contract in the node's Pebble database: blocks by hash,
+configurations, the miner's own blocks (written **before** they are sent, so that a restart cannot
+make a second block at the same depth), the mempool, and the progress of τ. Indexes by depth and
+creator are rebuilt in memory on start.
+
+### Observation summaries
+
+Approval must depend only on the approving block (§11). To compute it exactly and fast, every
+block gets an **observation summary** when it is added:
+
+> summary(b): for each creator *c*, the maximal blocks of *c* that *b* observes. One block
+> normally; two or more if *b* observes an equivocation by *c*.
+
+summary(b) merges the summaries of the blocks *b* points to, plus *b* itself. With it:
+
+- *b* **observes** *x* if a block in summary(b)[creator(x)] is *x* or descends from *x* along the
+  creator's chain;
+- *b* **approves** *x* if *b* observes *x* and **every** block in summary(b)[creator(x)] is *x* or
+  descends from it. Otherwise *b* sees a block of that creator that does not observe *x*: an
+  equivocation.
+
+These are the paper's definitions (Defs. 16–18), and they depend on *b* alone.
+
+## 7. Rounds, leaders and ordering
+
+These are the rules of the eventual-synchrony variant, as the prototype implements them.
+
+- **Waves** have *w* = 3 rounds, counted from the configuration's first round.
+- **Leaders.** The leader of the wave starting at depth *d* is the member at position
+  ((d − first round) / w) mod n, members sorted by address.
+- **Rounds.** Round *r* is cordial when it has blocks from a supermajority. The completed round is
+  the last round such that it and all rounds before it in the configuration are cordial.
+- **Creating blocks.** A miner's next block is always **one round above its last** (its first block
+  is in the configuration's first round). It may create it once its last round is cordial, counting
+  only members it does not know to have equivocated. It points to each such member's latest block
+  below the new depth (walking the member's chain down, as the prototype does), its own previous
+  block included.
+- **Idle rule, with catch-up.** A miner creates a block only if it has transactions in its
+  mempool, the blocklace has transactions that τ has not output yet (blocks of known equivocators
+  do not count), a membership change is pending, it has no block yet in the current configuration,
+  or another member already has a block in the round it would create. Contracts with nothing to
+  order produce no blocks.
+- **Ratification.** *b* **ratifies** *x* if *b*'s closure has blocks approving *x* from a
+  supermajority. A set of blocks **super-ratifies** *x* if it has blocks from a supermajority, each
+  of which ratifies *x*.
+- **Finality** (the prototype's window, an [open issue](#open-issue-the-finality-window)). A leader
+  block of depth *r* is final if blocks of depth *r*+1 to *r*+3 super-ratify it.
+- **τ.** For the last final leader, τ walks back through each leader's previous ratified leader,
+  until it reaches output it has produced or the configuration's anchor. It then outputs, from the
+  oldest leader on, each leader's blocks not yet output, in the prototype's order: depth-first
+  along the pointers, in the order the block lists them. Like the prototype, τ does not filter out
+  equivocating blocks; transactions are signed by users and output at most once, so an
+  equivocating node can neither forge nor duplicate anything.
+
+## 8. Dissemination
+
+Messages between nodes travel in `a2a_consent` requests:
+
+- **Push.** A miner sends each block it creates to every other member.
+- **Pull.** A block whose pointers are not all known waits in a buffer, and the miner asks the
+  block's creator for the missing blocks by hash; unanswered requests are repeated to every member.
+- **Catch-up.** A miner that has work to do but has neither received nor made a block for a second
+  asks every member for its blocks from the round of the last final leader on (`get_from`), and
+  sends its own latest block again. This recovers from lost messages: a block nobody points to
+  cannot be pulled by hash, and a member that missed a block may be idle without knowing a round
+  waits for it.
+- **During a join,** blocks of the new configuration that reach the newcomer's node before its
+  sync finishes are kept and given to its miner afterwards.
+- **Relay.** A client may send a transaction to any member's node; joins are relayed this way.
+- Senders need no authentication: blocks and transactions carry their own signatures.
+
+## 9. From τ to execution
+
+τ's output is a sequence of blocks, each with transactions. In that order, each transaction not
+output before becomes a record with the next ledger index, and goes to
+`execution.Navigator.Submit`. Execution then works as before: the record is written to the ledger
+first, and applied by the contract's goroutine.
+
+- τ's progress (output blocks, output transaction ids, the next index) is saved after the records
+  are submitted. After a crash, the step is repeated, and the navigator ignores indexes it already
+  has.
+- `msg.sender` is the transaction's agent, and `block.timestamp` is the carrying block's time.
+
+## 10. Membership changes
+
+A contract's **configuration** is its members and each member's node key. The deploy creates
+configuration 0, with the creator alone. `join`, `leave` and `rotate_key` transactions change it.
+
+### The rule
+
+1. **A change is an ordinary transaction,** ordered by the current members.
+2. **Freeze.** While a block of the configuration holds a change that τ has not output, correct
+   miners put no other transactions in their blocks; incoming ones wait in the mempool. The idle
+   rule keeps them making (empty) blocks until the change is output.
+3. **Decide.** When τ outputs the change, execution applies it at its place in the order:
+   - `join` calls the contract's `approve_partner(address)` as the joining agent; a contract
+     without that function accepts every join (as the Python default did);
+   - `leave` of oneself is always accepted; removing another member calls the contract's
+     `approve_removal(address)` as the requesting member, and a contract without that function
+     refuses;
+   - `rotate_key` by a member is always accepted. It names the agent's new node (URL and key):
+     rotating a key means moving to another node, or replacing a compromised one.
+4. **Switch at the leader.** Let *L* be the leader whose part of τ's output holds the change. If
+   the change is accepted, configuration *k* ends at *L*: τ outputs nothing after *L*'s part.
+   Configuration *k*+1 starts with *L* as its **anchor**: its first round is *L*'s depth + 1, and
+   its first blocks point to *L* alone. Blocks of configuration *k* that *L* does not observe are
+   left out; the freeze keeps correct miners' blocks there empty, and any transaction left out is
+   returned to its node's mempool. A rejected change unfreezes configuration *k* with no switch.
+5. **New nodes** (a newcomer's, or a member's new node after `rotate_key`) receive a welcome from
+   the members, with the anchor and the new configuration. They download the ledger, check every
+   transaction's signature, execute it, and join the first round. Each member's first block of the
+   new configuration carries its state root. A member's old node, after a rotation, stops taking
+   part.
+
+### Why it is safe
+
+The argument is that every correct miner switches at the same point, with the same state. The
+paper's proofs cover each configuration on its own, since membership is fixed within it.
+
+1. **Every correct miner outputs the same sequence within configuration *k*,** by τ's safety
+   (Theorem 8) for a fixed set of miners.
+2. **The change has the same place, and the same leader *L*, at every correct miner.** τ's output
+   is built from leaders' parts, and a final leader's part is the same everywhere: every later
+   leader's chain of ratified leaders passes through it (leader safety, Prop. 3), so the part
+   below it, and so its own, are fixed. (The finality window kept from the prototype puts this
+   step under the [open issue](#open-issue-the-finality-window).)
+3. **The decision is the same at every correct miner,** since execution is deterministic and runs
+   the same records in the same order.
+4. **So every correct miner ends configuration *k* at the same *L*, with the same state.** A miner
+   that learns of *L*'s finality late keeps making blocks of configuration *k* until then; since
+   τ never outputs anything after *L* in configuration *k*, those blocks change nothing. That is
+   why the switch is tied to *L* itself rather than to a later round: a rule like "switch at the
+   next wave" would need every miner to know of *L*'s finality before reaching that wave, which
+   no miner can be sure of.
+5. **Configuration *k*+1 starts from the same point everywhere,** because its first blocks point to
+   *L* alone and τ stops at the anchor. Within it, the paper's argument applies again.
+6. **Nothing is lost or executed twice.** Transactions in left-out blocks return to mempools and
+   are proposed again; output skips transaction ids already output.
+7. **Liveness is what is paid.** The freeze holds other transactions back until the change is
+   output, and the new configuration needs a supermajority of its members, including newcomers,
+   before it progresses.
+
+### Consequences
+
+- **One change at a time.** Changes made during a freeze wait for the next configuration.
+- **A disappearing member can stop a small contract for good.** Removing it needs a supermajority
+  of the current members, which in a two-member contract is both.
+- **Key rotation takes effect at the next switch.** Until then a stolen node key can act as one
+  Byzantine miner.
+
+## 11. Deviations from the prototype
+
+| Prototype | This design | Why |
+|---|---|---|
+| `approves` uses the miner's own list of equivocators, and `leaf_of_creator` follows a creator's chain below a fork | Approval from the approving block's observation summary (§6) | **Safety.** Approval must depend on the block alone. Otherwise two correct miners can compute different approvals for the same block and disagree on finality. |
+| No signatures, hashes not verified | Signed transactions (EIP-712) and blocks | Without signatures any node can forge any miner's blocks. |
+| Own blocks only in memory | Saved before they are sent | A restarted miner must not make a second, different block at the same depth. |
+| Whole-blocklace scans | Indexes by depth and creator; summaries | Performance. |
+| Fixed miners, every block points to its creator's previous block | Configurations (§10); a missing self-pointer starts a new chain | ibc's partners change. |
+| A miner jumps to the completed round | It never skips a round | **Liveness**, found by the simulator. Miners learn of equivocators at different times. With 7 miners and 2 equivocators, a miner that counted an equivocator's block skipped a round; miners that knew of the equivocation then saw that round without a supermajority of eligible blocks, forever. |
+| A miner makes a block only for its own messages or for unordered blocks | Also when another member has started the round (catch-up rule) | **Liveness**, found by the simulator. A miner that had already made its block for round *r* got a new transaction; the others were idle, so round *r* never completed and the transaction waited forever. |
+| Rounds counted with every creator | The round a correct miner builds on counts only members not known to equivocate | **Liveness.** Otherwise a round can look complete thanks to an equivocator's block, while correct miners, who do not point to equivocators, cannot build on it. |
+| — | Catch-up pull and re-push when stalled (§8) | **Liveness** with lost messages, found by the simulator dropping 30% of blocks. |
+
+Kept from the prototype: advancing without a timeout, round-robin leaders, the finality window,
+choosing pointers by walking members' chains below the current round, the idle rule, buffering
+until pointers resolve, and outputting all of a leader's unoutput blocks.
+
+### Open issue: the finality window
+
+The prototype counts ratifiers of a leader at depth *r* in rounds *r*+1 to *r*+3. The paper's
+Def. 24 stops at *r*+2 (*r* + *w* − 1). The prototype's window is kept by decision: it lets leaders
+become final more often on real, irregular networks.
+
+The concern: the paper's proof that every later leader ratifies a final leader (Prop. 3, Fig. 2)
+needs the ratifying blocks to be below the next leader's round, which is *r*+3. A ratifier at
+*r*+3 may be unseen by the next leader. No run producing disagreement has been found, but the proof
+does not cover this window.
+
+| Variant | w | Ratifiers up to | Next leader | Covered by the proof |
+|---|---|---|---|---|
+| Paper | 3 | *r*+2 | *r*+3 | Yes |
+| **Prototype (used)** | 3 | *r*+3 | *r*+3 | No |
+| Alternative | 4 | *r*+3 | *r*+4 | Yes |
+
+The window and the wavelength are parameters of the implementation, and the simulator tests run
+all three variants with equivocating miners.
+
+## 12. Decisions
+
+| # | Decision |
+|---|---|
+| D1 | The agent id is the address of the agent's root key |
+| D2 | No custodial mode: nodes never hold personal keys; users sign in MetaMask |
+| — | One node key per node, authorized by each hosted agent's registration |
+| — | secp256k1 keys; EIP-712 signatures |
+| D3 | One blocklace; membership changes freeze the contract until output, and switch at the leader that output them (§10) |
+| D4 | τ does not filter equivocating blocks (as the prototype) |
+| D5 | The prototype's finality window, tracked as an open issue (§11) |
+| D6 | No shortcut for single-member contracts |
+| D7 | Push own blocks; pull missing ones by hash |
+| D8 | Blocks carry the creator's state root |
+| D9 | A member may always leave; removing another needs the contract's `approve_removal` |
+| — | Each contract chooses its protocol; one blocklace per contract |
+| — | No limit on partners, no optimizations for large contracts |
+
+## 13. Not in this version
+
+- The personal two-pointer ledger of the ssDA paper (same-contract and same-agent pointers).
+- Session keys to reduce wallet approvals.
+- A timeout in eventual synchrony, and the asynchronous variant with a shared coin.
+- Contract events (logs).

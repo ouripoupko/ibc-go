@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"math/big"
 	"reflect"
@@ -47,13 +48,20 @@ const (
 	KeyBlockNumber   = "block_number"   // number of ledger records applied so far
 	KeyLastTimestamp = "last_timestamp" // timestamp of the last write transaction
 	KeyDeployError   = "deploy_error"   // why the deployment failed, if it did
+	// KeyDecisionPrefix + a transaction id holds the decision on a
+	// membership change, written together with the cursor.
+	KeyDecisionPrefix = "decision:"
 )
 
 // Built-in method names that the Python State answered itself.
 const (
-	MethodGetPartners    = "get_partners"
+	MethodGetPartners   = "get_partners"
+	MethodGetParameters = "get_parameters"
+	// Contract functions that decide membership changes, if a contract
+	// defines them: approve_partner(address) and approve_removal(address),
+	// both returning bool.
 	MethodApprovePartner = "approve_partner"
-	MethodGetParameters  = "get_parameters"
+	MethodApproveRemoval = "approve_removal"
 )
 
 const (
@@ -140,7 +148,13 @@ var chainConfig = func() *params.ChainConfig {
 
 // AgentAddress maps an agent id (pid) to its EVM address. This is how
 // Python's master() becomes msg.sender.
+//
+// An agent id that is itself an address (the address of the agent's root
+// key, as every agent has with signed transactions) is that address.
 func AgentAddress(pid string) ethcommon.Address {
+	if ethcommon.IsHexAddress(pid) {
+		return ethcommon.HexToAddress(pid)
+	}
 	return ethcommon.BytesToAddress(crypto.Keccak256([]byte(pid))[12:])
 }
 
@@ -431,14 +445,75 @@ func (s *State) Advance() (Result, error) {
 }
 
 // advance moves the block number forward without changing the state, and
-// returns callErr with the unchanged root.
-func (s *State) advance(callErr error) (Result, error) {
+// returns callErr with the unchanged root. extra fields are written to the
+// contract document in the same update.
+func (s *State) advance(callErr error, extra ...map[string]any) (Result, error) {
 	result := Result{StateRoot: s.root, BlockNumber: s.blockNumber}
-	if err := s.contractDoc.Update(map[string]any{KeyBlockNumber: s.blockNumber + 1}); err != nil {
+	update := map[string]any{KeyBlockNumber: s.blockNumber + 1}
+	for _, e := range extra {
+		maps.Copy(update, e)
+	}
+	if err := s.contractDoc.Update(update); err != nil {
 		return result, err
 	}
 	s.blockNumber++
 	return result, callErr
+}
+
+// Decide applies the record of a membership change. If the contract defines
+// method (approve_partner or approve_removal) as a function of one address
+// returning bool, it is called as caller with subject, and its answer is the
+// decision; a revert means no. Otherwise the decision is def. The decision
+// is stored in the contract document under KeyDecisionPrefix+id, in the same
+// update that advances the cursor, so a crash cannot lose it.
+func (s *State) Decide(caller, method string, subject ethcommon.Address, timestamp, id string, def bool) (bool, Result, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := KeyDecisionPrefix + id
+	if s.failed != nil {
+		r, _ := s.advance(nil, map[string]any{key: false})
+		return false, r, nil
+	}
+	if !s.running {
+		return false, Result{}, ErrNotRunning
+	}
+	m, ok := s.abi.Methods[method]
+	if !ok || len(m.Inputs) != 1 || m.Inputs[0].Type.T != abi.AddressTy ||
+		len(m.Outputs) != 1 || m.Outputs[0].Type.T != abi.BoolTy {
+		r, err := s.advance(nil, map[string]any{key: def})
+		return def, r, err
+	}
+	blockNumber := s.blockNumber
+	result := Result{StateRoot: s.root, BlockNumber: blockNumber}
+	values := map[string]any{argumentKey(m.Inputs[0], 0): subject.Hex()}
+	value, statedb, rules, callErr := s.execute(caller, method, values, timestamp, blockNumber)
+	var contractErr *ContractError
+	if callErr != nil && !errors.As(callErr, &contractErr) {
+		return false, result, callErr
+	}
+	if callErr != nil {
+		r, err := s.advance(nil, map[string]any{key: false})
+		return false, r, err
+	}
+	approved, _ := value.(bool)
+	root, err := s.commit(statedb, rules, blockNumber)
+	if err != nil {
+		return false, result, err
+	}
+	if err := s.contractDoc.Update(map[string]any{
+		KeyBlockNumber:   blockNumber + 1,
+		KeyStateRoot:     root.Hex(),
+		KeyLastTimestamp: timestamp,
+		key:              approved,
+	}); err != nil {
+		return false, result, err
+	}
+	s.blockNumber = blockNumber + 1
+	s.root = root
+	s.lastTimestamp = timestamp
+	result.StateRoot = root
+	result.Value = approved
+	return approved, result, nil
 }
 
 // View executes a read-only call, the equivalent of eth_call: it runs on a
@@ -577,8 +652,6 @@ func (s *State) builtin(method string) (bool, error) {
 	switch method {
 	case MethodGetPartners:
 		return true, s.getPartners()
-	case MethodApprovePartner:
-		return true, s.approvePartner()
 	case MethodGetParameters:
 		return true, s.getParameters()
 	}
@@ -590,12 +663,6 @@ func (s *State) builtin(method string) (bool, error) {
 // class overrode it.
 func (s *State) getPartners() error {
 	return fmt.Errorf("%s: %w", MethodGetPartners, ErrNotImplemented)
-}
-
-// TODO: define approve_partner for Solidity contracts. In Python it returned
-// True (the default join policy) unless the contract class overrode it.
-func (s *State) approvePartner() error {
-	return fmt.Errorf("%s: %w", MethodApprovePartner, ErrNotImplemented)
 }
 
 // TODO: define get_parameters for Solidity contracts. In Python it returned

@@ -23,23 +23,28 @@ shows. It runs with `go test ./...`.
 
 ## Clients
 
-| Client | Needs |
-|---|---|
-| [`scripts/ibc.sh`](scripts/ibc.sh) | bash, curl, jq |
-| [`js/ibc.mjs`](js/ibc.mjs) | A browser, or Node.js 18+ |
+| Client | Signs with | Needs |
+|---|---|---|
+| [`scripts/ibc.sh`](scripts/ibc.sh) | A key file, through the `ibc` program | bash, curl, jq, `ibc` |
+| [`js/ibc.mjs`](js/ibc.mjs) | MetaMask in a browser, or an ethers.js wallet | A browser, or Node.js 18+ |
 
-From the shell, with a node running at `http://localhost:2611`:
+`js/ibc.mjs` re-exports the client in [`web/static/ibc.mjs`](../web/static/ibc.mjs), which the
+node's web interface also uses.
+
+From the shell, with a node running at `http://localhost:2611` and the `ibc` program built:
 
 ```sh
-export IBC_AGENT=alice
+export IBC_KEY=~/.ibc/alice.key IBC_BIN=./ibc
+examples/scripts/ibc.sh newkey
 examples/scripts/ibc.sh register
 C=$(examples/scripts/ibc.sh deploy Counter '{"start": 10}')
 examples/scripts/ibc.sh write "$C" increment '{"amount": 5}'   # 15
 examples/scripts/ibc.sh read "$C" count                        # 15
 ```
 
-From JavaScript, [`js/demo.mjs`](js/demo.mjs) deploys and calls all three contracts:
+From JavaScript, [`js/demo.mjs`](js/demo.mjs) deploys and calls all three contracts, signing with
+an ethers.js wallet:
 
 ```sh
-node examples/js/demo.mjs http://localhost:2611 alice
+cd examples/js && npm install && node demo.mjs http://localhost:2611
 ```

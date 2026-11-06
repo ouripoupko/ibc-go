@@ -5,30 +5,38 @@ package examples_test
 import (
 	"bufio"
 	"bytes"
+	"crypto/ecdsa"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
+	ethcommon "github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/rawdb"
+	"github.com/ethereum/go-ethereum/crypto"
 
-	"github.com/ouripoupko/ibc-go/common"
+	"github.com/ouripoupko/ibc-go/identity"
 	"github.com/ouripoupko/ibc-go/node"
 )
 
+// client is an app talking to a node; it signs with the user's root key,
+// as an app would through MetaMask.
 type client struct {
-	t      *testing.T
-	url    string
-	agent  string
-	events chan map[string]any
+	t       *testing.T
+	url     string
+	nodeKey string
+	key     *ecdsa.PrivateKey
+	agent   string // the root key's address
+	events  chan map[string]any
 }
 
-func newClient(t *testing.T, agent string) *client {
+func newClient(t *testing.T) *client {
 	t.Helper()
 	n, err := node.New(node.Config{DB: rawdb.NewMemoryDatabase()})
 	if err != nil {
@@ -37,13 +45,47 @@ func newClient(t *testing.T, agent string) *client {
 	srv := httptest.NewServer(n.Handler())
 	t.Cleanup(srv.Close)
 	t.Cleanup(func() { _ = n.Close() })
-	c := &client{t: t, url: srv.URL, agent: agent, events: make(chan map[string]any, 100)}
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &client{t: t, url: srv.URL, nodeKey: n.NodeKey(), key: key, agent: identity.Address(key).Hex(),
+		events: make(chan map[string]any, 100)}
 	c.openStream()
 	return c
 }
 
+// sign signs a transaction of the user.
+func (c *client) sign(kind, contract string, body any) identity.SignedTx {
+	c.t.Helper()
+	raw, _ := json.Marshal(body)
+	stx, err := identity.Sign(identity.Transaction{Contract: contract, Kind: kind, Agent: identity.Address(c.key),
+		Nonce: identity.NewNonce(), Body: string(raw)}, c.key)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	return stx
+}
+
+// query signs a query of the user for its own agent's copy.
+func (c *client) query(key *ecdsa.PrivateKey, action, contract string, body any) identity.SignedQuery {
+	c.t.Helper()
+	raw := ""
+	if body != nil {
+		b, _ := json.Marshal(body)
+		raw = string(b)
+	}
+	sq, err := identity.SignQuery(identity.Query{Agent: identity.Address(key), Action: action, Target: c.agent,
+		Contract: contract, Body: raw, Time: uint64(time.Now().Unix()), Nonce: identity.NewNonce()}, key)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	return sq
+}
+
 func (c *client) openStream() {
-	resp, err := http.Get(c.url + "/stream?agent=" + c.agent + "&contract=")
+	auth, _ := json.Marshal(c.query(c.key, "stream", "", nil))
+	resp, err := http.Get(c.url + "/stream?" + url.Values{"auth": {string(auth)}}.Encode())
 	if err != nil {
 		c.t.Fatal(err)
 	}
@@ -118,7 +160,12 @@ func (c *client) await(request any) map[string]any {
 }
 
 func (c *client) register() {
-	c.await(c.request("PUT", "register_agent", "", "", map[string]any{"address": c.url}))
+	sr, err := identity.SignRegistration(identity.Registration{Agent: identity.Address(c.key), Node: c.url,
+		NodeKey: ethcommon.HexToAddress(c.nodeKey), Nonce: identity.NewNonce()}, c.key)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	c.await(c.request("PUT", "register_agent", "", "", sr))
 }
 
 // deploy returns the contract id and the reply of the deploy event.
@@ -132,22 +179,33 @@ func (c *client) deploy(name string, ctor map[string]any) (string, any) {
 	if err != nil {
 		c.t.Fatal(err)
 	}
-	ev := c.await(c.request("PUT", "deploy_contract", "", "", map[string]any{
-		"name": name, "contract": name + ".sol", "protocol": "BFT", "default_app": "",
-		"pid": c.agent, "address": c.url, "profile": "",
-		"code": strings.TrimSpace(string(bin)), "abi": string(abiJSON), "constructor": ctor,
-	}))
+	ev := c.await(c.request("PUT", "deploy_contract", "", "", c.sign(identity.KindDeploy, "", map[string]any{
+		"name": name, "contract": name + ".sol", "default_app": "", "profile": "",
+		"code": strings.TrimSpace(string(bin)), "abi": json.RawMessage(abiJSON), "constructor": ctor,
+		"node": c.url, "nodeKey": c.nodeKey,
+	})))
 	return ev["contract"].(string), ev["reply"]
 }
 
 func (c *client) write(contract, method string, values map[string]any) any {
 	c.t.Helper()
-	return c.await(c.request("POST", "contract_write", contract, method, map[string]any{"values": values}))["reply"]
+	stx := c.sign(identity.KindCall, contract, map[string]any{"method": method, "values": values})
+	return c.await(c.request("POST", "contract_write", contract, method, stx))["reply"]
 }
 
 func (c *client) read(contract, method string, values map[string]any) any {
 	c.t.Helper()
-	return c.request("POST", "contract_read", contract, method, map[string]any{"values": values})
+	return c.readAs(c.key, contract, method, values)
+}
+
+// readAs reads the user's copy of a contract, signed by key.
+func (c *client) readAs(key *ecdsa.PrivateKey, contract, method string, values map[string]any) any {
+	c.t.Helper()
+	if values == nil {
+		values = map[string]any{}
+	}
+	return c.request("POST", "contract_read", contract, method,
+		c.query(key, "contract_read", contract, map[string]any{"method": method, "values": values}))
 }
 
 // expect compares a reply to the JSON shown in the docs.
@@ -160,7 +218,7 @@ func expect(t *testing.T, what string, got any, wantJSON string) {
 }
 
 func TestCounter(t *testing.T) {
-	c := newClient(t, "alice")
+	c := newClient(t)
 	c.register()
 	counter, reply := c.deploy("Counter", map[string]any{"start": 10})
 	expect(t, "deploy", reply, `true`)
@@ -170,9 +228,9 @@ func TestCounter(t *testing.T) {
 		`"execution reverted: amount must be positive"`)
 	expect(t, "count", c.read(counter, "count", nil), `15`)
 	expect(t, "myContribution", c.read(counter, "myContribution", nil), `5`)
-	expect(t, "owner", c.read(counter, "owner", nil), fmt.Sprintf("%q", common.AgentAddress("alice").Hex()))
+	expect(t, "owner", c.read(counter, "owner", nil), fmt.Sprintf("%q", c.agent))
 	// The getter of a public mapping has an unnamed parameter: key "0".
-	expect(t, "contributions", c.read(counter, "contributions", map[string]any{"0": common.AgentAddress("alice").Hex()}), `5`)
+	expect(t, "contributions", c.read(counter, "contributions", map[string]any{"0": c.agent}), `5`)
 	// A read-only call of a write method changes nothing.
 	expect(t, "read increment", c.read(counter, "increment", map[string]any{"amount": 100}), `115`)
 	expect(t, "count after read", c.read(counter, "count", nil), `15`)
@@ -183,7 +241,7 @@ func TestCounter(t *testing.T) {
 }
 
 func TestPoll(t *testing.T) {
-	c := newClient(t, "alice")
+	c := newClient(t)
 	c.register()
 	_, reply := c.deploy("Poll", map[string]any{"text": "Lunch?", "choices": []string{"only one"}})
 	expect(t, "deploy with one option", reply, `"execution reverted: a poll needs at least two options"`)
@@ -199,11 +257,11 @@ func TestPoll(t *testing.T) {
 }
 
 func TestBoard(t *testing.T) {
-	c := newClient(t, "alice")
+	c := newClient(t)
 	c.register()
 	board, reply := c.deploy("Board", nil)
 	expect(t, "deploy", reply, `true`)
-	alice := common.AgentAddress("alice").Hex()
+	alice := c.agent
 
 	expect(t, "post", c.write(board, "post", map[string]any{"text": "hello ibc"}), `0`)
 	expect(t, "post", c.write(board, "post", map[string]any{"text": "second post"}), `1`)
@@ -220,5 +278,8 @@ func TestBoard(t *testing.T) {
 	expect(t, "myPosts", c.read(board, "myPosts", nil), `[0,1]`)
 	expect(t, "count", c.read(board, "count", nil), `2`)
 	expect(t, "whoAmI", c.read(board, "whoAmI", nil), fmt.Sprintf("%q", alice))
+	// A read's msg.sender is whoever signed it.
+	bob, _ := crypto.GenerateKey()
+	expect(t, "whoAmI signed by bob", c.readAs(bob, board, "whoAmI", nil), fmt.Sprintf("%q", identity.Address(bob).Hex()))
 	expect(t, "getPost(9)", c.read(board, "getPost", map[string]any{"id": 9}), `"execution reverted: no such post"`)
 }
