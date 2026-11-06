@@ -19,7 +19,7 @@ export async function connect() {
   if (!window.ethereum) {
     throw new Error('No browser wallet was found. Install one (see the list below), then reload this page.');
   }
-  const ibc = await Ibc.connect(location.origin, Ibc.wallet(window.ethereum));
+  const ibc = await Ibc.connect(location.origin, explained(Ibc.wallet(window.ethereum)));
   window.ethereum.on?.('accountsChanged', () => location.reload());
   if (Ibc.sessionsAvailable()) {
     ibc.sessionHours = SESSION_HOURS;
@@ -32,6 +32,89 @@ export async function connect() {
   }
   showSession(ibc);
   return ibc;
+}
+
+// Explaining signatures. Every time the wallet is asked to sign, a message
+// box says in plain words what the signature does. It has no close button:
+// it closes when the wallet answers, whether the user signed or declined.
+
+/** Wraps a wallet signer so that each signature request is explained first. */
+function explained(signer) {
+  return {
+    getAddress: () => signer.getAddress(),
+    async signTypedData(domain, types, message) {
+      const primaryType = Object.keys(types).find((t) => t !== 'EIP712Domain');
+      const close = openSigningBox(explain(primaryType, message));
+      try {
+        return await signer.signTypedData(domain, types, message);
+      } finally {
+        close();
+      }
+    },
+  };
+}
+
+let signingBox;
+const openBoxes = [];
+
+/** Shows the message box; returns a function that closes it. */
+function openSigningBox(text) {
+  if (!signingBox) {
+    signingBox = el('dialog', { class: 'signing', 'aria-labelledby': 'signing-title' });
+    // No way to dismiss it: Escape is ignored, and if the browser closes it
+    // anyway while the wallet is still open, it comes back.
+    signingBox.addEventListener('cancel', (e) => e.preventDefault());
+    signingBox.addEventListener('close', () => { if (openBoxes.length) signingBox.showModal(); });
+    document.body.append(signingBox);
+  }
+  const entry = { text };
+  openBoxes.push(entry);
+  renderBox();
+  return () => {
+    openBoxes.splice(openBoxes.indexOf(entry), 1);
+    if (openBoxes.length) renderBox();
+    else signingBox.close();
+  };
+}
+
+function renderBox() {
+  signingBox.replaceChildren(
+    el('h2', { id: 'signing-title' }, openBoxes[openBoxes.length - 1].text),
+    el('p', {}, 'Waiting…'));
+  if (!signingBox.open) signingBox.showModal();
+}
+
+function parseBody(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return {};
+  }
+}
+
+/** Argument values, space separated: "increment 7". */
+const values = (v) => Object.values(v ?? {}).map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(' ');
+const words = (...parts) => `Sign request: ${parts.filter((p) => p !== '' && p !== undefined).join(' ')}`;
+
+/** One line saying what is being signed, by its EIP-712 type. */
+function explain(type, m) {
+  const body = parseBody(m.body ?? '');
+  const self = String(body.member).toLowerCase() === String(m.agent).toLowerCase();
+  switch (`${type}:${m.kind ?? m.action ?? ''}`) {
+    case 'Registration:': return words('register on', location.host);
+    case 'Session:': return words('read session until',
+      new Date(Number(m.expires) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+    case 'Query:contract_read': return words('read', body.method, values(body.values));
+    case 'Query:get_contracts': return words('list contracts');
+    case 'Query:get_contract': return words('open contract', short(m.contract));
+    case 'Query:stream': return words('open events');
+    case 'Transaction:deploy': return words('deploy', body.name, values(Object.hasOwn(body, 'constructor') ? body.constructor : {}));
+    case 'Transaction:call': return words(body.method, values(body.values));
+    case 'Transaction:join': return words('join', short(m.contract));
+    case 'Transaction:leave': return self ? words('leave', short(m.contract)) : words('remove', short(body.member));
+    case 'Transaction:rotate_key': return words('move to', body.node);
+    default: return words(type, m.kind ?? m.action ?? '');
+  }
 }
 
 /** Reads or writes the kept sessions; any storage failure means "no session kept". */

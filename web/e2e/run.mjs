@@ -11,6 +11,8 @@ const CHROME = process.env.CHROME ?? '/usr/bin/google-chrome';
 const SHOTS = process.env.SHOTS ?? '';  // a directory (ending in /) to save screenshots in
 const browser = await puppeteer.launch({ executablePath: CHROME, headless: true, args: ['--no-sandbox'] });
 const prompts = {}; // wallet signatures asked, by type
+const boxes = []; // what the explaining message box showed at each signature
+const TITLES = { Registration: /^Sign request: register on /, Session: /^Sign request: read session until /, Transaction: /^Sign request: /, Query: /^Sign request: / };
 
 async function pageFor(wallet, width = 1100) {
   const page = await browser.newPage();
@@ -20,6 +22,12 @@ async function pageFor(wallet, width = 1100) {
   await page.exposeFunction('__sign', async (json) => {
     const data = JSON.parse(json);
     prompts[data.primaryType] = (prompts[data.primaryType] ?? 0) + 1;
+    const box = await page.evaluate(() => {
+      const d = document.querySelector('dialog.signing');
+      return { open: Boolean(d?.open), title: d?.querySelector('h2')?.textContent ?? '', text: d?.textContent ?? '' };
+    });
+    boxes.push({ type: data.primaryType, ...box });
+    if (SHOTS && prompts[data.primaryType] === 1) await page.screenshot({ path: `${SHOTS}sign-${data.primaryType}.png` });
     delete data.types.EIP712Domain;
     return wallet.signTypedData(data.domain, data.types, data.message);
   });
@@ -131,6 +139,11 @@ try {
   check('alice reads count -> 16', r.text === '16', r.text);
   check('reading session shown in the header', /Reading session until/.test(await text(pa, '#session')), await text(pa, '#session'));
   console.log('wallet signatures asked:', JSON.stringify(prompts));
+  const unexplained = boxes.filter((b) => !b.open || !TITLES[b.type].test(b.title));
+  check('every signature explained in an open message box', unexplained.length === 0,
+    unexplained.length ? JSON.stringify(unexplained[0]) : boxes.map((b) => b.title).join(' | '));
+  check('the box says what is called', boxes.some((b) => b.title === 'Sign request: increment 5'), boxes.map((b) => b.title).join(' | '));
+  check('message box closed after signing', await pa.$eval('body', () => !document.querySelector('dialog.signing')?.open));
   check('no read asked the wallet', !prompts.Query, `${prompts.Query ?? 0} queries`);
   check('one reading session per user', prompts.Session === 2, `${prompts.Session} sessions`);
 

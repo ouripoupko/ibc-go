@@ -81,6 +81,9 @@ supported yet.
 Arguments are typed as in [Arguments](#arguments): numbers and addresses as plain text, arrays and
 structs as JSON.
 
+**Each signature is named.** While the wallet waits, the page shows a box such as *Sign request:
+increment 7*. It closes when the wallet answers.
+
 **Your wallet asks for each transaction:** each deploy, write, join and leave, and the registration.
 **Reading does not ask each time.** The first time the page needs to read (to list your contracts,
 open a contract, read, or open the event stream), your wallet asks you to approve a *reading

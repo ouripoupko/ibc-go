@@ -107,6 +107,15 @@ pre.result.bad { border-left: 3px solid var(--bad); color: var(--bad); }
 ul.events { list-style: none; padding: 0; margin: 0; }
 ul.events li { border-bottom: 1px solid var(--line); padding: 6px 0; overflow-wrap: anywhere; }
 
+dialog.signing {
+  width: min(420px, calc(100vw - 32px)); padding: 18px 22px; border: 1px solid var(--line);
+  border-radius: 10px; background: var(--card); color: var(--text);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, .25);
+}
+dialog.signing::backdrop { background: rgba(10, 14, 20, .55); }
+dialog.signing h2 { font-size: 17px; margin: 0 0 10px; }
+dialog.signing p { margin: 8px 0; overflow-wrap: anywhere; }
+
 @media (max-width: 600px) {
   dl.details { grid-template-columns: 1fr; }
   dl.details dd { margin-bottom: 6px; }
