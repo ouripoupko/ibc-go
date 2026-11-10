@@ -32,6 +32,7 @@ This is the Go version of [ibc](https://github.com/ouripoupko/ibc):
 | [API reference](docs/api.md) | Every HTTP call, its parameters, replies, events and errors |
 | [Identity and keys](docs/keys.md) | Passkeys, the root and node keys, app permissions and grants, and how signatures are checked |
 | [Example contracts](examples/) | Counter, Poll and Board in Solidity, with a shell client and a JavaScript client |
+| [JavaScript client](js/) | The npm package `@ouripoupko/ibc`, for apps and tools |
 | [Architecture](docs/architecture.md) | How the node works inside, and how to develop it |
 | [Consensus design](docs/consensus.md) | The consensus protocol, Cordial Miners, and how membership changes |
 
@@ -172,7 +173,8 @@ go run ./cmd/ibc -addr 127.0.0.1:2611 -data ~/ibc-data
 cmd/ibc/              the program (node, key and signing tools)
 node/                 wires the parts together
 dispatcher/           HTTP API and event stream
-web/                  the web interface, built into the program; the JavaScript client
+web/                  the web interface, built into the program
+js/                   the JavaScript client (npm package @ouripoupko/ibc), in TypeScript
 consensus/            each contract's protocol; Cordial Miners in consensus/cordial
 execution/            runs contracts, one goroutine per contract
 identity/             signed transactions and registrations (EIP-712)

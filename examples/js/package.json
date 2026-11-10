@@ -2,8 +2,11 @@
   "name": "ibc-examples",
   "private": true,
   "type": "module",
-  "description": "Example ibc clients, with no dependencies. ibc.mjs re-exports the client in web/static.",
+  "description": "Example ibc clients, with the ibc client package.",
   "scripts": {
     "demo": "node demo.mjs"
+  },
+  "dependencies": {
+    "@ouripoupko/ibc": "file:../../js"
   }
 }

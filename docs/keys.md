@@ -144,8 +144,9 @@ Passkeys need a secure page: `https`, or `http://localhost`. They do not work at
 An app opens `/approve.html` on the user's node in a new window (on a click), and exchanges messages
 with it:
 
-1. The page sends `{type: "ibc-ready"}`.
-2. The app sends a request with its key (`appKey`):
+1. The page sends `{type: "ibc-ready", apiVersion: 1}`.
+2. The app sends a request with the API version it speaks (`apiVersion`, which must match) and its
+   key (`appKey`):
 
    | `type` | Fields | The user approves |
    |---|---|---|
@@ -162,7 +163,7 @@ with it:
 If this browser has no identity on the node, the page first offers to sign in with the passkey, or
 to create an identity (a passkey, and the registration: two approvals). The page shows the app's
 site (its origin, which the browser vouches for), what it asks, and the code behind a link. If the request comes from a new browser of an app the user approved before, the
-approval also connects that browser (a `Device` message in the same signature). `IbcApp` in `ibc.mjs` does all of this for an app: it tries silently first, and
+approval also connects that browser (a `Device` message in the same signature). `IbcApp`, in the client package [`@ouripoupko/ibc`](../js), does all of this for an app: it tries silently first, and
 opens the page when the node says the user must approve.
 
 ## 9. Keys on the command line

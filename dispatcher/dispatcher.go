@@ -47,6 +47,11 @@ const (
 	actionCompile       = "compile"
 )
 
+// APIVersion is the version of the node's API: its HTTP calls and its
+// approval page's messages. The JavaScript client (js/src/ibc.ts,
+// API_VERSION) refuses a node of another version.
+const APIVersion = 1
+
 // maxBody bounds a request body.
 const maxBody = 16 << 20
 
@@ -163,7 +168,7 @@ func (d *Dispatcher) handle(ctx context.Context, record execution.Record, body [
 	type route struct{ method, action string }
 	switch (route{record.Type, record.Action}) {
 	case route{http.MethodGet, actionNodeInfo}:
-		info := map[string]any{"nodeKey": d.nodeKey.Hex()}
+		info := map[string]any{"nodeKey": d.nodeKey.Hex(), "apiVersion": APIVersion}
 		if size, ok := d.storage(); ok {
 			info["storage"] = size
 		}

@@ -17,7 +17,7 @@ import (
 var update = flag.Bool("update", false, "rewrite testdata/vectors.json")
 
 // vector is a message and the digest Go computes for it. The JavaScript
-// client's test (web/test/keys.test.mjs) checks that it computes the same.
+// client's test (js/test/keys.test.mjs) checks that it computes the same.
 type vector struct {
 	Type    string         `json:"type"`
 	Message map[string]any `json:"message"`

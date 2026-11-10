@@ -1,11 +1,14 @@
 // Package web is the node's web interface: static pages, built into the
 // binary, that talk to the node's API from the browser and sign with passkeys.
+// The pages use the JavaScript client (package ibcjs), served at /js/.
 package web
 
 import (
 	"embed"
 	"io/fs"
 	"net/http"
+
+	ibcjs "github.com/ouripoupko/ibc-go/js"
 )
 
 //go:embed all:static
@@ -17,7 +20,14 @@ func Handler() http.Handler {
 	if err != nil {
 		panic(err)
 	}
-	server := http.FileServerFS(static)
+	client, err := fs.Sub(ibcjs.Dist, "dist")
+	if err != nil {
+		panic(err)
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/", http.FileServerFS(static))
+	mux.Handle("/js/", http.StripPrefix("/js/", http.FileServerFS(client)))
+	server := mux
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

@@ -1,14 +1,14 @@
-// Deploys the example contracts and calls them, with the client in ibc.mjs.
-// In a browser, the root key is a passkey; here, a WebCrypto P-256 key stands
-// in for it, and signs everything. No packages to install.
+// Deploys the example contracts and calls them, with the ibc client package
+// (@ouripoupko/ibc). In a browser, the root key is a passkey; here, a
+// WebCrypto P-256 key stands in for it, and signs everything.
 //
+//   npm install          # the package, from ../../js
 //   node demo.mjs [node-url]
 //
 // The default node is http://localhost:2611. Run the node first (see the
 // README). Each run makes a new agent.
 import { readFile } from 'node:fs/promises';
-import { Ibc } from './ibc.mjs';
-import { addressOf, newP256Key, p256Signer } from '../../web/static/keys.mjs';
+import { Ibc, addressOf, newP256Key, p256Signer } from '@ouripoupko/ibc';
 
 const url = process.argv[2] ?? 'http://localhost:2611';
 const build = new URL('../build/', import.meta.url);

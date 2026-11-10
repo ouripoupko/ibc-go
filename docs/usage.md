@@ -299,16 +299,23 @@ Run `examples/scripts/ibc.sh` without arguments for the full list.
 
 ## Call ibc from JavaScript
 
-[`web/static/ibc.mjs`](../web/static/ibc.mjs) is a small client; the web interface uses it, and
-every node serves it at `/ibc.mjs`. It works in browsers and in Node.js 20 and later, with no
-dependencies but the keccak in `web/static/vendor`. It has two parts.
+The JavaScript client is the npm package [`@ouripoupko/ibc`](../js), written in TypeScript and
+published as ES modules with type declarations, so it works the same from JavaScript and TypeScript.
+It runs in browsers and in Node.js 20 and later, and has no dependencies. The node's own web pages
+use the same code.
+
+```sh
+npm install @ouripoupko/ibc
+```
+
+It has two parts.
 
 **`IbcApp`, for an app on your own site.** The app never touches the user's keys: it makes a key of
 its own (kept in the browser, which cannot export it), and opens the user's node when the user must
 approve something.
 
 ```js
-import { IbcApp } from 'https://node.example/ibc.mjs';
+import { IbcApp } from '@ouripoupko/ibc';
 
 const app = await IbcApp.open('https://node.example');   // the user's node
 // app.agent is the user's agent id once the user approved the app here; null before.
@@ -326,7 +333,9 @@ app.onEvent((event) => console.log(event));                // events of the app'
 ```
 
 `read` and `write` try silently first, and open the node's page when the node says the user must
-approve. `app.permit(contract)` asks for permissions on an existing contract (one the user joined),
+approve. The event stream reconnects by itself when it breaks; `app.onStatus((status, error) => …)`
+says when it is `open`, `reconnecting` or `closed`, and events sent while it was down are lost, so
+read again when it reopens (see the [package's README](../js/README.md#the-event-stream)). `app.permit(contract)` asks for permissions on an existing contract (one the user joined),
 and `app.join(contract, memberNode, memberAgent)` asks the user to join one;
 `app.join(contract, memberNode, memberAgent, { guest: true })` as a guest.
 
@@ -334,8 +343,7 @@ and `app.join(contract, memberNode, memberAgent)` asks the user to join one;
 tools. The root key signs transactions; a key the node knows (or the root) signs queries.
 
 ```js
-import { Ibc } from './ibc.mjs';
-import { addressOf, newP256Key, p256Signer } from './keys.mjs';
+import { Ibc, addressOf, newP256Key, p256Signer } from '@ouripoupko/ibc';
 
 const rootKey = await newP256Key();                    // in a browser: the root passkey (passkeySigner)
 const agent = addressOf(rootKey.publicKey);

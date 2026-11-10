@@ -215,9 +215,27 @@ web/e2e/run.sh       # optional: the web interface in headless Chrome (needs Nod
 The browser test starts two nodes and drives the web interface as two users, with Chrome's virtual
 passkey authenticator in place of a phone: create an identity, deploy, write, read, invite, join,
 sign in on a new device, and an app on another site that deploys a chat (the user chooses its
-permissions on the node's approval page), posts silently, asks for the rest, and is disconnected. It is not part of `go test`. `node --test web/test/*.test.mjs` checks that the
-JavaScript client computes the same digests and addresses as Go (`identity/testdata/vectors.json`;
-refresh it with `go test ./identity -run TestVectors -update`).
+permissions on the node's approval page), posts silently, asks for the rest, and is disconnected. It is not part of `go test`.
+
+### The JavaScript client
+
+The client is the npm package `@ouripoupko/ibc`, in [`js/`](../js): TypeScript in `js/src`,
+compiled to ES modules and type declarations in `js/dist`. `js/dist` is committed: the node embeds
+it (package `ibcjs`) and serves it at `/js/` to its own web pages, so `go build` needs no Node.js.
+
+```sh
+cd js
+npm install          # TypeScript, once
+npm run build        # after changing js/src: rebuilds js/dist
+npm test             # checks that js/dist is the build of js/src, and runs the tests
+```
+
+The tests check that the client computes the same digests and addresses as Go
+(`identity/testdata/vectors.json`; refresh it with `go test ./identity -run TestVectors -update`).
+The client and the node check each other's API version (`API_VERSION` in `js/src/ibc.ts`,
+`dispatcher.APIVersion`); change both when the API or the approval page's messages change
+incompatibly. To publish: raise the version in `js/package.json`, then `npm publish --access
+public` in `js/` (it runs the tests first).
 
 The tests include:
 

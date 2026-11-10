@@ -10,19 +10,21 @@ import puppeteer from 'puppeteer-core';
 
 const [A, B] = process.argv.slice(2);
 const CONTRACTS = new URL('../../examples/contracts/', import.meta.url);
-const STATIC = new URL('../static/', import.meta.url);
+const CLIENT = new URL('../../js/dist/', import.meta.url);
 const CHROME = process.env.CHROME ?? '/usr/bin/google-chrome';
 const SHOTS = process.env.SHOTS ?? ''; // a directory (ending in /) to save screenshots in
 const APP_PORT = 2799;
 const browser = await puppeteer.launch({ executablePath: CHROME, headless: true, args: ['--no-sandbox'] });
 const authenticators = new Map(); // page -> { cdp, id }
 
-// An app on another site: the test app page, the chat's source, and the client modules.
+// An app on another site: the test app page, the chat's source, and the client package's modules.
 const app = http.createServer(async (req, res) => {
   const path = new URL(req.url, 'http://x').pathname;
   try {
     const file = path === '/app.html' ? new URL('./app.html', import.meta.url)
-      : path === '/Chat.sol' ? new URL('Chat.sol', CONTRACTS) : new URL(`.${path}`, STATIC);
+      : path === '/Chat.sol' ? new URL('Chat.sol', CONTRACTS)
+        : path.startsWith('/js/') ? new URL(`.${path.slice(3)}`, CLIENT) : null;
+    if (!file) throw new Error('not found');
     const type = path.endsWith('.html') ? 'text/html' : path.endsWith('.sol') ? 'text/plain' : 'text/javascript';
     const body = await readFile(file);
     res.writeHead(200, { 'Content-Type': type }).end(body);

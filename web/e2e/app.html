@@ -15,7 +15,7 @@
   <button id="setTopic">Set the topic</button>
   <pre id="out"></pre>
   <script type="module">
-    import { IbcApp } from './ibc.mjs';
+    import { IbcApp } from './js/index.js'; // the client package, @ouripoupko/ibc
 
     const params = new URLSearchParams(location.search);
     const out = document.querySelector('#out');

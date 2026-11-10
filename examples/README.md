@@ -27,10 +27,7 @@ shows. It runs with `go test ./...`.
 | Client | Signs with | Needs |
 |---|---|---|
 | [`scripts/ibc.sh`](scripts/ibc.sh) | A key file, through the `ibc` program | bash, curl, jq, `ibc` |
-| [`js/ibc.mjs`](js/ibc.mjs) | The root passkey in a browser (or a WebCrypto key); apps go through the user's node | A browser, or Node.js 20+ |
-
-`js/ibc.mjs` re-exports the client in [`web/static/ibc.mjs`](../web/static/ibc.mjs), which the
-node's web interface also uses.
+| [`js/demo.mjs`](js/demo.mjs) | The client package [`@ouripoupko/ibc`](../js) (a passkey in a browser, a WebCrypto key here); apps go through the user's node | Node.js 20+ |
 
 From the shell, with a node running at `http://localhost:2611` and the `ibc` program built:
 
@@ -43,9 +40,11 @@ examples/scripts/ibc.sh write "$C" increment '{"amount": 5}'   # 15
 examples/scripts/ibc.sh read "$C" count                        # 15
 ```
 
-From JavaScript, [`js/demo.mjs`](js/demo.mjs) deploys and calls all three contracts, with WebCrypto
-key standing in for the passkey. Nothing to install:
+From JavaScript, [`js/demo.mjs`](js/demo.mjs) deploys and calls all three contracts, with a
+WebCrypto key standing in for the passkey. It uses the client package from [`js/`](../js):
 
 ```sh
-node examples/js/demo.mjs http://localhost:2611
+cd examples/js
+npm install                         # links ../../js
+node demo.mjs http://localhost:2611
 ```

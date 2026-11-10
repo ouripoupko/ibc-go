@@ -1,9 +1,9 @@
 // The approval page: an app on another site asks the user, here on the
 // user's own node, to approve something with the root passkey.
 //
-// Protocol (see docs/keys.md): this page posts { type: 'ibc-ready' } to its
-// opener; the app answers with a request, which always carries its key
-// (appKey, a P-256 public key, hex):
+// Protocol (see docs/keys.md): this page posts { type: 'ibc-ready', apiVersion }
+// to its opener; the app answers with a request, which always carries the API
+// version it speaks (apiVersion) and its key (appKey, a P-256 public key, hex):
 //   { type: 'connect', appKey }            who the user is: connects the app, with no permissions
 //   { type: 'deploy', source, contract, name, constructor, protocol, appKey }
 //   { type: 'permit', contract, appKey }   permissions on an existing contract
@@ -16,7 +16,7 @@
 import {
   $, el, status, errorText, loadIdentity, connect, rootSigner, signIn, createIdentity, parseAbi, isRead, pretty, short,
 } from './app.mjs';
-import { fromHex, keccak256, nonce, now, signBatch, toHex } from './keys.mjs';
+import { API_VERSION, fromHex, keccak256, nonce, now, signBatch, toHex } from './js/index.js';
 
 const opener = window.opener;
 let origin;
@@ -26,7 +26,7 @@ if (!opener) {
   status($('#status'), 'An app opens this page to ask for your approval; there is nothing to approve here.', 'bad');
 } else {
   window.addEventListener('message', onMessage);
-  opener.postMessage({ type: 'ibc-ready' }, '*');
+  opener.postMessage({ type: 'ibc-ready', apiVersion: API_VERSION }, '*');
 }
 
 const reply = (message) => opener.postMessage(message, origin);
@@ -38,7 +38,7 @@ const codeHashOf = (code) => toHex(keccak256(fromHex(code)));
 
 function valid(r) {
   const known = ['connect', 'deploy', 'permit', 'call', 'read', 'join'];
-  if (!r || !known.includes(r.type) || !/^0x04[0-9a-fA-F]{128}$/.test(r.appKey ?? '')) return false;
+  if (!r || r.apiVersion !== API_VERSION || !known.includes(r.type) || !/^0x04[0-9a-fA-F]{128}$/.test(r.appKey ?? '')) return false;
   if (r.type === 'connect') return true;
   return r.type === 'deploy' ? typeof r.source === 'string' : typeof r.contract === 'string';
 }
@@ -191,13 +191,15 @@ async function showConnect(ibc, identity, host) {
 }
 
 async function showDeploy(ibc, identity, host) {
+  // Every object inherits a constructor: only the request's own counts.
+  const ctor = Object.hasOwn(request, 'constructor') ? request.constructor : {};
   $('#title').textContent = `${host} wants to create a contract`;
   status($('#status'), 'Compiling the code on your node…');
   const compiled = await ibc.compile(request.source, request.contract ?? '');
   status($('#status'), '');
   const name = request.name || compiled.contract;
   $('#what').textContent = `A new ${compiled.contract} contract, which you will own.`;
-  details([['Contract', name], ['Arguments', Object.entries(request.constructor ?? {}).map(([k, v]) => `${k}: ${pretty(v)}`).join(', ')]]);
+  details([['Contract', name], ['Arguments', Object.entries(ctor).map(([k, v]) => `${k}: ${pretty(v)}`).join(', ')]]);
   showCode(request.source);
   const app = await siteOf(ibc);
   const choose = app.site?.permissions?.[compiled.codeHash] ? null : permissionsForm(compiled.abi);
@@ -206,7 +208,7 @@ async function showDeploy(ibc, identity, host) {
     const tx = {
       contract: '', kind: 'deploy', agent: identity.agent, nonce: nonce(),
       body: JSON.stringify(ibc.deployBody({
-        name, code: compiled.code, abi: compiled.abi, constructor: request.constructor ?? {},
+        name, code: compiled.code, abi: compiled.abi, constructor: ctor,
         protocol: request.protocol, source: request.source, compiler: compiled.compiler,
       })),
     };

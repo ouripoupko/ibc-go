@@ -4,10 +4,10 @@
 //
 // Everything shown comes from the node or from contracts, so it is always
 // inserted as text (textContent), never as HTML.
-import { Ibc, IbcError } from './ibc.mjs';
+import { Ibc, IbcError } from './js/index.js';
 import {
   addressOf, choosePasskey, createPasskey, fromHex, newP256Key, nonce, passkeySigner, signBatch, sign, toHex,
-} from './keys.mjs';
+} from './js/index.js';
 
 export { IbcError };
 

@@ -1,0 +1,28 @@
+{
+  "name": "@ouripoupko/ibc",
+  "version": "0.1.0",
+  "description": "Client for ibc nodes: apps act for users through their node, which asks them to approve with a passkey",
+  "license": "MIT",
+  "author": "Ouri Poupko",
+  "repository": { "type": "git", "url": "git+https://github.com/ouripoupko/ibc-go.git", "directory": "js" },
+  "homepage": "https://github.com/ouripoupko/ibc-go/tree/main/js#readme",
+  "keywords": ["ibc", "passkey", "webauthn", "eip-712", "self-sovereign", "consensus"],
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+    "./keys": { "types": "./dist/keys.d.ts", "default": "./dist/keys.js" }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist", "README.md", "LICENSE"],
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node scripts/build.mjs --check && node --test test/*.test.mjs",
+    "prepublishOnly": "npm test"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  }
+}

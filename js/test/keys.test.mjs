@@ -1,11 +1,11 @@
 // Checks that the JavaScript client computes the same digests and addresses
 // as the node. The vectors come from Go (identity/vectors_test.go).
 //
-//   node --test web/test/
+//   cd js && npm test
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { digestOf, addressOf, fromHex, toHex, newP256Key, p256Signer, sign, signBatch } from '../static/keys.mjs';
+import { digestOf, addressOf, fromHex, toHex, newP256Key, p256Signer, sign, signBatch } from '../dist/keys.js';
 
 const vectors = JSON.parse(await readFile(new URL('../../identity/testdata/vectors.json', import.meta.url), 'utf8'));
 

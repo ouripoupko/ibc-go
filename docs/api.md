@@ -277,10 +277,11 @@ an array if it returns several.
 GET /ibc/app?action=node_info
 ```
 
-**Reply:** `{"nodeKey": "0x57E3…", "storage": 1234567}`.
+**Reply:** `{"apiVersion": 1, "nodeKey": "0x57E3…", "storage": 1234567}`.
 
 | Field | Meaning |
 |---|---|
+| `apiVersion` | The version of this API and of the approval page's messages. The JavaScript client refuses a node of another version |
 | `nodeKey` | The address of the node's key. Registrations, deploys and joins name it |
 | `storage` | The size of the node's data folder (the database and the node key), in bytes. Measured at most every 30 seconds. Missing if the node keeps its data in memory |
 
@@ -662,10 +663,16 @@ data: {"request":"0x9a00…","contract":"0x67bb…","action":"contract_write","r
 data: 
 ```
 
+The node does not keep events for a client that is not connected: events sent while the stream is
+down are lost. The stream ends when the node shuts down, or when a client reads too slowly. A
+client should open it again with a new query (a query is accepted once), and read again what it
+shows. The JavaScript client does this by itself, and reports the stream's state
+(`onStatus`).
+
 In a browser, `EventSource` handles the stream:
 
 ```js
-const auth = await ibc.query('stream');   // a signed query; see web/static/ibc.mjs
+const auth = await ibc.query('stream');   // a signed query, with the client package @ouripoupko/ibc
 const events = new EventSource(`http://localhost:2611/stream?auth=${encodeURIComponent(JSON.stringify(auth))}`);
 events.onmessage = (e) => {
   if (!e.data) return;                 // keep-alive

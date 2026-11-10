@@ -873,11 +873,13 @@ func TestServeShutsDownWithOpenStreams(t *testing.T) {
 func TestWebInterface(t *testing.T) {
 	a := startNode(t, Config{})
 	for path, want := range map[string]string{
-		"/":              "text/html",
-		"/contract.html": "text/html",
-		"/ibc.mjs":       "text/javascript",
-		"/app.mjs":       "text/javascript",
-		"/style.css":     "text/css",
+		"/":                               "text/html",
+		"/contract.html":                  "text/html",
+		"/js/index.js":                    "text/javascript",
+		"/js/vendor/noble-hashes/sha3.js": "text/javascript",
+		"/js/vendor/noble-hashes/_u64.js": "text/javascript",
+		"/app.mjs":                        "text/javascript",
+		"/style.css":                      "text/css",
 	} {
 		resp, err := http.Get(a.URL + path)
 		if err != nil {

@@ -7,4 +7,5 @@ npm package except for two edits, so that browsers load them without a bundler:
 - `utils.js` imports `./crypto.js` instead of `@noble/hashes/crypto`;
 - the `sourceMappingURL` comments are removed (the maps are not copied).
 
-ibc's JavaScript client uses it for agent addresses and EIP-712 digests.
+The ibc client package uses it for agent addresses and EIP-712 digests; the build copies it to
+`dist/vendor` unchanged.
