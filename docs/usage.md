@@ -27,6 +27,9 @@ Every call used here is described in full in the [API reference](api.md).
   later call uses. Each contract has its own state.
 - **Partners.** The agents who share a contract. Each partner's node keeps its own copy, and the
   partners agree on the order of every transaction with the [consensus protocol](consensus.md).
+- **Guests.** Agents who use a contract without taking part in its consensus, if the contract lets
+  them. A guest's node keeps no copy: it sends the guest's transactions and reads to a partner's
+  node, its *host*, which the guest trusts with them. See [Joining as a guest](#joining-as-a-guest).
 - **Writes and reads.** A *write* (`contract_write`) is a signed transaction: it can change the
   contract's state, all partners apply it, and its result arrives on the event stream. A *read*
   (`contract_read`) runs a `view` function, changes nothing and answers at once. You read your own
@@ -71,7 +74,8 @@ phone, your computer, or a security key. The node never sees it.
 - **Deploy.** Choose the contract's Solidity source (`.sol`), or paste it, and click **Compile**: your
   node compiles it. Fill in the constructor's arguments and click **Deploy**.
 - **Join.** Paste an invite from a member, or enter the contract id, the member's node URL and the
-  member's agent id. The contract's own rules decide.
+  member's agent id. Tick **Join as a guest** to join as a [guest](#joining-as-a-guest). The
+  contract's own rules decide.
 - **A contract's page.** Click a contract to see its details, its code (behind **Show the code**),
   and a form for each function in its ABI. *Read* runs a `view` function and shows the result at
   once; *Send* sends a transaction and shows its result once all members have applied it. Reverts
@@ -186,11 +190,15 @@ a removal is ordered:
 /// Called as the joining agent. Return true to let it join.
 function approve_partner(address partner) external view returns (bool);
 
+/// Called as an agent joining as a guest. Return true to let it in.
+function approve_guest(address guest) external view returns (bool);
+
 /// Called as the member who asks to remove another. Return true to remove it.
 function approve_removal(address member) external view returns (bool);
 ```
 
 - **Without `approve_partner`**, every join is approved.
+- **Without `approve_guest`**, no one may join as a guest.
 - **Without `approve_removal`**, members cannot remove each other. Any member can always leave on
   its own.
 
@@ -312,7 +320,8 @@ app.onEvent((event) => console.log(event));                // events of the app'
 
 `read` and `write` try silently first, and open the node's page when the node says the user must
 approve. `app.permit(contract)` asks for permissions on an existing contract (one the user joined),
-and `app.join(contract, memberNode, memberAgent)` asks the user to join one.
+and `app.join(contract, memberNode, memberAgent)` asks the user to join one;
+`app.join(contract, memberNode, memberAgent, { guest: true })` as a guest.
 
 **`Ibc`, the user's own client**, with the user's keys: the node's web page uses it, and so can
 tools. The root key signs transactions; a key the node knows (or the root) signs queries.
@@ -404,9 +413,9 @@ of objects.
 `like` without approving each message, while changing the topic (`setTopic`) asks every time. Nothing
 in the contract says so; each user decides, on their node, when the app first uses it ([Apps](#apps)).
 `web/e2e/app.html` is a small app that does this: it creates a chat from the source, posts silently,
-and asks for the topic.
+and asks for the topic. Chat also lets anyone join as a guest (`approve_guest` returns `true`): see
+[Joining as a guest](#joining-as-a-guest).
 
-### Arguments
 ### Arguments
 
 Pass arguments as a JSON object keyed by the parameter names in the ABI:
@@ -471,6 +480,35 @@ Keep in mind:
   [consensus design](consensus.md#1-goals).
 - **Partners' nodes must reach each other** at the addresses the agents registered.
 
+### Joining as a guest
+
+If the contract lets guests in (its `approve_guest` function), you can use it without taking part in
+its consensus. Your node keeps no copy: it sends your transactions and reads to the member's node you
+joined through (your *host*), and passes you the contract's events. Partners still check your
+signature on every transaction, so your host cannot act in your name; but you trust it for what you
+read. A guest adds nothing to the contract's consensus: its partners do not slow down, and the
+contract does not pause for your join.
+
+```sh
+# alice, on node 1
+C=$(ibc deploy Chat '{"initialTopic": "lunch"}')
+
+# bob, on node 2
+ibc guest "$C" http://node1:2611 0x86D637BcBc56F0Dba2b0B5398B4446b5e5330851
+# joined 0x7bf7…
+ibc write "$C" post '{"text": "hi from bob"}'
+# 0
+ibc read "$C" count                # read on alice's node, as bob
+# 1
+ibc contracts                      # Chat is listed with "role": "guest"
+ibc leave "$C"                     # always approved; bob's node forgets Chat
+# true
+```
+
+As a guest you use the same calls, apps and permissions as a partner; your node sends them on. In
+the web interface, a guest's contract page shows its hosts and has no invite: others join through a
+partner.
+
 ## Without the helpers: curl
 
 Every call is one HTTP request. A write carries a signed transaction, and a read or the event
@@ -533,6 +571,8 @@ keep-alives.
 | `{"message": "unknown agent \"0x…\""}` | Register first |
 | `{"message": "consensus: unknown contract 0x…"}` | You are not a partner of this contract on this node: check the id, or join it first |
 | `{"message": "no such contract"}` | A read of a contract you do not have, or whose deployment has not finished |
+| `{"message": "no host answered: …"}` | You are a guest, and none of the contract's hosts' nodes answered |
+| `{"message": "0x… is not a guest of this contract"}` | You were a guest and were removed: leave the contract on your node |
 | `{"message": "this call needs a signed query"}` | Reads, `get_contract(s)` and the event stream are signed: see the [API reference](api.md#queries) |
 | `{"message": "query expired, or its time is wrong: check the clock"}` | Sign the query just before you send it; the node accepts it for 60 seconds |
 | `{"message": "query already used"}` | Every query is accepted once: sign a new one for each call |
@@ -543,4 +583,5 @@ keep-alives.
 | `"execution reverted: …"` | The contract reverted; the rest is its reason |
 | `"execution reverted"` (nothing after it) | The contract reverted without a reason, for example by calling `sha256` |
 | `"contract deployment failed: …"` | Every call to a contract whose constructor failed. Deploy it again |
+| `"0x…: not a partner or guest of this contract"` | A transaction from an agent the contract does not know |
 | `"increment: argument \"amount\": number 1.5 is not an exact integer; pass it as a string"` | Integers must be whole; very large ones must be strings |

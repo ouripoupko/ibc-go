@@ -90,8 +90,8 @@ function addRow(c) {
   const row = el('tr', { class: 'link', onclick: () => { location.href = href; } },
     el('td', {}, el('a', { href }, c.name || '(no name)'), c.deploy_error ? el('div', { class: 'status bad' }, 'deployment failed') : null),
     el('td', { class: 'id mono', title: c.id }, short(c.id)),
-    el('td', { class: 'optional' }, c.protocol || 'cordial'),
-    el('td', { class: 'optional' }, c.block_number ?? 0));
+    el('td', { class: 'optional' }, c.role === 'guest' ? 'guest' : (c.protocol || 'cordial')),
+    el('td', { class: 'optional' }, c.role === 'guest' ? '' : (c.block_number ?? 0)));
   $('#contracts tbody').append(row);
   $('#contracts').classList.remove('hidden');
   if (/no contracts/.test($('#list-status').textContent)) status($('#list-status'), '');
@@ -168,7 +168,8 @@ $('#join').addEventListener('submit', (event) => {
   busy($('#j-submit'), $('#join-status'), async () => {
     const contract = $('#j-contract').value.trim();
     status($('#join-status'), 'Approve the join with your passkey, then wait for the members to decide…');
-    const joined = await ibc.join(contract, $('#j-node').value.trim(), $('#j-agent').value.trim());
+    const guest = $('#j-guest').checked;
+    const joined = await ibc.join(contract, $('#j-node').value.trim(), $('#j-agent').value.trim(), { guest });
     if (joined !== true) {
       status($('#join-status'), 'The contract refused the join.', 'bad');
       return;
@@ -176,7 +177,7 @@ $('#join').addEventListener('submit', (event) => {
     const done = $('#join-status');
     done.replaceChildren('Joined: ', el('a', { href: `contract.html?id=${encodeURIComponent(contract)}` }, 'open the contract'));
     done.className = 'status ok';
-    addRow({ id: contract, name: '(new: refresh for details)', protocol: '', block_number: '' });
+    addRow({ id: contract, name: '(new: refresh for details)', protocol: '', role: guest ? 'guest' : 'partner', block_number: '' });
   });
 });
 

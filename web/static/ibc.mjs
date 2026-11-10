@@ -289,10 +289,14 @@ export class Ibc {
 
   /**
    * Asks a member of a contract to let this agent join. Resolves with true once
-   * this node holds the contract, or false if the contract refused.
+   * this node holds the contract, or false if the contract refused. A guest
+   * takes no part in consensus: this node sends its transactions and reads to
+   * the member's node, its host.
    */
-  async join(contract, memberUrl, memberAgent, profile = '') {
-    const stx = await this.sign('join', contract, { node: this.url, nodeKey: this.nodeKey, profile });
+  async join(contract, memberUrl, memberAgent, { guest = false, profile = '' } = {}) {
+    const body = { node: this.url, nodeKey: this.nodeKey, profile };
+    if (guest) Object.assign(body, { guest: true, host: memberAgent });
+    const stx = await this.sign('join', contract, body);
     const event = await this.submit('PUT', 'join_contract', {
       body: { ...stx, partner: { address: memberUrl, agent: memberAgent } },
     });
@@ -421,9 +425,9 @@ export class IbcApp {
     return this.#approve({ type: 'permit', contract });
   }
 
-  /** Asks the user to join a contract, through a member's node. */
-  async join(contract, memberNode, memberAgent) {
-    return (await this.#approve({ type: 'join', contract, memberNode, memberAgent })).joined;
+  /** Asks the user to join a contract, through a member's node; as a guest with { guest: true }. */
+  async join(contract, memberNode, memberAgent, { guest = false } = {}) {
+    return (await this.#approve({ type: 'join', contract, memberNode, memberAgent, guest })).joined;
   }
 
   /** Reads silently if the user allowed it, and otherwise asks the user. */

@@ -86,8 +86,8 @@ check it. Reads are signed too, as [queries](#queries).
 | `node_info`, `is_exist_agent`, `agent_info`, `compile` | Anyone, unsigned |
 | Node to node (`a2a_consent`) | Nodes, signed with their node key; see [Node to node](#node-to-node) |
 
-An agent reads only its own copy of a contract. The node's operator can still see everything stored
-on the node.
+An agent reads only its own copy of a contract; a [guest](#guests) has none, and its node reads a
+host's copy for it, as the guest. The node's operator can still see everything stored on the node.
 
 ## Signatures
 
@@ -543,11 +543,16 @@ time of the request.
 `contract_write`). `{"message": "no such contract"}` if the agent has no such contract, or its
 deployment has not finished yet.
 
+For a contract the agent is a [guest](#guests) of, the node sends the read to a host, which runs it
+on its copy with `msg.sender` set to the agent. The reply is the same; if no host answers:
+`no host answered: …`.
+
 ## Membership
 
 A contract's partners change through `join`, `leave` and `rotate_key` transactions, which are
 ordered like every other transaction. While one is being decided, the contract holds back other
-transactions (see [consensus design](consensus.md#10-membership-changes)).
+transactions (see [consensus design](consensus.md#10-membership-changes)). A contract may also take
+[guests](#guests), who are not partners in consensus.
 
 ### `join_contract`
 
@@ -574,6 +579,27 @@ event with the decision.
 
 **Errors:** `join_contract needs partner.address and partner.agent`; the partner's node's errors,
 for example `consensus: unknown contract 0x…`.
+
+### Guests
+
+To join as a **guest**, add `"guest": true` and `"host": "<the partner's agent id>"` to the join's
+body; the host must be the partner the join is sent to:
+
+```
+"body": "{\"node\":\"<your node's URL>\",\"nodeKey\":\"<your node's key>\",\"profile\":\"\",\"guest\":true,\"host\":\"<the partner's agent id>\"}"
+```
+
+A guest takes no part in consensus, and its node keeps no copy of the contract (see
+[consensus design](consensus.md#11-guests)). The contract decides with its `approve_guest(address)`
+function, called as the joining agent; **a contract without it refuses every guest**. The event is
+`join_contract`, as for a partner.
+
+Then the guest uses the contract through its own node, with the same calls as a partner:
+`contract_write` (signed by the root key, or silently by the node under a grant), `contract_read`,
+the event stream, and `leave_contract`. Its node sends them to a host: the partner it joined through
+first, then the others. In `get_contracts` and `get_contract`, the contract has `"role": "guest"`
+and its `hosts`. A guest's `leave_contract` is always approved, and its node forgets the contract
+at once. A guest cannot `rotate_key`: it leaves and joins again.
 
 ### `leave_contract`
 
@@ -671,9 +697,12 @@ PUT /ibc/app/<agent>/<contract>?action=a2a_consent
 - `time` is when the message was sent, and must be within 5 minutes of the receiving node's clock.
   A node signs when it sends, so a message it retries carries a new time.
 - `blocks`, `tx` and `join_result` are accepted from any node: blocks and transactions carry their
-  own signatures. `get_blocks`, `get_from` and `get_ledger` are answered only for a node whose key
-  belongs to a member of the contract's current configuration. A `welcome` must be signed by the
-  welcoming member's node key, as the configuration in it records it.
+  own signatures. But a guest's `tx` (one from an agent that is not a member, other than a join),
+  and a guest's `read`, are accepted only from the guest's node. `get_blocks`, `get_from` and
+  `get_ledger` are answered only for a node whose key belongs to a member of the contract's current
+  configuration. A `welcome` or `guest_welcome` must be signed by the welcoming member's node key, as
+  the configuration in it records it. An `event` is accepted only from a node of one of the guest's
+  hosts.
 
 | `type` | Fields | Reply |
 |---|---|---|
@@ -684,6 +713,9 @@ PUT /ibc/app/<agent>/<contract>?action=a2a_consent
 | `tx` | `tx`: a signed transaction to put in the miner's mempool (a relayed join, for example) | the transaction id |
 | `welcome` | `config`: the contract's new configuration; `sender`: the welcoming member | `null`; the node then fetches the ledger from the sender (`get_ledger`) and joins |
 | `join_result` | `txId`, `approved: false`: a refused join | `null` |
+| `read` | `guest`, `method`, `values`: a guest's read, sent to a host by the guest's node | `{"value": …}`, or `{"error": "…"}` for the contract's error |
+| `guest_welcome` | `config`: the members (the hosts); `sender`; `record`: the contract's deploy record; `txId`: the guest's join | `null`; the guest's node adds the contract, as a guest |
+| `event` | `reply`: an [event](#event) of the contract; `config`: the current members | `null`; the guest's node passes the event to the guest's stream |
 
 ## Objects
 
@@ -712,6 +744,9 @@ Returned by `get_contracts` and `get_contract`. Fields are present only when the
 | `pid` | The creating agent |
 | `address` | The creating agent's node URL |
 | `code`, `abi` | The bytecode and ABI given at deployment |
+| `source`, `compiler` | The Solidity source and how the node compiled it, if it did |
+| `role` | `partner`, or `guest`: the agent is a [guest](#guests), and this node has no copy of the contract (no state fields) |
+| `hosts` | For a guest: the contract's members, `[{agent, nodeKey, node}]`, to whom its node sends its transactions and reads |
 | `evm_address` | The contract's address in its own EVM state |
 | `state_root` | The state root after the last successful transaction |
 | `block_number` | How many transactions the contract has processed |

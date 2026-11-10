@@ -9,7 +9,7 @@ Example contracts and clients for ibc. The [usage guide](../docs/usage.md) walks
 | [`Counter.sol`](contracts/Counter.sol) | State, `msg.sender`, a revert reason, an owner-only function |
 | [`Poll.sol`](contracts/Poll.sol) | Array arguments, several return values, custom errors |
 | [`Board.sol`](contracts/Board.sol) | Structs returned as JSON objects, strings, `block.timestamp`, `whoAmI()` |
-| [`Chat.sol`](contracts/Chat.sol) | A contract for an app: users let it post and like without asking; the topic asks each time |
+| [`Chat.sol`](contracts/Chat.sol) | A contract for an app: users let it post and like without asking; the topic asks each time. Anyone may join as a guest (`approve_guest`) |
 
 The compiled contracts are in [`build/`](build): `<Name>.bin` (bytecode) and `<Name>.abi`
 (interface). After changing a contract, compile it again (needs Node.js):

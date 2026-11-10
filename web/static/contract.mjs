@@ -34,12 +34,15 @@ function show(c) {
   document.title = `ibc · ${c.name || short(c.id)}`;
   $('#title-name').textContent = `· ${c.name || short(c.id)}`;
   $('#name').textContent = c.name || '(no name)';
+  const guest = c.role === 'guest';
   const rows = [
     ['Contract id', c.id],
     ['Protocol', c.protocol || 'cordial'],
+    ['Your role', guest ? 'guest: your node sends your transactions and reads to a host' : 'partner'],
+    ['Hosts', guest ? (c.hosts ?? []).map((h) => h.node).join(', ') : undefined],
     ['Created by', c.pid],
     ['Creator\'s node', c.address],
-    ['Transactions', c.block_number ?? 0],
+    ['Transactions', guest ? undefined : (c.block_number ?? 0)],
     ['State root', c.state_root],
     ['EVM address', c.evm_address],
     ['Source file', c.contract],
@@ -49,6 +52,8 @@ function show(c) {
     el('dt', {}, k), el('dd', { class: /id|root|address|Created/.test(k) ? 'mono' : '' }, v),
   ]));
 
+  // A guest's node has no copy to welcome others into.
+  $('#invite-card').classList.toggle('hidden', guest);
   const invite = encodeInvite({ contract: c.id, node: location.origin, agent: ibc.agent });
   $('#invite').textContent = invite;
   $('#copy-invite').addEventListener('click', async () => {
@@ -91,7 +96,7 @@ function show(c) {
   });
 
   $('#leave').addEventListener('click', () => {
-    if (!confirm('Leave this contract? The other members decide, by the contract\'s rules.')) return;
+    if (!confirm(guest ? 'Leave this contract?' : 'Leave this contract? The other members decide, by the contract\'s rules.')) return;
     busy($('#leave'), $('#leave-status'), async () => {
       status($('#leave-status'), 'Approve the leave with your passkey, then wait for the members…');
       const reply = await ibc.leave(c.id);

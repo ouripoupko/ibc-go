@@ -51,6 +51,10 @@ A transaction reaches partners in one of two forms, and they accept nothing else
   is still the agent's node in this contract. A grant therefore stops working when the agent moves to
   another node.
 
+Execution also checks that the agent is a partner or a [guest](consensus.md#11-guests) of the
+contract. A guest's node is recorded when the guest joins, so a guest's grant works the same way:
+its node signs, and the hosts' nodes only pass the transaction on.
+
 Partners cannot tell whether the user watched each silent call; they can tell that the user allowed
 these functions, for this code, to this node. A node, even a corrupt one, can sign nothing else in
 the user's name.

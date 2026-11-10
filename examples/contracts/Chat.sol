@@ -3,7 +3,9 @@ pragma solidity ^0.8.24;
 
 /// A chat channel, for an app: users let the app post and like for them
 /// without approving each message (their node signs those calls), while
-/// changing the topic is approved every time.
+/// changing the topic is approved every time. Anyone may join as a guest:
+/// guests post, like and read through the partners' nodes, without taking
+/// part in consensus.
 contract Chat {
     struct Message {
         address author;
@@ -19,6 +21,11 @@ contract Chat {
     constructor(string memory initialTopic) {
         owner = msg.sender;
         topic = initialTopic;
+    }
+
+    /// Who may join as a guest: anyone. (Without this function, no one may.)
+    function approve_guest(address) external pure returns (bool) {
+        return true;
     }
 
     /// Posts a message and returns its id.

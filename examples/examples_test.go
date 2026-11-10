@@ -379,3 +379,80 @@ func TestChat(t *testing.T) {
 		t.Errorf("mismatched grant: %v", got)
 	}
 }
+
+// getContract returns the user's summary of a contract.
+func (c *client) getContract(contract string) map[string]any {
+	c.t.Helper()
+	auth, _ := json.Marshal(c.query(c.writer, identity.Address(c.key), "get_contract", contract, nil))
+	resp, err := http.Get(c.url + "/ibc/app/" + c.agent + "/" + contract + "?" +
+		url.Values{"action": {"get_contract"}, "auth": {string(auth)}}.Encode())
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	return out
+}
+
+// joinAsGuest asks host, on its node, to let the user join as a guest; it
+// returns the reply of the join.
+func (c *client) joinAsGuest(host *client, contract string) any {
+	c.t.Helper()
+	stx := c.sign(identity.KindJoin, contract, map[string]any{"node": c.url, "nodeKey": c.nodeKey,
+		"guest": true, "host": host.agent})
+	id := c.request("PUT", "join_contract", "", "", map[string]any{"tx": stx.Tx, "signature": stx.Signature,
+		"partner": map[string]any{"address": host.url, "agent": host.agent}})
+	return c.await(id)["reply"]
+}
+
+// A guest of Chat, on another node: it joins without taking part in
+// consensus, and its node sends its posts and reads to the host's node.
+func TestChatGuest(t *testing.T) {
+	alice, bob := newClient(t), newClient(t)
+	alice.register()
+	bob.register()
+	chat, _ := alice.deploy("Chat", map[string]any{"initialTopic": "lunch"})
+	expect(t, "alice posts", alice.write(chat, "post", map[string]any{"text": "hi"}), `0`)
+
+	expect(t, "bob joins as a guest", bob.joinAsGuest(alice, chat), `true`)
+	if s := bob.getContract(chat); s["role"] != "guest" || s["name"] != "Chat" || len(s["hosts"].([]any)) != 1 {
+		t.Errorf("bob's contract = %v", s)
+	}
+	if s := alice.getContract(chat); s["role"] != "partner" {
+		t.Errorf("alice's contract = %v", s)
+	}
+
+	// Bob posts and reads through alice's node, as himself.
+	expect(t, "bob posts", bob.write(chat, "post", map[string]any{"text": "hello from a guest"}), `1`)
+	expect(t, "bob reads", bob.read(chat, "count", nil), `2`)
+	latest := alice.read(chat, "latest", map[string]any{"limit": 1}).([]any)[0].(map[string]any)
+	if latest["author"] != bob.agent || latest["text"] != "hello from a guest" {
+		t.Errorf("latest = %v", latest)
+	}
+	expect(t, "a guest's revert", bob.read(chat, "latest", map[string]any{}), `"latest: missing argument \"limit\""`)
+
+	// Bob hears alice's posts.
+	stx := alice.sign(identity.KindCall, chat, map[string]any{"method": "post", "values": map[string]any{"text": "welcome"}})
+	id := alice.request("POST", "contract_write", chat, "post", stx)
+	expect(t, "bob hears alice's post", bob.await(id)["reply"], `2`)
+
+	// Bob's app posts silently: bob's node signs, under bob's grant.
+	bin, _ := os.ReadFile("build/Chat.bin")
+	chatCode, _ := identity.CodeHash(string(bin))
+	app, _ := identity.NewP256Key()
+	expect(t, "connect bob's app", bob.connectApp(app, chatCode, true, "post"), `true`)
+	expect(t, "silent post by a guest", bob.appWrite(app, chat, "post", map[string]any{"text": "from the app"}), `3`)
+	expect(t, "the app reads", bob.appRead(app, chat, "count", nil), `4`)
+
+	// A contract without approve_guest takes no guests.
+	counter, _ := alice.deploy("Counter", map[string]any{"start": 1})
+	expect(t, "guest of Counter", bob.joinAsGuest(alice, counter), `false`)
+	expect(t, "no Counter for bob", bob.getContract(counter), `{}`)
+
+	// Bob leaves: his node forgets the contract.
+	leave := bob.sign(identity.KindLeave, chat, map[string]any{"member": bob.agent})
+	expect(t, "bob leaves", bob.await(bob.request("PUT", "leave_contract", chat, "", leave))["reply"], `true`)
+	expect(t, "bob's read after leaving", bob.read(chat, "count", nil), `{"message":"no such contract"}`)
+	expect(t, "alice's count", alice.read(chat, "count", nil), `4`)
+}

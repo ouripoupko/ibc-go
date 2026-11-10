@@ -214,7 +214,12 @@ func (o *output) protocol() consensus.Protocol {
 	return o.proto
 }
 
-func (o *output) Publish(agent string, reply execution.Reply) { o.broker.Publish(agent, reply) }
+func (o *output) Publish(agent string, reply execution.Reply) {
+	o.broker.Publish(agent, reply)
+	if p := o.protocol(); p != nil {
+		p.Published(agent, reply) // to the contract's guests
+	}
+}
 
 func (o *output) Decided(agent, contract string, record execution.Record, approved bool) {
 	if p := o.protocol(); p != nil {

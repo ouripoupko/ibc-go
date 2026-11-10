@@ -247,6 +247,8 @@ func (m *Miner) inMempool(id ethcommon.Hash) bool {
 }
 
 // txAllowed applies the payload rules of §5 that do not depend on the block.
+// Calls and a guest's own leave may come from agents that are not members:
+// guests, whom execution knows (it refuses calls from anyone else).
 func (m *Miner) txAllowed(stx identity.SignedTx, id ethcommon.Hash, cfg *Config) error {
 	tx := stx.Tx
 	if tx.Kind == identity.KindDeploy {
@@ -258,17 +260,43 @@ func (m *Miner) txAllowed(stx identity.SignedTx, id ethcommon.Hash, cfg *Config)
 	if tx.Contract != m.contract {
 		return fmt.Errorf("transaction for contract %s", tx.Contract)
 	}
+	member := cfg.IsMember(tx.Agent)
 	switch tx.Kind {
 	case identity.KindJoin:
-		if cfg.IsMember(tx.Agent) {
+		if member {
 			return fmt.Errorf("%s is already a member", tx.Agent.Hex())
 		}
+	case identity.KindCall:
+	case identity.KindLeave:
+		if !member {
+			body, err := tx.ParseBody()
+			if err != nil || body.(*identity.LeaveBody).Member != tx.Agent {
+				return fmt.Errorf("%s is not a member", tx.Agent.Hex())
+			}
+		}
 	default:
-		if !cfg.IsMember(tx.Agent) {
+		if !member {
 			return fmt.Errorf("%s is not a member", tx.Agent.Hex())
 		}
 	}
 	return nil
+}
+
+// ConfigChange reports whether a transaction changes the configuration cfg:
+// a member's join, a member's leave or removal, or a key rotation. A guest's
+// join and leave are ordinary transactions.
+func ConfigChange(stx identity.SignedTx, cfg *Config) bool {
+	switch stx.Tx.Kind {
+	case identity.KindJoin:
+		body, err := stx.Tx.ParseBody()
+		return err == nil && !body.(*identity.JoinBody).Guest
+	case identity.KindLeave:
+		body, err := stx.Tx.ParseBody()
+		return err == nil && cfg.IsMember(body.(*identity.LeaveBody).Member)
+	case identity.KindRotateKey:
+		return true
+	}
+	return false
 }
 
 // validPayload checks every transaction of a received block.
@@ -522,8 +550,7 @@ func (m *Miner) runTau() (bool, error) {
 				txIDs = append(txIDs, id)
 				m.dropMempool(id)
 				delete(m.included, id)
-				switch stx.Tx.Kind {
-				case identity.KindJoin, identity.KindLeave, identity.KindRotateKey:
+				if ConfigChange(stx, m.lace.cfg) {
 					changes = append(changes, &change{ID: id, Tx: stx})
 				}
 			}
@@ -689,8 +716,7 @@ func (m *Miner) frozen() bool {
 			continue
 		}
 		for _, stx := range n.b.Payload {
-			switch stx.Tx.Kind {
-			case identity.KindJoin, identity.KindLeave, identity.KindRotateKey:
+			if ConfigChange(stx, m.lace.cfg) {
 				return true
 			}
 		}
@@ -786,8 +812,7 @@ func (m *Miner) selectPayload() []identity.SignedTx {
 		if err := m.txAllowed(stx, id, m.lace.cfg); err != nil {
 			continue
 		}
-		switch stx.Tx.Kind {
-		case identity.KindJoin, identity.KindLeave, identity.KindRotateKey:
+		if ConfigChange(stx, m.lace.cfg) {
 			if haveChange {
 				continue // one change at a time
 			}

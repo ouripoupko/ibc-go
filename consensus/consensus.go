@@ -6,8 +6,10 @@ package consensus
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 
+	"github.com/ouripoupko/ibc-go/common"
 	"github.com/ouripoupko/ibc-go/execution"
 	"github.com/ouripoupko/ibc-go/identity"
 )
@@ -35,9 +37,12 @@ type Protocol interface {
 	RelayJoin(ctx context.Context, agent string, stx identity.SignedTx, memberNode, memberAgent string) (string, error)
 	// Receive handles a message from another node; the result is the reply.
 	Receive(ctx context.Context, agent, contract string, body []byte) (any, error)
-	// Decided and Applied are execution's reports.
+	// Read runs a read of a contract agent is a guest of, on a host.
+	Read(ctx context.Context, agent, contract, method string, values map[string]any) (any, error)
+	// Decided, Applied and Published are execution's reports.
 	Decided(agent, contract string, record execution.Record, approved bool)
 	Applied(agent, contract string, index uint64, stateRoot string)
+	Published(agent string, reply execution.Reply)
 	// Close stops the protocol.
 	Close()
 }
@@ -51,6 +56,19 @@ type Execution interface {
 	Progress(agent, contract string) (index uint64, stateRoot string, err error)
 	// Ledger is the contract's records with index >= from, in order.
 	Ledger(agent, contract string, from uint64) ([]execution.LedgerEntry, error)
+	// DeployRecord is the contract's first record.
+	DeployRecord(agent, contract string) (json.RawMessage, error)
+	// Read runs a read-only call as caller.
+	Read(agent, caller string, record execution.Record) (common.Result, error)
+
+	// A guest's node keeps the contracts its agents are guests of.
+	Guest(agent, contract string) (execution.GuestEntry, bool, error)
+	StoreGuest(agent, contract string, deploy map[string]any, e execution.GuestEntry) error
+	SetHosts(agent, contract string, hosts []execution.Host) error
+	RemoveGuest(agent, contract string) error
+	// A host's node knows the guests of its agents' contracts.
+	Guests(agent, contract string) ([]execution.Guest, error)
+	GuestOf(agent, contract, guest string) (execution.Guest, bool, error)
 }
 
 // Publisher delivers a reply to an agent's clients.

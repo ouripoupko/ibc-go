@@ -11,7 +11,8 @@ This is the Go version of [ibc](https://github.com/ouripoupko/ibc):
 - **Contracts run on the EVM**, embedded through
   [go-ethereum](https://github.com/ethereum/go-ethereum), so you write them in Solidity.
 - **Partners agree with [Cordial Miners](docs/consensus.md)**, a Byzantine fault-tolerant
-  consensus protocol, run separately for each contract among its partners.
+  consensus protocol, run separately for each contract among its partners. A contract may also take
+  **guests**, who use it through a partner's node without taking part in consensus.
 - **Users sign with a passkey**, a key kept in their phone's or computer's security hardware: no
   wallet to install, and a node never holds it. Apps act for users through their node, which does
   without asking only what the user allowed, per function.

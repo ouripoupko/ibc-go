@@ -590,3 +590,57 @@ func TestPebbleEndToEndAcrossRestart(t *testing.T) {
 		t.Fatalf("first ledger record = %s, %v", first, err)
 	}
 }
+
+// Guests: a contract takes them only through approve_guest, and execution
+// refuses calls from anyone who is neither a partner nor a guest.
+func TestGuests(t *testing.T) {
+	owner, guest, stranger := newKey(t), newKey(t), newKey(t)
+	bin, _ := os.ReadFile("../examples/build/Chat.bin")
+	abiJSON, _ := os.ReadFile("../examples/build/Chat.abi")
+	doc := common.NewMemoryDocument(map[string]any{
+		common.KeyPID: identity.Address(owner).Hex(), common.KeyAddress: "http://owner.example",
+		common.KeyCode: strings.TrimSpace(string(bin)), common.KeyABI: string(abiJSON),
+		common.KeyConstructor: map[string]any{"initialTopic": "lunch"},
+	})
+	a := &agent{me: alice, doc: doc, db: rawdb.NewMemoryDatabase(), ledger: &MemoryLedger{}}
+	a.exec = NewContractExecution(a.doc, contract, alice, a.db, a.ledger)
+	if ok, err := a.exec.Create(Record{Action: ActionDeployContract, Timestamp: createdAt}); err != nil || !ok {
+		t.Fatalf("Create = %v, %v", ok, err)
+	}
+	ts := "20240102030500000000"
+	post := func(key *ecdsa.PrivateKey) Outcome {
+		return a.apply(t, signedRecord(t, key, identity.KindCall, contract, `{"method":"post","values":{"text":"hi"}}`, ts))
+	}
+	if out := post(stranger); !errors.Is(out.Err, ErrNotPartner) {
+		t.Fatalf("a stranger's call: %+v", out)
+	}
+	guestNode := newKey(t)
+	join := signedRecord(t, guest, identity.KindJoin, contract, fmt.Sprintf(
+		`{"node":"http://guest.example","nodeKey":%q,"guest":true,"host":%q}`,
+		identity.Address(guestNode).Hex(), identity.Address(owner).Hex()), ts)
+	if out := a.apply(t, join); out.Decision == nil || !*out.Decision {
+		t.Fatalf("guest join: %+v", out)
+	}
+	p, _ := a.doc.GetSubCollection(PartnersCollection).Document(identity.Address(guest).Hex()).Fields()
+	if p["role"] != RoleGuest || p["nodeKey"] != identity.Address(guestNode).Hex() {
+		t.Fatalf("guest = %v", p)
+	}
+	if out := post(guest); out.Err != nil || fmt.Sprint(out.Value) != "0" {
+		t.Fatalf("the guest's call: %+v", out)
+	}
+	leave := signedRecord(t, guest, identity.KindLeave, contract, fmt.Sprintf(`{"member":%q}`, identity.Address(guest).Hex()), ts)
+	if out := a.apply(t, leave); out.Decision == nil || !*out.Decision {
+		t.Fatalf("guest leave: %+v", out)
+	}
+	if out := post(guest); !errors.Is(out.Err, ErrNotPartner) {
+		t.Fatalf("a call after leaving: %+v", out)
+	}
+
+	// Without approve_guest, a guest's join is refused.
+	b := newAgent(t, alice)
+	if out := b.apply(t, signedRecord(t, guest, identity.KindJoin, contract, fmt.Sprintf(
+		`{"node":"http://guest.example","nodeKey":%q,"guest":true,"host":%q}`,
+		identity.Address(guestNode).Hex(), identity.Address(owner).Hex()), ts)); out.Decision == nil || *out.Decision {
+		t.Fatalf("guest join without approve_guest: %+v", out)
+	}
+}

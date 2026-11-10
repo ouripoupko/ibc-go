@@ -8,7 +8,7 @@
 //   { type: 'permit', contract, appKey }   permissions on an existing contract
 //   { type: 'call', contract, method, values, appKey }
 //   { type: 'read', contract, method, values, appKey }
-//   { type: 'join', contract, memberNode, memberAgent, appKey }
+//   { type: 'join', contract, memberNode, memberAgent, guest, appKey }
 // and this page replies { type: 'ibc-done', result } or { type: 'ibc-denied', reason }.
 // The app's site (its origin) is what the user sees and what the node records.
 import {
@@ -258,14 +258,18 @@ async function showRead(ibc, identity, host) {
 }
 
 async function showJoin(ibc, identity, host) {
-  $('#title').textContent = `${host} asks you to join a contract`;
-  $('#what').textContent = 'You become a member: your node takes part in it, and receives its history.';
+  const guest = request.guest === true;
+  $('#title').textContent = `${host} asks you to join a contract${guest ? ' as a guest' : ''}`;
+  $('#what').textContent = guest
+    ? 'You become a guest: your node sends your transactions and reads to the member\'s node, which you trust with them, and keeps no copy.'
+    : 'You become a member: your node takes part in it, and receives its history.';
   details([['Contract', short(request.contract)], ['Through', `${request.memberNode} (${short(request.memberAgent)})`]]);
   const app = await siteOf(ibc);
   return async () => {
     const tx = {
       contract: request.contract, kind: 'join', agent: identity.agent, nonce: nonce(),
-      body: JSON.stringify({ node: ibc.url, nodeKey: ibc.nodeKey, profile: '' }),
+      body: JSON.stringify({ node: ibc.url, nodeKey: ibc.nodeKey, profile: '',
+        ...(guest ? { guest: true, host: request.memberAgent } : {}) }),
     };
     const signature = await signWithDevice(ibc, identity, app, { type: 'Transaction', message: tx });
     const event = await ibc.submit('PUT', 'join_contract', {

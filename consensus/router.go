@@ -199,6 +199,11 @@ func (r *Router) SubmitTx(agent string, stx identity.SignedTx) (string, error) {
 		return r.deploy(addr, stx, id)
 	}
 	contract := stx.Tx.Contract
+	if e, ok, err := r.cfg.Execution.Guest(addr.Hex(), contract); err != nil {
+		return "", err
+	} else if ok {
+		return r.guestSubmit(addr, contract, e, stx, id)
+	}
 	if im, ok, err := r.immediate(addr, contract); err != nil {
 		return "", err
 	} else if ok {
@@ -266,13 +271,32 @@ func (r *Router) RelayJoin(ctx context.Context, agent string, stx identity.Signe
 	if !ethcommon.IsHexAddress(memberAgent) {
 		return "", fmt.Errorf("member agent %q is not an address", memberAgent)
 	}
-	body, err := r.cfg.Sender.Send(ctx, request(memberNode, ethcommon.HexToAddress(memberAgent), stx.Tx.Contract,
-		map[string]any{"type": "tx", "tx": stx}))
+	parsed, err := stx.Tx.ParseBody()
 	if err != nil {
 		return "", err
 	}
-	if msg := replyMessage(body); msg != "" {
-		return "", errors.New(msg)
+	jb := parsed.(*identity.JoinBody)
+	if jb.Guest {
+		if jb.Host != ethcommon.HexToAddress(memberAgent) {
+			return "", errors.New("a guest's join names as its host the member it is sent to")
+		}
+		// Wait for the host's welcome.
+		if err := r.savePending(stx.Tx.Agent, stx.Tx.Contract, pendingJoin{TxID: id.Hex(), Host: jb.Host}); err != nil {
+			return "", err
+		}
+	}
+	body, err := r.cfg.Sender.Send(ctx, request(memberNode, ethcommon.HexToAddress(memberAgent), stx.Tx.Contract,
+		map[string]any{"type": "tx", "tx": stx}))
+	if err == nil {
+		if msg := replyMessage(body); msg != "" {
+			err = errors.New(msg)
+		}
+	}
+	if err != nil {
+		if jb.Guest {
+			_ = r.deletePending(stx.Tx.Agent, stx.Tx.Contract)
+		}
+		return "", err
 	}
 	return id.Hex(), nil
 }
@@ -299,6 +323,13 @@ type wireMessage struct {
 	Depth    uint64             `json:"depth,omitempty"`
 	TxID     string             `json:"txId,omitempty"`
 	Approved bool               `json:"approved,omitempty"`
+	// A guest's read, the deploy record in a guest's welcome, and a reply
+	// a host sends to a guest's node.
+	Guest  *ethcommon.Address `json:"guest,omitempty"`
+	Method string             `json:"method,omitempty"`
+	Values map[string]any     `json:"values,omitempty"`
+	Record json.RawMessage    `json:"record,omitempty"`
+	Reply  *execution.Reply   `json:"reply,omitempty"`
 }
 
 // Receive handles a message from another node: body is the a2a_consent
@@ -313,7 +344,7 @@ func (r *Router) Receive(ctx context.Context, agent, contract string, body []byt
 		return nil, err
 	}
 	var msg wireMessage
-	if err := json.Unmarshal(env.Msg, &msg); err != nil {
+	if err := execution.DecodeJSON(env.Msg, &msg); err != nil {
 		return nil, fmt.Errorf("a2a_consent: %w", err)
 	}
 	addr, err := parseAgent(agent)
@@ -328,7 +359,7 @@ func (r *Router) Receive(ctx context.Context, agent, contract string, body []byt
 		if !r.memberNode(addr, contract, from) {
 			return nil, fmt.Errorf("node %s serves no member of contract %s", from.Hex(), contract)
 		}
-	case "welcome":
+	case "welcome", "guest_welcome":
 		if msg.Sender == nil || msg.Sender.NodeKey != from || msg.Config == nil {
 			return nil, errors.New("welcome not signed by the welcoming member's node")
 		}
@@ -392,6 +423,12 @@ func (r *Router) Receive(ctx context.Context, agent, contract string, body []byt
 		if m == nil {
 			return nil, fmt.Errorf("%w %s", ErrUnknownContract, contract)
 		}
+		if tx := msg.Tx.Tx; tx.Kind != identity.KindJoin && !m.Config().IsMember(tx.Agent) {
+			// A guest's transaction comes from the guest's node.
+			if err := r.checkGuest(addr, contract, tx.Agent, from); err != nil {
+				return nil, err
+			}
+		}
 		id, err := m.SubmitTx(*msg.Tx)
 		if err != nil {
 			return nil, err
@@ -399,7 +436,16 @@ func (r *Router) Receive(ctx context.Context, agent, contract string, body []byt
 		return id.Hex(), nil
 	case "welcome":
 		return nil, r.welcome(addr, contract, msg)
+	case "read":
+		return r.hostRead(addr, contract, from, msg)
+	case "guest_welcome":
+		return nil, r.guestWelcome(addr, contract, msg)
+	case "event":
+		return nil, r.guestEvent(addr, contract, from, msg)
 	case "join_result":
+		if !msg.Approved {
+			_ = r.deletePending(addr, contract)
+		}
 		r.cfg.Publisher.Publish(agent, execution.Reply{Request: msg.TxID, Contract: &contract,
 			Action: "join_contract", Reply: msg.Approved})
 		return nil, nil
@@ -535,18 +581,23 @@ func (r *Router) Decided(agent, contract string, record execution.Record, approv
 			slog.Error("decision", "contract", contract, "err", err)
 		}
 	}
-	if approved || record.Tx == nil || record.Tx.Tx.Kind != identity.KindJoin {
+	if record.Tx == nil || record.Tx.Tx.Kind != identity.KindJoin {
 		return
 	}
 	body, err := record.Tx.Tx.ParseBody()
 	if err != nil {
 		return
 	}
+	jb := body.(*identity.JoinBody)
 	r.mu.Lock()
 	e := r.miners[minerKey{addr, contract}]
 	r.mu.Unlock()
-	if e != nil {
-		_ = e.outbox.Put(request(body.(*identity.JoinBody).Node, record.Tx.Tx.Agent, contract,
+	switch {
+	case e == nil:
+	case approved && jb.Guest:
+		r.welcomeGuest(addr, contract, e, record, jb)
+	case !approved:
+		_ = e.outbox.Put(request(jb.Node, record.Tx.Tx.Agent, contract,
 			map[string]any{"type": "join_result", "txId": record.HashCode, "approved": false}))
 	}
 }

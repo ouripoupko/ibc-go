@@ -5,7 +5,7 @@ This is the design of ibc's consensus protocol, Cordial Miners, as implemented i
 Shapiro, *Cordial Miners: Fast and Efficient Consensus for Every Eventuality* (DISC 2023), and
 follows the engineering choices of the
 [CordialMiners prototype](https://github.com/ouripoupko/CordialMiners). Every place where it
-differs from the prototype is listed in [§11](#11-deviations-from-the-prototype), together with the
+differs from the prototype is listed in [§12](#12-deviations-from-the-prototype), together with the
 one prototype rule kept despite an open question.
 
 Terms follow the paper: miner, block, blocklace, depth (round), cordial, supermajority, approve,
@@ -21,9 +21,10 @@ ratify, super-ratify, wave, leader, final, τ.
 - [8. Dissemination](#8-dissemination)
 - [9. From τ to execution](#9-from-τ-to-execution)
 - [10. Membership changes](#10-membership-changes)
-- [11. Deviations from the prototype](#11-deviations-from-the-prototype)
-- [12. Decisions](#12-decisions)
-- [13. Not in this version](#13-not-in-this-version)
+- [11. Guests](#11-guests)
+- [12. Deviations from the prototype](#12-deviations-from-the-prototype)
+- [13. Decisions](#13-decisions)
+- [14. Not in this version](#14-not-in-this-version)
 
 ## 1. Goals
 
@@ -57,6 +58,7 @@ dissemination is all-to-all.
     protocol;
   - `immediate` orders the creator's transactions locally, with no partners. It exists for testing.
 - **Each contract has its own blocklace.** Its miners are exactly the contract's partners (agents).
+  A contract may also have **guests**, who are not miners (§11).
   Contracts never wait for each other.
 - **An agent's miner runs on the agent's node.** A node runs one miner per (agent, contract). Two
   partners hosted on the same node are two miners.
@@ -304,7 +306,58 @@ paper's proofs cover each configuration on its own, since membership is fixed wi
 - **Key rotation takes effect at the next switch.** Until then a stolen node key can act as one
   Byzantine miner.
 
-## 11. Deviations from the prototype
+## 11. Guests
+
+A **guest** of a contract uses it like a partner, but takes no part in its consensus. The guest's
+node keeps no copy of the contract: it sends the guest's transactions and reads to a **host**, one of
+the contract's members (its full partners), and receives the contract's events from it. The guest
+still talks only to its own node, and the contract does not get slower: guests add no miners, and
+their joins do not freeze it.
+
+The price is trust: a guest trusts its hosts for what it reads, and for passing its transactions on.
+The hosts cannot forge the guest's transactions, since every partner checks their signatures.
+
+### Joining
+
+1. The guest signs a `join` whose body says `"guest": true` and names its host: `"host"`, the member
+   whose node it sends the join to. Its node sends it there, as for any join.
+2. The members order it like any transaction, but it is not a configuration change: no freeze, no
+   switch. Execution calls the contract's `approve_guest(address)` as the joining agent. **A contract
+   without that function refuses every guest**: guests are something a contract opts in to.
+3. If approved, every member records the guest in the contract's partners, with the role `guest`,
+   its node and node key, and its host. The members' nodes send the guest's node a **welcome**: the
+   contract's members (the hosts) and the contract's deploy record. The guest's node checks that the
+   deploy is signed by the creator and that its id is the contract's id, so it knows the contract's
+   code, ABI and source for certain. It then adds the contract to the agent's list of contracts,
+   with the role `guest`.
+
+### Using the contract
+
+- **Transactions.** The guest's node sends each transaction to a host: the one it joined through
+  first, then the others. The host accepts a guest's transaction only from the guest's node (the
+  node key the guest joined with). Members order it with their own, and execution runs it with the
+  guest as `msg.sender`. Execution refuses a call from an agent that is neither a partner nor a guest,
+  so a member cannot slip in a stranger's transaction.
+- **Silent calls** work as for partners: the guest's node signs under the guest's grant, and
+  partners check that the grant's node is the guest's node in this contract.
+- **Reads.** The guest's node sends the read to a host, signed by its node key. The host runs it on
+  its copy, as the guest, and answers. Only `view` and `pure` functions, as for partners.
+- **Events.** The guest's host sends the guest's node every reply of the contract, with the current
+  members, so the guest's list of hosts stays up to date. If the host is no longer a member, the
+  first member sends them.
+- **Leaving.** A guest may always leave. Its node forgets the contract at once. Removing a guest
+  calls the contract's `approve_removal`, as for a member.
+
+### Limits
+
+- A guest cannot rotate its key: it leaves and joins again from its new node.
+- A guest cannot become a partner while it is a guest: it leaves first.
+- A removed guest's node learns of it at its next transaction or read, which the host refuses.
+- A guest's node does not check what its host answers to a read; a dishonest host can lie.
+  Comparing the answers of several hosts is future work.
+- Only Cordial Miners contracts take guests.
+
+## 12. Deviations from the prototype
 
 | Prototype | This design | Why |
 |---|---|---|
@@ -342,7 +395,7 @@ does not cover this window.
 The window and the wavelength are parameters of the implementation, and the simulator tests run
 all three variants with equivocating miners.
 
-## 12. Decisions
+## 13. Decisions
 
 | # | Decision |
 |---|---|
@@ -352,15 +405,16 @@ all three variants with equivocating miners.
 | — | secp256k1 keys; EIP-712 signatures |
 | D3 | One blocklace; membership changes freeze the contract until output, and switch at the leader that output them (§10) |
 | D4 | τ does not filter equivocating blocks (as the prototype) |
-| D5 | The prototype's finality window, tracked as an open issue (§11) |
+| D5 | The prototype's finality window, tracked as an open issue (§12) |
 | D6 | No shortcut for single-member contracts |
 | D7 | Push own blocks; pull missing ones by hash |
 | D8 | Blocks carry the creator's state root |
 | D9 | A member may always leave; removing another needs the contract's `approve_removal` |
+| D10 | Guests: a contract may take guests (`approve_guest`), who use it through a host and are not miners (§11) |
 | — | Each contract chooses its protocol; one blocklace per contract |
 | — | No limit on partners, no optimizations for large contracts |
 
-## 13. Not in this version
+## 14. Not in this version
 
 - The personal two-pointer ledger of the ssDA paper (same-contract and same-agent pointers).
 - Recovery of a lost root key through trusted friends, and a native

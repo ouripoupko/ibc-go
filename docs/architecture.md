@@ -67,7 +67,9 @@ execution.Navigator.Submit
    the router.
 3. **The router** verifies the signature and gives it to the agent's miner of the contract, which
    keeps it in its mempool. A deploy creates the contract and its miner; a join is relayed to a
-   member's node.
+   member's node. For a contract the agent is a guest of, the router sends the transaction to a
+   host's node instead, which puts it in its miner's mempool
+   ([`consensus/guest.go`](../consensus/guest.go); see [guests](consensus.md#11-guests)).
 4. **The miners** of the contract's partners put transactions in signed blocks, exchange them, and
    order the blocklace with τ (see the [consensus design](consensus.md)).
 5. **`Navigator.Submit`** receives each ordered transaction as a record with its ledger index,
@@ -98,7 +100,8 @@ the old root, and the record is applied again.
 `contract_read` does not go through consensus or the contract's goroutine. It runs only `view` and
 `pure` functions (it refuses others: they are transactions), on the contract's state at its latest
 root. A read never deploys a
-contract: a contract whose deploy record has not been applied yet is reported as unknown.
+contract: a contract whose deploy record has not been applied yet is reported as unknown. A guest's
+node has no state: it sends the read to a host's node, which runs it on its copy, as the guest.
 
 ### Signatures on every call
 
@@ -261,6 +264,9 @@ upgrade together.
 - **Precompile addresses.** There are no precompiles, but a call to one of their addresses does not
   fail: `ecrecover` and `ripemd160` return zero, `sha256` reverts.
 - **Built-in methods.** `get_partners` and `get_parameters` answer "not implemented".
+- **Guests' trust in hosts.** A guest's node takes a host's answer to a read as it is, and is not
+  told when the guest is removed (it learns at its next call). See
+  [guests](consensus.md#11-guests).
 - **Unverified refusals.** A `join_result` refusal is accepted from any node, so a stranger could
   tell a joining agent that it was refused. The welcome's configuration is trusted from the
   welcoming member's node; the ledger replayed from it is checked transaction by transaction.

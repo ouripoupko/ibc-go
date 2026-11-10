@@ -281,6 +281,12 @@ type (
 		Node    string            `json:"node"`
 		NodeKey ethcommon.Address `json:"nodeKey"`
 		Profile any               `json:"profile,omitempty"`
+		// Guest joins as a guest partner: one that takes no part in
+		// consensus, and whose node sends its transactions and reads to the
+		// contract's hosts (its full partners). Host is the member whose
+		// node the guest joined through; it keeps the guest informed.
+		Guest bool              `json:"guest,omitempty"`
+		Host  ethcommon.Address `json:"host,omitempty"`
 	}
 	LeaveBody struct {
 		Member ethcommon.Address `json:"member"`
@@ -326,6 +332,9 @@ func (t Transaction) ParseBody() (any, error) {
 	case *JoinBody:
 		if b.NodeKey == (ethcommon.Address{}) || b.Node == "" {
 			return nil, errors.New("join body needs node and nodeKey")
+		}
+		if b.Guest && b.Host == (ethcommon.Address{}) {
+			return nil, errors.New("a guest's join body needs its host")
 		}
 	case *LeaveBody:
 		if b.Member == (ethcommon.Address{}) {

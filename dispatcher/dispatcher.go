@@ -320,6 +320,12 @@ func (d *Dispatcher) handle(ctx context.Context, record execution.Record, body [
 			}
 			return nil, err
 		}
+		if _, guest, err := d.navigator.Guest(record.Agent, record.Contract); err != nil {
+			return nil, err
+		} else if guest {
+			// A guest has no copy: a host reads its copy, as the guest.
+			return d.consensus.Read(ctx, record.Agent, record.Contract, record.Method, record.Message.Values)
+		}
 		// The read runs as the agent: msg.sender is the agent itself.
 		result, err := d.navigator.Read(record.Agent, record.Agent, record)
 		if errors.Is(err, execution.ErrUnknownContract) {

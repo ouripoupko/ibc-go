@@ -58,9 +58,10 @@ const (
 	MethodGetPartners   = "get_partners"
 	MethodGetParameters = "get_parameters"
 	// Contract functions that decide membership changes, if a contract
-	// defines them: approve_partner(address) and approve_removal(address),
-	// both returning bool.
+	// defines them: approve_partner(address), approve_guest(address) and
+	// approve_removal(address), all returning bool.
 	MethodApprovePartner = "approve_partner"
+	MethodApproveGuest   = "approve_guest"
 	MethodApproveRemoval = "approve_removal"
 )
 

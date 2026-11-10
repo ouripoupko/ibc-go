@@ -14,6 +14,7 @@
 #   ibc.sh write CONTRACT METHOD [VALUES_JSON]   a transaction; waits for and prints its result
 #   ibc.sh read CONTRACT METHOD [VALUES_JSON]    a read of a view function; prints its result
 #   ibc.sh join CONTRACT MEMBER_URL MEMBER_ID    ask a member to let you join; waits for the answer
+#   ibc.sh guest CONTRACT MEMBER_URL MEMBER_ID   join as a guest: no copy here; calls and reads go to the member
 #   ibc.sh leave CONTRACT [MEMBER_ID]            leave a contract (or ask to remove a member)
 #   ibc.sh contracts                             list your contracts
 #   ibc.sh contract CONTRACT                     one contract's summary
@@ -109,7 +110,7 @@ submit_and_wait() {
 }
 
 cmd=${1:-}
-[ -n "$cmd" ] || { sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
+[ -n "$cmd" ] || { sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
 shift
 
 case "$cmd" in
@@ -165,13 +166,16 @@ read)
     fail_on_message "$reply"
     jq -c . <<<"$reply"
     ;;
-join)
+join | guest)
     need_key
-    contract=${1:?usage: ibc.sh join CONTRACT MEMBER_URL MEMBER_ID}
-    member_url=${2:?usage: ibc.sh join CONTRACT MEMBER_URL MEMBER_ID}
-    member=${3:?usage: ibc.sh join CONTRACT MEMBER_URL MEMBER_ID}
-    tx=$(sign join "$contract" "$(jq -cn --arg node "$IBC_URL" --arg nodeKey "$(node_key)" \
-        '{node: $node, nodeKey: $nodeKey, profile: ""}')")
+    contract=${1:?usage: ibc.sh $cmd CONTRACT MEMBER_URL MEMBER_ID}
+    member_url=${2:?usage: ibc.sh $cmd CONTRACT MEMBER_URL MEMBER_ID}
+    member=${3:?usage: ibc.sh $cmd CONTRACT MEMBER_URL MEMBER_ID}
+    join_body=$(jq -cn --arg node "$IBC_URL" --arg nodeKey "$(node_key)" '{node: $node, nodeKey: $nodeKey, profile: ""}')
+    if [ "$cmd" = guest ]; then
+        join_body=$(jq -c --arg host "$member" '. + {guest: true, host: $host}' <<<"$join_body")
+    fi
+    tx=$(sign join "$contract" "$join_body")
     body=$(jq -c --arg url "$member_url" --arg agent "$member" '. + {partner: {address: $url, agent: $agent}}' <<<"$tx")
     event=$(submit_and_wait "" PUT "$AGENT" join_contract "$body")
     [ "$(jq -r .reply <<<"$event")" = "true" ] || die "join refused"
@@ -187,7 +191,7 @@ leave)
     ;;
 contracts)
     need_key
-    signed_get "$AGENT" get_contracts "" | jq '[.[] | {id, name, contract, evm_address, block_number}]'
+    signed_get "$AGENT" get_contracts "" | jq '[.[] | {id, name, contract, role, evm_address, block_number}]'
     ;;
 contract)
     need_key

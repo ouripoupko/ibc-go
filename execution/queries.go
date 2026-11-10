@@ -14,7 +14,7 @@ import (
 // SummaryFields are the contract document fields returned by
 // get_contracts / get_contract: Python's list, plus abi and the EVM fields.
 var SummaryFields = []string{
-	"id", "name", "contract", "code", "protocol", "default_app", "pid", "address", "profile", "source", "compiler",
+	"id", "name", "contract", "code", "protocol", "default_app", "pid", "address", "profile", "source", "compiler", KeyRole, KeyHosts,
 	common.KeyABI, common.KeyEVMAddress, common.KeyStateRoot, common.KeyBlockNumber, common.KeyDeployError,
 }
 
@@ -102,7 +102,7 @@ func summarize(doc common.Document) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := map[string]any{}
+	out := map[string]any{KeyRole: RolePartner}
 	for _, key := range SummaryFields {
 		if v, ok := fields[key]; ok {
 			out[key] = v

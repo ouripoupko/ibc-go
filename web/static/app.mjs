@@ -286,7 +286,7 @@ function explain(type, m, batch) {
     case 'Query:revoke_app': return words('disconnect app');
     case 'Transaction:deploy': return words('deploy', body.name, values(Object.hasOwn(body, 'constructor') ? body.constructor : {}));
     case 'Transaction:call': return words(body.method, values(body.values));
-    case 'Transaction:join': return words('join', short(m.contract));
+    case 'Transaction:join': return words(body.guest ? 'join as a guest' : 'join', short(m.contract));
     case 'Transaction:leave': return self ? words('leave', short(m.contract)) : words('remove', short(body.member));
     case 'Transaction:rotate_key': return words('move to', body.node);
     default: return words(type ?? '', m.kind ?? m.action ?? '');

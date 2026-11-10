@@ -29,6 +29,17 @@ var ErrAlreadyCreated = errors.New("contract already created")
 // changes nothing.
 var ErrGrantDoesNotApply = errors.New("the node's grant does not apply")
 
+// ErrNotPartner is the outcome of a call from an agent that is neither a
+// partner nor a guest of the contract. The call is recorded and changes
+// nothing.
+var ErrNotPartner = errors.New("not a partner or guest of this contract")
+
+// Partner roles, in the partners collection.
+const (
+	RolePartner = "partner"
+	RoleGuest   = "guest"
+)
+
 // Ledger is a contract's ordered list of records.
 type Ledger interface {
 	// Log appends a record.
@@ -143,7 +154,14 @@ func (c *ContractExecution) Run() error {
 
 // Connect adds a partner to the contract's partners collection.
 func (c *ContractExecution) Connect(address, pid string, profile, nodeKey any) error {
-	return c.partnersDB.Document(pid).Update(map[string]any{"address": address, "profile": profile, "nodeKey": nodeKey})
+	return c.partnersDB.Document(pid).Update(map[string]any{"address": address, "profile": profile,
+		"nodeKey": nodeKey, "role": RolePartner})
+}
+
+// connectGuest adds a guest to the contract's partners collection.
+func (c *ContractExecution) connectGuest(pid string, b *identity.JoinBody) error {
+	return c.partnersDB.Document(pid).Update(map[string]any{"address": b.Node, "profile": b.Profile,
+		"nodeKey": b.NodeKey.Hex(), "role": RoleGuest, "host": b.Host.Hex()})
 }
 
 // Call executes a contract method. With shouldLog the record is logged and
@@ -216,6 +234,14 @@ func (c *ContractExecution) apply(index uint64, record Record) (Outcome, error) 
 		}
 		out.Value, err = c.create(record)
 	case ActionWrite:
+		// A transaction from consensus must come from a partner or a guest.
+		if known, kerr := c.partnersDB.Has(record.Agent); kerr != nil {
+			return out, kerr
+		} else if !known && record.Tx != nil {
+			out.Result, err = c.state.Advance()
+			out.Err = fmt.Errorf("%s: %w", record.Agent, ErrNotPartner)
+			break
+		}
 		if record.Tx != nil {
 			if g := record.Tx.Grant(); g != nil {
 				// Signed by the agent's node: the grant must be for this code
@@ -277,6 +303,8 @@ func (c *ContractExecution) checkGrant(agent string, g *identity.Grant) error {
 // decide applies a membership change (§10 of docs/consensus.md):
 //   - join: the contract's approve_partner(joiner), called as the joiner;
 //     approved if the contract has no such function;
+//   - a guest's join: the contract's approve_guest(joiner), called as the
+//     joiner; refused if the contract has no such function;
 //   - leave: always approved for oneself; removing another member calls the
 //     contract's approve_removal(member) as the requester, and is refused if
 //     the contract has no such function;
@@ -298,6 +326,13 @@ func (c *ContractExecution) decide(record Record) (bool, common.Result, error) {
 	var res common.Result
 	switch b := body.(type) {
 	case *identity.JoinBody:
+		if b.Guest {
+			approved, res, err = c.state.Decide(agent.Hex(), common.MethodApproveGuest, agent, record.Timestamp, id, false)
+			if err == nil && approved {
+				err = c.connectGuest(agent.Hex(), b)
+			}
+			break
+		}
 		approved, res, err = c.state.Decide(agent.Hex(), common.MethodApprovePartner, agent, record.Timestamp, id, true)
 		if err == nil && approved {
 			err = c.Connect(b.Node, agent.Hex(), b.Profile, b.NodeKey.Hex())

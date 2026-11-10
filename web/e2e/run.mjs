@@ -1,6 +1,6 @@
 // End-to-end test of the web interface in headless Chrome, with Chrome's
 // virtual passkey authenticator in place of a phone. Two nodes, two users:
-// create an identity, deploy from source, write, read, invite, join, sign in
+// create an identity, deploy from source, write, read, invite, join, join as a guest, sign in
 // on a new device; and an app on another site that deploys a chat, posts
 // silently where the user allowed it, and asks the user for the rest.
 // Run it with web/e2e/run.sh, which builds and starts the nodes.
@@ -253,6 +253,30 @@ try {
   n = boxes.length;
   line = await appClick(pApp2, 'post');
   check('then it posts silently', line === 'post 1' && since(n).length === 0, `${line} ${since(n)}`);
+
+  // Bob joins that chat as a guest, from node B: his node keeps no copy, and sends his
+  // transactions and reads to Alice's node.
+  await pb.bringToFront();
+  const chatInvite = await pb.evaluate((contract, node, agent) => import('./app.mjs')
+    .then((m) => m.encodeInvite({ contract, node, agent })), chat, A, alice.agent);
+  await pb.goto(`${B}/#join=${chatInvite}`);
+  await pb.waitForFunction((c) => document.querySelector('#j-contract').value === c, { timeout: 30000 }, chat);
+  await pb.click('#j-guest');
+  n = boxes.length;
+  await pb.click('#j-submit');
+  await waitText(pb, '#join-status', /Joined|refused/, 60000);
+  check('bob joined the chat as a guest, one approval', /Joined/.test(await text(pb, '#join-status'))
+    && since(n).length === 1 && /join as a guest/.test(since(n)[0]), `${await text(pb, '#join-status')} ${since(n)}`);
+  await pb.click('#join-status a');
+  await pb.waitForSelector('#contract-area:not(.hidden)');
+  check('the page shows a guest, with no invite', /guest/.test(await text(pb, '#details'))
+    && await pb.$eval('#invite-card', (c) => c.classList.contains('hidden')), await text(pb, '#details'));
+  r = await runFn(pb, '#reads', 'count', []);
+  check('the guest reads count -> 2, through the host', r.text === '2', r.text);
+  r = await runFn(pb, '#writes', 'post', ['hi from a guest']);
+  check('the guest posts -> 2', r.text === '2', r.text);
+  r = await runFn(pb, '#reads', 'count', []);
+  check('count -> 3', r.text === '3', r.text);
 
   // Alice disconnects the app on her node: its silent post now needs her again.
   await pa.bringToFront();
