@@ -1,37 +1,164 @@
-// Shared code of the web interface's pages: connecting the wallet, small DOM
-// helpers, and forms built from a contract's ABI.
+// Shared code of the web interface's pages: the agent's identity in this
+// browser (the root passkey, and this page's own key), small DOM helpers, and
+// forms built from a contract's ABI.
 //
 // Everything shown comes from the node or from contracts, so it is always
 // inserted as text (textContent), never as HTML.
 import { Ibc, IbcError } from './ibc.mjs';
+import {
+  addressOf, choosePasskey, createPasskey, fromHex, newP256Key, nonce, passkeySigner, signBatch, sign, toHex,
+} from './keys.mjs';
 
 export { IbcError };
 
-// How long a read session lasts. The node accepts up to 7 days.
-export const SESSION_HOURS = 8;
+const ZERO_HASH = `0x${'0'.repeat(64)}`;
+
+/** Can this browser use passkeys on this page? (https, or http://localhost) */
+export function passkeysAvailable() {
+  return Boolean(window.PublicKeyCredential) && window.isSecureContext;
+}
+
+// The identity this browser keeps for this node:
+//   { agent, root: { credentialId, publicKey }, pageKey: { privateKey, publicKey } }
+// The root passkey stays in the phone or computer; only its id and public key
+// are kept here. The page key is this page's own key (an app key the user
+// approved for every contract, to read); its private key cannot be extracted.
+
+export const loadIdentity = () => store('get', 'current');
+export const saveIdentity = (identity) => store('put', 'current', identity);
+export const forgetIdentity = () => store('delete', 'current');
+
+async function store(op, id, value) {
+  try {
+    const db = await new Promise((resolve, reject) => {
+      const open = indexedDB.open('ibc', 3);
+      open.onupgradeneeded = () => {
+        for (const old of ['sessions', 'identity']) {
+          if (open.result.objectStoreNames.contains(old)) open.result.deleteObjectStore(old);
+        }
+        open.result.createObjectStore('identity');
+      };
+      open.onsuccess = () => resolve(open.result);
+      open.onerror = () => reject(open.error);
+    });
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction('identity', op === 'get' ? 'readonly' : 'readwrite').objectStore('identity');
+      const req = op === 'put' ? tx.put(value, id) : tx[op](id);
+      req.onsuccess = () => resolve(req.result ?? null);
+      req.onerror = () => reject(req.error);
+    }).finally(() => db.close());
+  } catch {
+    return null;
+  }
+}
+
+/** The root passkey as a signer, showing a "Sign request" box while it asks. */
+export const rootSigner = (identity) => explained(passkeySigner({
+  credentialId: identity.root.credentialId, publicKey: fromHex(identity.root.publicKey),
+}));
+
+/** Connects to this node as the kept identity: the page key reads, the root signs. */
+export async function connect(identity) {
+  const ibc = await Ibc.connect(location.origin, { agent: identity.agent, root: rootSigner(identity), appKey: identity.pageKey });
+  showKeys(ibc);
+  return ibc;
+}
+
+/** The consent for this page's key: read every contract, call nothing silently. */
+function pageConsent(agent, pageKey) {
+  return {
+    agent, app: location.origin, appKey: toHex(pageKey.publicKey), codeHash: ZERO_HASH, read: true, functions: [], nonce: nonce(),
+  };
+}
 
 /**
- * Connects to this node as the agent of the browser wallet's account. Reads
- * are signed by a read session, kept in this browser (IndexedDB) so that it
- * outlives the page: the wallet is asked once, when the first read needs it.
+ * Creates a new identity: the root passkey, and its registration on this node
+ * together with this page's key. Two approvals: making the passkey, and one
+ * signature by it over both.
  */
-export async function connect() {
-  if (!window.ethereum) {
-    throw new Error('No browser wallet was found. Install one (see the list below), then reload this page.');
+export async function createIdentity(name) {
+  const root = await passkeyStep('Create passkey: identity',
+    () => createPasskey({ userName: `${name} · ibc (${location.host})` }));
+  const agent = addressOf(root.publicKey);
+  const identity = { agent, root: { credentialId: root.credentialId, publicKey: toHex(root.publicKey) }, pageKey: await newP256Key() };
+  const ibc = await Ibc.connect(location.origin, { agent, root: rootSigner(identity), appKey: identity.pageKey });
+  const registration = ibc.registration(root.credentialId);
+  const consent = pageConsent(agent, identity.pageKey);
+  const [regEnv, consentEnv] = await signBatch(rootSigner(identity), [
+    { type: 'Registration', message: registration },
+    { type: 'Consent', message: consent },
+  ]);
+  // Register first, then let the page key read.
+  if (await registerWith(ibc, registration, regEnv) !== true) throw new IbcError('the node refused the registration');
+  await ibc.registerApp({ consent, signature: consentEnv });
+  await saveIdentity(identity);
+  ibc.close();
+  return { identity, ibc: await connect(identity) };
+}
+
+/**
+ * Registers a kept identity again (when the node no longer knows it): its
+ * registration and this page's key, in one approval.
+ */
+export async function reregister(identity) {
+  const ibc = await Ibc.connect(location.origin, { agent: identity.agent, root: rootSigner(identity), appKey: identity.pageKey });
+  const registration = ibc.registration(identity.root.credentialId);
+  const consent = pageConsent(identity.agent, identity.pageKey);
+  const [regEnv, consentEnv] = await signBatch(rootSigner(identity), [
+    { type: 'Registration', message: registration },
+    { type: 'Consent', message: consent },
+  ]);
+  if (await registerWith(ibc, registration, regEnv) !== true) throw new IbcError('the node refused the registration');
+  await ibc.registerApp({ consent, signature: consentEnv });
+  ibc.close();
+  return connect(identity);
+}
+
+/** Registers, waiting for the node's answer on a stream the root signs once. */
+async function registerWith(ibc, registration, signature) {
+  // The page key cannot open the stream before the page is approved, so the
+  // registration's answer is read back instead.
+  await ibc.request('PUT', 'register_agent', { body: { registration, signature } });
+  for (let i = 0; i < 100; i++) {
+    if (await ibc.exists()) return true;
+    await new Promise((r) => { setTimeout(r, 100); });
   }
-  const ibc = await Ibc.connect(location.origin, explained(Ibc.wallet(window.ethereum)));
-  window.ethereum.on?.('accountsChanged', () => location.reload());
-  if (Ibc.sessionsAvailable()) {
-    ibc.sessionHours = SESSION_HOURS;
-    const id = `${location.origin} ${ibc.agent.toLowerCase()}`;
-    ibc.useSession(await sessionStore('get', id));
-    ibc.onSession((s) => {
-      sessionStore(s ? 'put' : 'delete', id, s ? { session: s.session, signature: s.signature, key: s.key } : undefined);
-      showSession(ibc);
-    });
+  return false;
+}
+
+/**
+ * Signs in on this browser with an identity registered on this node, from
+ * its root passkey (synced to this device, or on a phone nearby). Two
+ * approvals: choosing the passkey, and approving this page's key with it.
+ */
+export async function signIn() {
+  const credentialId = await passkeyStep('Choose your identity passkey', () => choosePasskey());
+  let info;
+  try {
+    info = await Ibc.agentInfo(location.origin, { credential: credentialId });
+  } catch {
+    throw new IbcError('This passkey is not an ibc identity on this node.');
   }
-  showSession(ibc);
-  return ibc;
+  if (info.rootScheme !== 'webauthn' || addressOf(fromHex(info.rootKey)) !== info.agent) {
+    throw new IbcError('This identity has no passkey root on this node.');
+  }
+  const identity = { agent: info.agent, root: { credentialId, publicKey: info.rootKey }, pageKey: await newP256Key() };
+  const consent = pageConsent(info.agent, identity.pageKey);
+  const { envelope } = await sign(rootSigner(identity), 'Consent', consent);
+  const ibc = await Ibc.connect(location.origin, { agent: info.agent, appKey: identity.pageKey });
+  await ibc.registerApp({ consent, signature: envelope });
+  await saveIdentity(identity);
+  return { identity, ibc: await connect(identity) };
+}
+
+/** Shows the sign-out button in the header (#keys). */
+function showKeys(ibc) {
+  const holder = document.querySelector('#keys');
+  if (!holder) return;
+  holder.replaceChildren(el('button', {
+    class: 'link', title: 'Forget your identity in this browser (your passkey stays on your devices)',
+    onclick: async () => { ibc.close(); await forgetIdentity(); location.href = './'; },
+  }, 'Sign out'));
 }
 
 // The node's storage: the size of its data folder, from node_info (public).
@@ -63,24 +190,33 @@ async function showStorage() {
 }
 showStorage();
 
-// Explaining signatures. Every time the wallet is asked to sign, a message
-// box says in plain words what the signature does. It has no close button:
-// it closes when the wallet answers, whether the user signed or declined.
+// Explaining signatures. Every time a passkey is asked to sign, a message box
+// says in a few words what is signed. It has no close button: it closes when
+// the passkey answers, whether the user approved or cancelled.
 
-/** Wraps a wallet signer so that each signature request is explained first. */
-function explained(signer) {
+/** Wraps a signer so that each signature request is shown first. */
+export function explained(signer) {
   return {
-    getAddress: () => signer.getAddress(),
-    async signTypedData(domain, types, message) {
-      const primaryType = Object.keys(types).find((t) => t !== 'EIP712Domain');
-      const close = openSigningBox(explain(primaryType, message));
+    ...signer,
+    async signDigest(digest, about) {
+      const close = openSigningBox(explain(about?.type, about?.message ?? {}, about?.messages));
       try {
-        return await signer.signTypedData(domain, types, message);
+        return await signer.signDigest(digest, about);
       } finally {
         close();
       }
     },
   };
+}
+
+/** Shows the box while a passkey is created or chosen. */
+async function passkeyStep(text, fn) {
+  const close = openSigningBox(text);
+  try {
+    return await fn();
+  } finally {
+    close();
+  }
 }
 
 let signingBox;
@@ -91,7 +227,7 @@ function openSigningBox(text) {
   if (!signingBox) {
     signingBox = el('dialog', { class: 'signing', 'aria-labelledby': 'signing-title' });
     // No way to dismiss it: Escape is ignored, and if the browser closes it
-    // anyway while the wallet is still open, it comes back.
+    // anyway while the passkey prompt is still open, it comes back.
     signingBox.addEventListener('cancel', (e) => e.preventDefault());
     signingBox.addEventListener('close', () => { if (openBoxes.length) signingBox.showModal(); });
     document.body.append(signingBox);
@@ -126,66 +262,35 @@ const values = (v) => Object.values(v ?? {}).map((x) => (typeof x === 'string' ?
 const words = (...parts) => `Sign request: ${parts.filter((p) => p !== '' && p !== undefined).join(' ')}`;
 
 /** One line saying what is being signed, by its EIP-712 type. */
-function explain(type, m) {
+function explain(type, m, batch) {
   const body = parseBody(m.body ?? '');
   const self = String(body.member).toLowerCase() === String(m.agent).toLowerCase();
+  if (type === 'Batch') {
+    if (batch?.some((b) => b.type === 'Registration')) return words('create identity on', location.host);
+    const tx = batch?.find((b) => b.type === 'Transaction');
+    if (tx) return explain('Transaction', tx.message);
+    const consent = batch?.find((b) => b.type === 'Consent');
+    if (consent) return explain('Consent', consent.message);
+    const query = batch?.find((b) => b.type === 'Query');
+    if (query) return explain('Query', query.message);
+    const device = batch?.find((b) => b.type === 'Device');
+    if (device) return explain('Device', device.message);
+    return words(`${batch?.length ?? 0} requests`);
+  }
   switch (`${type}:${m.kind ?? m.action ?? ''}`) {
     case 'Registration:': return words('register on', location.host);
-    case 'Session:': return words('read session until',
-      new Date(Number(m.expires) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+    case 'Consent:': return words('allow', new URL(m.app).host);
+    case 'Device:': return words('connect this browser of', new URL(m.app).host);
+    case 'Grant:': return words('let your node call', m.functions.join(' '));
     case 'Query:contract_read': return words('read', body.method, values(body.values));
-    case 'Query:get_contracts': return words('list contracts');
-    case 'Query:get_contract': return words('open contract', short(m.contract));
-    case 'Query:stream': return words('open events');
+    case 'Query:revoke_app': return words('disconnect app');
     case 'Transaction:deploy': return words('deploy', body.name, values(Object.hasOwn(body, 'constructor') ? body.constructor : {}));
     case 'Transaction:call': return words(body.method, values(body.values));
     case 'Transaction:join': return words('join', short(m.contract));
     case 'Transaction:leave': return self ? words('leave', short(m.contract)) : words('remove', short(body.member));
     case 'Transaction:rotate_key': return words('move to', body.node);
-    default: return words(type, m.kind ?? m.action ?? '');
+    default: return words(type ?? '', m.kind ?? m.action ?? '');
   }
-}
-
-/** Reads or writes the kept sessions; any storage failure means "no session kept". */
-async function sessionStore(op, id, value) {
-  try {
-    const db = await new Promise((resolve, reject) => {
-      const open = indexedDB.open('ibc', 1);
-      open.onupgradeneeded = () => open.result.createObjectStore('sessions');
-      open.onsuccess = () => resolve(open.result);
-      open.onerror = () => reject(open.error);
-    });
-    return await new Promise((resolve, reject) => {
-      const store = db.transaction('sessions', op === 'get' ? 'readonly' : 'readwrite').objectStore('sessions');
-      const req = op === 'put' ? store.put(value, id) : store[op](id);
-      req.onsuccess = () => resolve(req.result ?? null);
-      req.onerror = () => reject(req.error);
-    }).finally(() => db.close());
-  } catch {
-    return null;
-  }
-}
-
-/** Shows the read session in the header (#session), with a button to end it. */
-function showSession(ibc) {
-  const holder = document.querySelector('#session');
-  if (!holder) return;
-  if (!Ibc.sessionsAvailable()) {
-    holder.textContent = 'Reads are signed one by one (this page is not secure: use https)';
-    return;
-  }
-  if (!ibc.session) {
-    holder.textContent = 'No reading session';
-    return;
-  }
-  const until = new Date(ibc.session.session.expires * 1000).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' });
-  holder.replaceChildren(`Reading session until ${until} · `,
-    el('button', { class: 'link', title: 'Forget the session key: the next read asks your wallet again', onclick: () => ibc.endSession() }, 'End'));
-}
-
-/** A note for a status line: whether the wallet will ask before reading. */
-export function readNote(ibc) {
-  return ibc.sessionValid() || !ibc.sessionHours ? '' : ' (approve a reading session in your wallet)';
 }
 
 export const $ = (selector, root = document) => root.querySelector(selector);
@@ -224,9 +329,10 @@ export async function busy(button, statusNode, fn) {
   }
 }
 
-/** A readable message for an error from the wallet, the node or the network. */
+/** A readable message for an error from a passkey, the node or the network. */
 export function errorText(err) {
-  if (err?.code === 4001) return 'You declined the signature in your wallet.';
+  if (err?.name === 'NotAllowedError') return 'The passkey request was cancelled or timed out.';
+  if (err?.name === 'InvalidStateError') return 'This device already has this passkey.';
   if (err instanceof TypeError && /fetch/i.test(err.message)) return 'The node could not be reached.';
   return err?.message ?? String(err);
 }
@@ -363,7 +469,7 @@ export function functionForm(fn, actionLabel, run) {
   const inputs = paramInputs(fn.inputs);
   const result = el('pre', { class: 'result hidden' });
   const button = el('button', { type: 'submit', class: isRead(fn) ? 'secondary' : '' }, actionLabel);
-  const form = el('form', { class: 'fn' },
+  const form = el('form', { class: 'fn', 'data-fn': fn.name },
     el('h3', {}, fn.name),
     el('div', { class: 'sig' }, signature(fn)),
     inputs.node, button, result);
@@ -371,7 +477,7 @@ export function functionForm(fn, actionLabel, run) {
     event.preventDefault();
     button.disabled = true;
     result.className = 'result';
-    result.textContent = isRead(fn) ? 'Reading…' : 'Sending… (sign the transaction in your wallet)';
+    result.textContent = isRead(fn) ? 'Reading…' : 'Sending… (approve with your passkey)';
     try {
       const value = await run(inputs.read());
       result.textContent = pretty(value);

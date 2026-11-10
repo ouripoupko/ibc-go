@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	ethcommon "github.com/ethereum/go-ethereum/common"
@@ -24,46 +25,23 @@ func testTx(agent ethcommon.Address) Transaction {
 	}
 }
 
-func TestSignAndVerify(t *testing.T) {
+// TestTransactionIDUnchanged: a transaction's id is its EIP-712 digest, the
+// value ethers.js computes for the same transaction, whoever signs it.
+func TestTransactionIDUnchanged(t *testing.T) {
 	key, _ := crypto.HexToECDSA(testKeyHex)
-	agent := Address(key)
-	stx, err := Sign(testTx(agent), key)
+	id, err := testTx(RootAddress(key)).Hash()
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := stx.Verify()
-	if err != nil {
-		t.Fatal(err)
-	}
-	want, _ := stx.Tx.Hash()
-	if id != want {
-		t.Fatalf("id %s, want %s", id, want)
-	}
-	t.Logf("agent %s digest %s signature %x", agent.Hex(), id.Hex(), []byte(stx.Signature))
-
-	// v = 0/1 is accepted as well as 27/28.
-	low := append([]byte(nil), stx.Signature...)
-	low[64] -= 27
-	if _, err := (SignedTx{Tx: stx.Tx, Signature: low}).Verify(); err != nil {
-		t.Fatalf("v=0/1: %v", err)
-	}
-
-	tampered := stx
-	tampered.Tx.Nonce = "other"
-	if _, err := tampered.Verify(); !errors.Is(err, ErrBadSignature) {
-		t.Fatalf("tampered transaction: %v", err)
-	}
-	other, _ := crypto.GenerateKey()
-	impostor := stx
-	impostor.Tx.Agent = Address(other)
-	if _, err := impostor.Verify(); !errors.Is(err, ErrBadSignature) {
-		t.Fatalf("wrong agent: %v", err)
+	if got, want := id.Hex(), "0x87226137f43f8c410a76fcfbda7f06cb6d8b2f119517fff2b7d53d1cc145c150"; got != want {
+		t.Fatalf("id %s, want %s", got, want)
 	}
 }
 
 func TestTransactionChecks(t *testing.T) {
-	key, _ := crypto.GenerateKey()
-	agent := Address(key)
+	root, _ := crypto.GenerateKey()
+	agent := RootAddress(root)
+	write := Secp256k1Signer{Key: root} // the root key signs transactions
 	cases := map[string]Transaction{
 		"unknown kind":          {Kind: "mint", Contract: "c", Agent: agent, Body: "{}"},
 		"deploy with contract":  {Kind: KindDeploy, Contract: "c", Agent: agent, Body: `{"code":"60","abi":[],"node":"u","nodeKey":"0x0000000000000000000000000000000000000001"}`},
@@ -73,7 +51,7 @@ func TestTransactionChecks(t *testing.T) {
 		"bad JSON":              {Kind: KindCall, Contract: "c", Agent: agent, Body: `{`},
 	}
 	for name, tx := range cases {
-		stx, err := Sign(tx, key)
+		stx, err := SignTx(tx, write)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -83,7 +61,7 @@ func TestTransactionChecks(t *testing.T) {
 	}
 	ok := Transaction{Kind: KindCall, Contract: "c", Agent: agent, Nonce: NewNonce(),
 		Body: `{"method":"increment","values":{"amount":5}}`}
-	stx, _ := Sign(ok, key)
+	stx, _ := SignTx(ok, write)
 	if _, err := stx.Verify(); err != nil {
 		t.Fatal(err)
 	}
@@ -96,17 +74,24 @@ func TestTransactionChecks(t *testing.T) {
 func TestRegistration(t *testing.T) {
 	key, _ := crypto.GenerateKey()
 	node, _ := crypto.GenerateKey()
-	reg := Registration{Agent: Address(key), Node: "http://n", NodeKey: Address(node), Nonce: NewNonce()}
-	sr, err := SignRegistration(reg, key)
+	reg := Registration{Agent: RootAddress(key), Node: "http://n", NodeKey: Address(node), Nonce: NewNonce()}
+	sr, err := SignRegistration(reg, Secp256k1Signer{Key: key})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := sr.Verify(); err != nil {
-		t.Fatal(err)
+	if _, signer, err := sr.Verify(); err != nil || signer.Agent != reg.Agent {
+		t.Fatal(signer, err)
 	}
 	sr.Registration.Node = "http://evil"
-	if _, err := sr.Verify(); !errors.Is(err, ErrBadSignature) {
+	if _, _, err := sr.Verify(); !errors.Is(err, ErrBadSignature) {
 		t.Fatalf("tampered registration: %v", err)
+	}
+	// Only the root key registers: not the node, even under a grant.
+	cert, _ := CertifyGrant(Grant{Agent: reg.Agent, NodeKey: Address(node), CodeHash: ethcommon.HexToHash("0x01"),
+		Functions: []string{"m"}, Nonce: "n"}, Secp256k1Signer{Key: key})
+	byNode, _ := SignRegistration(reg, Secp256k1Signer{Key: node, Cert: cert})
+	if _, _, err := byNode.Verify(); err == nil || !strings.Contains(err.Error(), "signed by the root key") {
+		t.Fatalf("registration by the node: %v", err)
 	}
 }
 

@@ -1,0 +1,18 @@
+{
+  "registration": {
+    "agent": "0x332537271b63eF4b1F89edE8E4F70C788De3d575",
+    "node": "http://localhost",
+    "nodeKey": "0x0000000000000000000000000000000000000000",
+    "credential": "0xd32a446bb7936a5142e6f3383bc26fdcdcc5fe38177fec912ef17be9475a4455",
+    "nonce": "chrome"
+  },
+  "digest": "0x973e9a09c47531e1982ffab01444d35e762546244643e35f21ff7e6dc3d6d7c5",
+  "signature": {
+    "scheme": "webauthn",
+    "key": "0x049ad42628a5267eb78bdc1cceabaf8d7fc279d5747bdb6607476d9647dfe147ff7e376dfe7a3a8249e76aa10718e108587c1b37e389c54b49babbd5554c629655",
+    "sig": "0x304402202af4ec98bb819c677c7927f68d7213ef23657317ed69d6735b62f835faf4b30e02202ef9c4fb182c22ccf996e8933ea13e1d22ccf6bc1dff7cccc2d7dd1d59ed2ad8",
+    "authenticatorData": "0x49960de5880e8c687434170f6476605b8fe4aeb9a28632c7995cf3ba831d97630500000002",
+    "clientDataJSON": "{\"type\":\"webauthn.get\",\"challenge\":\"lz6aCcR1MeGYL_qwFETTXnYlRiRGQ-NfIf9-bcPW18U\",\"origin\":\"http://localhost:2798\",\"crossOrigin\":false,\"other_keys_can_be_added_here\":\"do not compare clientDataJSON against a template. See https://goo.gl/yabPex\"}"
+  },
+  "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/157.0.0.0 Safari/537.36"
+}

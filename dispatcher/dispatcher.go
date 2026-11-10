@@ -4,6 +4,7 @@ package dispatcher
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -13,12 +14,16 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
+	"net/url"
+	"slices"
 	"strings"
 	"time"
 
 	ethcommon "github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 
 	"github.com/ouripoupko/ibc-go/common"
+	"github.com/ouripoupko/ibc-go/compiler"
 	"github.com/ouripoupko/ibc-go/consensus"
 	"github.com/ouripoupko/ibc-go/execution"
 	"github.com/ouripoupko/ibc-go/identity"
@@ -28,6 +33,7 @@ import (
 const (
 	actionNodeInfo      = "node_info"
 	actionIsExistAgent  = "is_exist_agent"
+	actionAgentInfo     = "agent_info"
 	actionGetContracts  = "get_contracts"
 	actionGetContract   = "get_contract"
 	actionJoinContract  = "join_contract"
@@ -35,6 +41,10 @@ const (
 	actionRotateKey     = "rotate_key"
 	actionRead          = "contract_read"
 	actionStream        = "stream"
+	actionRegisterApp   = "register_app"
+	actionGetApps       = "get_apps"
+	actionRevokeApp     = "revoke_app"
+	actionCompile       = "compile"
 )
 
 // maxBody bounds a request body.
@@ -48,20 +58,39 @@ type Dispatcher struct {
 	navigator *execution.Navigator
 	consensus consensus.Protocol
 	broker    *Broker
+	key       *ecdsa.PrivateKey // the node's key: signs calls silently, under grants
 	nodeKey   ethcommon.Address
 	storage   func() (int64, bool)
+	compiler  *compiler.Solc
+	apps      *apps
 	done      <-chan struct{}
 	mux       *http.ServeMux
 	guard     *guard
 }
 
-// New returns a Dispatcher. nodeKey is the address of the node's key, which
-// agents authorize when they register. storage reports the size of the
-// node's data folder, if it has one. Event streams end when done is closed.
-func New(navigator *execution.Navigator, protocol consensus.Protocol, broker *Broker,
-	nodeKey ethcommon.Address, storage func() (int64, bool), done <-chan struct{}) *Dispatcher {
-	d := &Dispatcher{navigator: navigator, consensus: protocol, broker: broker, nodeKey: nodeKey, storage: storage, done: done,
-		guard: newGuard(nodeKey)}
+// Options are a Dispatcher's dependencies besides the node's parts.
+type Options struct {
+	// NodeKey is the node's key, which agents authorize when they register,
+	// and with which the node signs calls silently, under their grants.
+	NodeKey *ecdsa.PrivateKey
+	// Storage reports the size of the node's data folder, if it has one.
+	Storage func() (int64, bool)
+	// Apps keeps the apps agents connected (AppsCollection).
+	Apps common.Collection
+	// Compiler compiles Solidity source; nil: the node cannot compile.
+	Compiler *compiler.Solc
+}
+
+// New returns a Dispatcher. Event streams end when done is closed.
+func New(navigator *execution.Navigator, protocol consensus.Protocol, broker *Broker, opts Options,
+	done <-chan struct{}) *Dispatcher {
+	storage := opts.Storage
+	if storage == nil {
+		storage = func() (int64, bool) { return 0, false }
+	}
+	d := &Dispatcher{navigator: navigator, consensus: protocol, broker: broker, key: opts.NodeKey,
+		nodeKey: identity.Address(opts.NodeKey), storage: storage, compiler: opts.Compiler,
+		apps: &apps{coll: opts.Apps}, done: done, guard: newGuard()}
 	d.mux = http.NewServeMux()
 	d.mux.HandleFunc("/ibc/app", d.handleApp)
 	d.mux.HandleFunc("/ibc/app/{path...}", d.handleApp)
@@ -115,7 +144,7 @@ func (d *Dispatcher) handleApp(w http.ResponseWriter, r *http.Request) {
 		slog.Info("request", "hash", short(record.HashCode), "agent", record.Agent,
 			"action", record.Action, "contract", short(record.Contract), "method", record.Method)
 	}
-	reply, err := d.handle(r.Context(), record, body, r.URL.Query().Get("auth"))
+	reply, err := d.handle(r.Context(), record, body, r.URL.Query())
 	if err != nil {
 		if record.Action != execution.ActionConsent {
 			slog.Warn("request failed", "hash", short(record.HashCode), "action", record.Action, "err", err)
@@ -125,10 +154,12 @@ func (d *Dispatcher) handleApp(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, reply)
 }
 
-// handle runs an action. auth is the signed query of a GET, from the URL.
+// handle runs an action. query is the URL's parameters: for a GET, the
+// signed query is its "auth".
 // Errors in the request itself come back as JSON values with status 200,
 // not as HTTP errors.
-func (d *Dispatcher) handle(ctx context.Context, record execution.Record, body []byte, auth string) (any, error) {
+func (d *Dispatcher) handle(ctx context.Context, record execution.Record, body []byte, query url.Values) (any, error) {
+	auth := query.Get("auth")
 	type route struct{ method, action string }
 	switch (route{record.Type, record.Action}) {
 	case route{http.MethodGet, actionNodeInfo}:
@@ -141,14 +172,49 @@ func (d *Dispatcher) handle(ctx context.Context, record execution.Record, body [
 	case route{http.MethodGet, actionIsExistAgent}:
 		return d.navigator.AgentExists(record.Agent)
 
+	case route{http.MethodGet, actionAgentInfo}:
+		agent := record.Agent
+		if credential := query.Get("credential"); agent == "" && credential != "" {
+			found, ok, err := d.navigator.AgentByCredential(credential)
+			if err != nil || !ok {
+				return message("no agent with this passkey on this node"), err
+			}
+			agent = found
+		}
+		info, ok, err := d.navigator.AgentInfo(agent)
+		if err != nil || !ok {
+			return message("no such agent on this node"), err
+		}
+		return info, nil
+
 	case route{http.MethodGet, actionGetContracts}:
-		if err := d.ownerQuery(auth, record, actionGetContracts); err != nil {
+		c, err := d.authorizeURL(auth, record, actionGetContracts)
+		if err != nil {
 			return nil, err
 		}
-		return d.navigator.Contracts(record.Agent)
+		list, err := d.navigator.Contracts(record.Agent)
+		if err != nil || c.owner() {
+			return list, err
+		}
+		// An app sees the contracts it may read.
+		mine := []map[string]any{}
+		for _, summary := range list {
+			code, _ := summary[common.KeyCode].(string)
+			if hash, err := identity.CodeHash(code); err == nil && c.app.permission(hash).Read {
+				mine = append(mine, summary)
+			}
+		}
+		return mine, nil
 
 	case route{http.MethodGet, actionGetContract}:
-		if err := d.ownerQuery(auth, record, actionGetContract); err != nil {
+		c, err := d.authorizeURL(auth, record, actionGetContract)
+		if err != nil {
+			return nil, err
+		}
+		if err := d.canRead(c, record.Contract); err != nil {
+			if errors.Is(err, execution.ErrUnknownContract) {
+				return map[string]any{}, nil
+			}
 			return nil, err
 		}
 		summary, ok, err := d.navigator.Contract(record.Agent, record.Contract)
@@ -164,7 +230,60 @@ func (d *Dispatcher) handle(ctx context.Context, record execution.Record, body [
 		return d.submit(record, body, identity.KindDeploy)
 
 	case route{http.MethodPost, execution.ActionWrite}:
+		if sq, err := parseQuery(body); err != nil || sq != nil {
+			if err != nil {
+				return nil, err
+			}
+			return d.silentWrite(record, sq)
+		}
 		return d.submit(record, body, identity.KindCall)
+
+	case route{http.MethodPut, actionRegisterApp}:
+		return d.registerApp(record, body)
+
+	case route{http.MethodGet, actionGetApps}:
+		c, err := d.authorizeURL(auth, record, actionGetApps)
+		if err != nil {
+			return nil, err
+		}
+		if !c.owner() {
+			return nil, fmt.Errorf("only agent %s may ask this", record.Agent)
+		}
+		return d.apps.list(record.Agent)
+
+	case route{http.MethodPut, actionRevokeApp}:
+		sq, err := parseQuery(body)
+		if err != nil {
+			return nil, err
+		}
+		c, err := d.authorize(sq, actionRevokeApp, record.Agent, "")
+		if err != nil {
+			return nil, err
+		}
+		if c.app != nil {
+			return nil, errors.New("revoking an app needs the root key")
+		}
+		var req struct {
+			App string `json:"app"`
+		}
+		if err := json.Unmarshal([]byte(sq.Query.Body), &req); err != nil || req.App == "" {
+			return nil, errors.New("revoke_app body needs app (the app's site)")
+		}
+		return true, d.apps.remove(record.Agent, req.App)
+
+	case route{http.MethodPost, actionCompile}:
+		var req struct {
+			Source   string `json:"source"`
+			Contract string `json:"contract"`
+		}
+		if err := json.Unmarshal(body, &req); err != nil || req.Source == "" {
+			return nil, errors.New("compile needs {source, contract}")
+		}
+		res, err := d.compiler.Compile(ctx, req.Source, req.Contract)
+		if err != nil {
+			return nil, err
+		}
+		return res, nil
 
 	case route{http.MethodPut, actionLeaveContract}:
 		return d.submit(record, body, identity.KindLeave)
@@ -195,11 +314,14 @@ func (d *Dispatcher) handle(ctx context.Context, record execution.Record, body [
 		return d.consensus.Receive(ctx, record.Agent, record.Contract, body)
 
 	case route{http.MethodPost, actionRead}:
-		caller, err := d.readQuery(&record, body)
-		if err != nil {
+		if err := d.readQuery(&record, body); err != nil {
+			if errors.Is(err, execution.ErrUnknownContract) {
+				return message("no such contract"), nil
+			}
 			return nil, err
 		}
-		result, err := d.navigator.Read(record.Agent, caller, record)
+		// The read runs as the agent: msg.sender is the agent itself.
+		result, err := d.navigator.Read(record.Agent, record.Agent, record)
 		if errors.Is(err, execution.ErrUnknownContract) {
 			return message("no such contract"), nil
 		}
@@ -215,46 +337,148 @@ func (d *Dispatcher) handle(ctx context.Context, record execution.Record, body [
 	return nil, fmt.Errorf("unknown action %q for %s", record.Action, record.Type)
 }
 
-// ownerQuery checks the signed query of a call that only the agent itself
-// may make.
-func (d *Dispatcher) ownerQuery(auth string, record execution.Record, action string) error {
+// authorizeURL checks the signed query of a GET, from its auth parameter.
+func (d *Dispatcher) authorizeURL(auth string, record execution.Record, action string) (caller, error) {
 	sq, err := parseQuery([]byte(auth))
+	if err != nil {
+		return caller{}, err
+	}
+	return d.authorize(sq, action, record.Agent, record.Contract)
+}
+
+// callOf decodes the {method, values} body of a read or a silent write.
+func callOf(sq *identity.SignedQuery, method string) (identity.CallBody, error) {
+	var call identity.CallBody
+	if err := execution.DecodeJSON([]byte(sq.Query.Body), &call); err != nil {
+		return call, fmt.Errorf("%s body: %w", sq.Query.Action, err)
+	}
+	if call.Method == "" {
+		return call, fmt.Errorf("%s body needs a method", sq.Query.Action)
+	}
+	if method != "" && method != call.Method {
+		return call, fmt.Errorf("query calls %s, sent to %s", call.Method, method)
+	}
+	return call, nil
+}
+
+// readQuery checks a contract_read's signed query, and whether its signer may
+// read the contract without asking, and puts the call it signs into record.
+func (d *Dispatcher) readQuery(record *execution.Record, body []byte) error {
+	sq, err := parseQuery(body)
 	if err != nil {
 		return err
 	}
-	return d.guard.owner(sq, action, record.Agent, record.Contract)
-}
-
-// readQuery checks a contract_read's signed query and puts the call it signs
-// into record. It returns the signer, the read's msg.sender.
-func (d *Dispatcher) readQuery(record *execution.Record, body []byte) (string, error) {
-	sq, err := parseQuery(body)
+	c, err := d.authorize(sq, actionRead, record.Agent, record.Contract)
 	if err != nil {
-		return "", err
+		return err
 	}
-	if sq == nil {
-		return "", errNoQuery
-	}
-	signer, err := d.guard.check(*sq, actionRead, record.Agent, record.Contract)
+	call, err := callOf(sq, record.Method)
 	if err != nil {
-		return "", err
+		return err
 	}
-	var call struct {
-		Method string         `json:"method"`
-		Values map[string]any `json:"values"`
-	}
-	if err := execution.DecodeJSON([]byte(sq.Query.Body), &call); err != nil {
-		return "", fmt.Errorf("contract_read body: %w", err)
-	}
-	if call.Method == "" {
-		return "", errors.New("contract_read body needs a method")
-	}
-	if record.Method != "" && record.Method != call.Method {
-		return "", fmt.Errorf("query reads %s, sent to %s", call.Method, record.Method)
+	if err := d.canRead(c, record.Contract); err != nil {
+		return err
 	}
 	record.Method = call.Method
 	record.Message = execution.Message{Values: call.Values}
-	return signer.Hex(), nil
+	return nil
+}
+
+// silentWrite serves a call an app asks the node to sign without the user:
+// if the user's consent lets the app have this function called silently, the
+// node signs the call with its key, under the user's grant, and sends it to
+// consensus. Otherwise the app must send the user to the node's page.
+func (d *Dispatcher) silentWrite(record execution.Record, sq *identity.SignedQuery) (any, error) {
+	c, err := d.authorize(sq, execution.ActionWrite, record.Agent, record.Contract)
+	if err != nil {
+		return nil, err
+	}
+	call, err := callOf(sq, record.Method)
+	if err != nil {
+		return nil, err
+	}
+	if c.app == nil {
+		return nil, errors.New("the root key signs its own transactions: send a signed transaction")
+	}
+	hash, err := d.codeHash(c.agent, record.Contract)
+	if err != nil {
+		return nil, err
+	}
+	p := c.app.permission(hash)
+	if p.Grant == nil || !p.Grant.Grant.Allows(call.Method) || !slices.Contains(p.Functions, call.Method) {
+		return nil, fmt.Errorf("calling %s %w", call.Method, errNeedsApproval)
+	}
+	raw, err := json.Marshal(call)
+	if err != nil {
+		return nil, err
+	}
+	stx, err := identity.SignTx(identity.Transaction{Contract: record.Contract, Kind: identity.KindCall,
+		Agent: ethcommon.HexToAddress(c.agent), Nonce: sq.Query.Nonce, Body: string(raw)},
+		identity.Secp256k1Signer{Key: d.key, Cert: p.Grant})
+	if err != nil {
+		return nil, err
+	}
+	return d.consensus.SubmitTx(record.Agent, stx)
+}
+
+// registerApp records what the agent lets an app do: a consent signed by the
+// agent's root key, with the grant for the node if it names functions; or a
+// device: another browser of an app the agent approved, with the same
+// permissions.
+func (d *Dispatcher) registerApp(record execution.Record, body []byte) (any, error) {
+	var req struct {
+		Consent *identity.SignedConsent `json:"consent"`
+		Grant   *identity.Certificate   `json:"grant"`
+		Device  *identity.SignedDevice  `json:"device"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		return nil, fmt.Errorf("register_app: %w", err)
+	}
+	if req.Device != nil {
+		// Another browser of an app the agent approved: same permissions.
+		if err := req.Device.Verify(); err != nil {
+			return nil, fmt.Errorf("register_app: %w", err)
+		}
+		if req.Device.Device.Agent.Hex() != record.Agent {
+			return nil, fmt.Errorf("device of %s sent as %s", req.Device.Device.Agent.Hex(), record.Agent)
+		}
+		return true, d.apps.device(req.Device.Device)
+	}
+	if req.Consent == nil {
+		return nil, errors.New("register_app needs a consent or a device")
+	}
+	if err := req.Consent.Verify(); err != nil {
+		return nil, fmt.Errorf("register_app: %w", err)
+	}
+	c := req.Consent.Consent
+	if c.Agent.Hex() != record.Agent {
+		return nil, fmt.Errorf("consent of %s sent as %s", c.Agent.Hex(), record.Agent)
+	}
+	if registered, err := d.navigator.AgentExists(record.Agent); err != nil || !registered {
+		return nil, fmt.Errorf("agent %s is not registered here", record.Agent)
+	}
+	if c.CodeHash == (ethcommon.Hash{}) && len(c.Functions) > 0 {
+		return nil, errors.New("a consent for every contract only lets the app read")
+	}
+	if len(c.Functions) > 0 {
+		g := req.Grant
+		if g == nil {
+			return nil, errors.New("register_app: functions to call silently need the grant for this node")
+		}
+		if err := identity.VerifyGrant(g); err != nil {
+			return nil, fmt.Errorf("register_app: %w", err)
+		}
+		if g.Grant.Agent != c.Agent || g.Grant.NodeKey != d.nodeKey || g.Grant.CodeHash != c.CodeHash ||
+			!sameFunctions(g.Grant.Functions, c.Functions) {
+			return nil, errors.New("register_app: the grant does not match the consent, or names another node")
+		}
+	} else {
+		req.Grant = nil
+	}
+	if err := d.apps.consent(c, req.Grant); err != nil {
+		return nil, err
+	}
+	return true, nil
 }
 
 // registerAgent registers an agent from its signed registration: the agent
@@ -264,7 +488,7 @@ func (d *Dispatcher) registerAgent(record execution.Record, body []byte) (any, e
 	if err := json.Unmarshal(body, &sr); err != nil {
 		return nil, fmt.Errorf("register_agent: %w", err)
 	}
-	id, err := sr.Verify()
+	id, root, err := sr.Verify()
 	if err != nil {
 		return nil, fmt.Errorf("register_agent: %w", err)
 	}
@@ -276,7 +500,8 @@ func (d *Dispatcher) registerAgent(record execution.Record, body []byte) (any, e
 		return nil, fmt.Errorf("registration authorizes node key %s, this node's key is %s", reg.NodeKey.Hex(), d.nodeKey.Hex())
 	}
 	record.HashCode = id.Hex()
-	record.Message.Fields = map[string]any{"address": reg.Node, "nodeKey": reg.NodeKey.Hex()}
+	record.Message.Fields = map[string]any{"address": reg.Node, "nodeKey": reg.NodeKey.Hex(),
+		"rootKey": hexutil.Encode(root.Key), "rootScheme": sr.Signature.Scheme, "credential": hexutil.Encode(reg.Credential)}
 	if err := d.navigator.Submit(record.Agent, record); err != nil {
 		return nil, err
 	}
@@ -308,8 +533,9 @@ func (d *Dispatcher) submit(record execution.Record, body []byte, kind string) (
 
 // handleStream serves /stream?auth=<signed query>&auth=..., the Server-Sent
 // Events stream of replies. Each signed query, with action "stream", opens
-// the stream of its agent (its target), for its contract or for all of them;
-// only the agent itself may sign it.
+// the stream of its agent (its target), for its contract or for all of them.
+// The agent's root key may sign it, or an app the agent connected, which then
+// hears only about the contracts it has a permission for.
 func (d *Dispatcher) handleStream(w http.ResponseWriter, r *http.Request) {
 	auths := r.URL.Query()["auth"]
 	if len(auths) == 0 {
@@ -323,14 +549,30 @@ func (d *Dispatcher) handleStream(w http.ResponseWriter, r *http.Request) {
 		if err == nil && sq == nil {
 			err = errNoQuery
 		}
+		var c caller
 		if err == nil {
-			err = d.guard.owner(sq, actionStream, sq.Query.Target, sq.Query.Contract)
+			c, err = d.authorize(sq, actionStream, sq.Query.Target, sq.Query.Contract)
+		}
+		if err == nil && !c.owner() && sq.Query.Contract != "" {
+			err = d.canHear(c, sq.Query.Contract)
 		}
 		if err != nil {
 			writeJSON(w, http.StatusUnauthorized, message(err.Error()))
 			return
 		}
 		scopes[i] = Scope{Agent: canonicalAgent(sq.Query.Target), Contract: sq.Query.Contract}
+		if !c.owner() {
+			// An app hears only about the contracts it has a permission for.
+			agent := c.agent
+			scopes[i].Allow = func(contract string) bool {
+				app, err := d.apps.get(agent, c.key)
+				if err != nil || app == nil {
+					return false
+				}
+				hash, err := d.codeHash(agent, contract)
+				return err == nil && app.permission(hash).any()
+			}
+		}
 		agents[i] = scopes[i].Agent
 	}
 	flusher, ok := w.(http.Flusher)

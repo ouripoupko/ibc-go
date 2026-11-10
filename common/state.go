@@ -535,6 +535,11 @@ func (s *State) View(caller, method string, values map[string]any, timestamp str
 	if handled, err := s.builtin(method); handled {
 		return result, err
 	}
+	// A read runs only view and pure functions: a function that may change
+	// the state is a transaction, ordered by consensus.
+	if m, ok := s.abi.Methods[method]; ok && !m.IsConstant() {
+		return result, &ContractError{Err: fmt.Errorf("%s changes state: send it as a transaction (contract_write)", method)}
+	}
 	if timestamp == "" {
 		timestamp = s.lastTimestamp
 	}

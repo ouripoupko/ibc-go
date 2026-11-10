@@ -22,6 +22,7 @@ import (
 const simContract = "0xsimcontract"
 
 type simAgent struct {
+	write   identity.Secp256k1Signer // the root key, which signs the agent's transactions
 	root    *ecdsa.PrivateKey
 	node    *ecdsa.PrivateKey
 	addr    ethcommon.Address
@@ -165,6 +166,9 @@ func (s *sim) newAgent(byz bool) *simAgent {
 	root, node := s.key(), s.key()
 	a := &simAgent{root: root, node: node, addr: identity.Address(root), byz: byz,
 		exec: &simExec{decision: map[ethcommon.Hash]bool{}, deny: s.deny}}
+	// The root key signs the agent's transactions; secp256k1 signatures are
+	// deterministic, so a seed replays the same run.
+	a.write = identity.Secp256k1Signer{Key: root}
 	a.member = Member{Agent: a.addr, NodeKey: identity.Address(node), Node: "sim://" + a.addr.Hex()[:8]}
 	s.agents[a.addr] = a
 	s.order = append(s.order, a.addr)
@@ -209,8 +213,8 @@ func (s *sim) fixed(agents ...*simAgent) {
 
 func (s *sim) tx(a *simAgent, kind, body string) identity.SignedTx {
 	a.nonce++
-	stx, err := identity.Sign(identity.Transaction{Contract: simContract, Kind: kind, Agent: a.addr,
-		Nonce: fmt.Sprint(a.nonce), Body: body}, a.root)
+	stx, err := identity.SignTx(identity.Transaction{Contract: simContract, Kind: kind, Agent: a.addr,
+		Nonce: fmt.Sprint(a.nonce), Body: body}, a.write)
 	if err != nil {
 		s.t.Fatal(err)
 	}

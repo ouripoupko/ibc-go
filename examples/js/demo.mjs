@@ -1,19 +1,21 @@
 // Deploys the example contracts and calls them, with the client in ibc.mjs.
-// In a browser you would sign with a browser wallet; here an ethers.js wallet signs.
+// In a browser, the root key is a passkey; here, a WebCrypto P-256 key stands
+// in for it, and signs everything. No packages to install.
 //
-//   cd examples/js && npm install          # once: installs ethers
 //   node demo.mjs [node-url]
 //
 // The default node is http://localhost:2611. Run the node first (see the
-// README). Set IBC_PRIVATE_KEY to use a fixed key; otherwise a new one is
-// made for each run.
+// README). Each run makes a new agent.
 import { readFile } from 'node:fs/promises';
-import { Wallet } from 'ethers';
 import { Ibc } from './ibc.mjs';
+import { addressOf, newP256Key, p256Signer } from '../../web/static/keys.mjs';
 
 const url = process.argv[2] ?? 'http://localhost:2611';
-const wallet = process.env.IBC_PRIVATE_KEY ? new Wallet(process.env.IBC_PRIVATE_KEY) : Wallet.createRandom();
 const build = new URL('../build/', import.meta.url);
+
+const rootKey = await newP256Key();
+const agent = addressOf(rootKey.publicKey);
+const root = p256Signer(rootKey);
 
 async function load(name) {
   return {
@@ -23,7 +25,7 @@ async function load(name) {
   };
 }
 
-const ibc = await Ibc.connect(url, wallet);
+const ibc = await Ibc.connect(url, { agent, root });
 try {
   console.log('agent', ibc.agent, 'registered:', await ibc.register());
 

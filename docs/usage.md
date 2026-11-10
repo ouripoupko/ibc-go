@@ -5,7 +5,7 @@ node is running at `http://localhost:2611`; the [README](../README.md) shows how
 Every call used here is described in full in the [API reference](api.md).
 
 - [Concepts](#concepts)
-- [Your key](#your-key)
+- [Your keys](#your-keys)
 - [The web interface](#the-web-interface)
 - [Write a contract](#write-a-contract)
 - [Compile it](#compile-it)
@@ -18,90 +18,105 @@ Every call used here is described in full in the [API reference](api.md).
 
 ## Concepts
 
-- **Agent.** You, as ibc sees you. Your agent id is the address of your Ethereum key, for example
-  `0x86D637BcBc56F0Dba2b0B5398B4446b5e5330851`. You register it once on the node you choose.
+- **Agent.** You, as ibc sees you: your identity key (the *root key*). Your agent id is its
+  address, for example `0x86D637BcBc56F0Dba2b0B5398B4446b5e5330851`. You register once on the node
+  you choose.
 - **Node.** The server your agent lives on. It runs your contracts and talks to your partners'
-  nodes, but it never holds your key: everything you do is signed by you.
+  nodes, but it never holds any of your keys: everything you do is signed by you.
 - **Contract.** A Solidity program you deploy. Deploying returns the contract's id, which every
   later call uses. Each contract has its own state.
 - **Partners.** The agents who share a contract. Each partner's node keeps its own copy, and the
   partners agree on the order of every transaction with the [consensus protocol](consensus.md).
 - **Writes and reads.** A *write* (`contract_write`) is a signed transaction: it can change the
   contract's state, all partners apply it, and its result arrives on the event stream. A *read*
-  (`contract_read`) changes nothing and answers at once. Reads are signed too: the contract sees
-  the reader as `msg.sender`, and can refuse readers it does not want.
+  (`contract_read`) runs a `view` function, changes nothing and answers at once. You read your own
+  copy; the contract sees you as `msg.sender`.
+- **Apps.** Websites that act for you through your node. You decide what each may do without asking
+  you: read, and have your node call some functions for you. Everything else, they send you to your
+  node to approve.
 - **Event stream.** A long-lived HTTP connection (`/stream`) on which the node reports the outcome
   of every deploy, write, join and leave. Open it before you send a write.
 
-## Your key
+## Your keys
 
-Every transaction is signed with your Ethereum key, using EIP-712 (a browser wallet's
-`eth_signTypedData_v4`). The node checks each signature, and so does every partner.
+Two keys sign in your name ([Identity and keys](keys.md) has the design):
 
-- **In a web app**, the user signs in a **browser wallet**, such as MetaMask, Rabby or Coinbase
-  Wallet. The JavaScript client below does that for you.
-- **From the shell**, keep a key in a file and let the `ibc` program sign with it:
+- **Your root key** is your identity. It stays on your device: in the web interface it is a
+  *passkey*, kept in your phone's or computer's security hardware. It signs everything you approve:
+  your registration, each transaction, and what you let apps do.
+- **Your node's key** belongs to your node. It signs consensus blocks, and the calls you let apps
+  make without asking you, and nothing else: partners refuse anything else it signs in your name.
 
-  ```sh
-  ./ibc key new ~/.ibc/alice.key        # prints the new key's address: your agent id
-  ./ibc key address ~/.ibc/alice.key    # prints it again
-  ```
+From the shell, the `ibc` program keeps the root key in a file instead:
 
-  The file holds a private key. Keep it private (it is created readable by you only), and keep a
-  backup: losing it means losing your agent.
+```sh
+./ibc key new ~/.ibc/alice.key        # your root key; prints your agent id
+./ibc key address ~/.ibc/alice.key    # prints it again
+```
 
-When you register, you also authorize your node's own key to sign *consensus blocks* for you. That
-key cannot sign transactions in your name; it only takes part in ordering them.
+The file holds a private key. Keep it private (it is created readable by you only), and keep a
+backup: losing it means losing your agent.
 
 ## The web interface
 
-The node serves a web interface at its own address, for example `http://localhost:2611`. Open it in
-a browser that has a wallet: it holds your key, and the page asks it to sign every call. The node
-never sees your key.
+The node serves a web interface at its own address, for example `http://localhost:2611`. You need
+no wallet and nothing to install: your root key is a **passkey**, which your browser keeps with your
+phone, your computer, or a security key. The node never sees it.
 
-Any browser wallet for Ethereum keys works: [MetaMask](https://metamask.io),
-[Rabby](https://rabby.io), [Coinbase Wallet](https://www.coinbase.com/wallet),
-[Trust Wallet](https://trustwallet.com), [Frame](https://frame.sh), or the wallet built into
-[Brave](https://brave.com/wallet/). Your agent is your key, not the wallet app, so the same key in
-another wallet is the same agent. Smart-contract wallets, such as Safe, do not work: ibc identifies
-you by a key's own signature. Mobile wallets that connect by QR code (WalletConnect) are not
-supported yet.
-
-- **Your contracts.** Connect your wallet, and register on the node the first time. The page lists
-  your contracts on this node; it cannot list other agents' contracts.
-- **Deploy.** Choose the compiled contract's `.bin` and `.abi` files ([Compile it](#compile-it)
-  shows how to make them), or paste them. The page shows a field for each constructor argument.
+- **Create your identity.** Enter a name (it labels your passkey) and click **Create my identity**.
+  You approve twice: the passkey is created, and it signs your registration.
+- **Sign in on another device.** Click **Sign in with my passkey** and choose it (synced to the
+  device, or on your phone nearby). You approve twice.
+- **Your contracts.** The page lists your contracts on this node.
+- **Deploy.** Choose the contract's Solidity source (`.sol`), or paste it, and click **Compile**: your
+  node compiles it. Fill in the constructor's arguments and click **Deploy**.
 - **Join.** Paste an invite from a member, or enter the contract id, the member's node URL and the
   member's agent id. The contract's own rules decide.
-- **A contract's page.** Click a contract to see its details and a form for each function in its
-  ABI. *Read* runs a `view` function and shows the result at once; *Send* sends a transaction and
-  shows its result once all members have applied it. Reverts are shown in red. The page also
-  shows an **invite** to give to people who should join, and a button to leave.
+- **A contract's page.** Click a contract to see its details, its code (behind **Show the code**),
+  and a form for each function in its ABI. *Read* runs a `view` function and shows the result at
+  once; *Send* sends a transaction and shows its result once all members have applied it. Reverts
+  are shown in red. The page also shows an **invite** to give to people who should join, and a
+  button to leave.
+- **Connected apps.** The apps you approved, what each may do without asking you, and a
+  **Disconnect** button.
 
 The bottom of each page shows the node's storage: the size of its data folder.
 
 Arguments are typed as in [Arguments](#arguments): numbers and addresses as plain text, arrays and
 structs as JSON.
 
-**Each signature is named.** While the wallet waits, the page shows a box such as *Sign request:
-increment 7*. It closes when the wallet answers.
+**Each passkey request is named.** While your passkey waits, the page shows a box such as *Sign
+request: increment 7*. It closes when the passkey answers. **Each transaction asks for your
+passkey**; reading does not ask. **Sign out** forgets your identity in this browser (your passkey
+stays on your devices).
 
-**Your wallet asks for each transaction:** each deploy, write, join and leave, and the registration.
-**Reading does not ask each time.** The first time the page needs to read (to list your contracts,
-open a contract, read, or open the event stream), your wallet asks you to approve a *reading
-session*: a key the browser makes, which can only read, only on this node, for 8 hours. The page
-signs every read with it. The header shows until when it lasts; **End** forgets it, and the next
-read asks again.
+- **Your passkey belongs to this node's address**: your node represents you on the internet. Use the
+  node at a stable address.
+- Passkeys need a secure page: `https`, or `http://localhost`. They do not work at an IP address
+  such as `http://127.0.0.1:2611`; use `http://localhost:2611`.
 
-- The session key cannot sign a transaction: the node accepts transactions only with your own
-  signature. A session can only let someone read what you can read, on this node, until it ends.
-- The browser keeps the key unextractable, in this site's storage, so moving between pages or
-  reloading keeps the session. Closing the browser does not end it; **End** does, or the time does.
-- Sessions need a secure page: `https`, or `http://localhost`. Elsewhere the page asks the wallet
-  for every read.
+### Apps
 
-Wallets work with pages at `http://localhost`. To use a node over the network, put it behind HTTPS,
-as with any page that uses a wallet.
+An app on another site never holds your keys. It has a key of its own, and works through your node:
+
+1. **The first time it uses a contract code** (when it creates a contract, for example), it opens your
+   node's **approval page**. You see what it asks (and the code, if you want), and choose what it may
+   do without asking you:
+   - **read these contracts:** on by default;
+   - **call these functions:** off by default; tick the ones you trust it with, such as `post` in a
+     chat. Your node then signs those calls for you.
+
+   You approve with your passkey, once.
+2. **From then on**, it reads and makes the calls you ticked without asking you. Creating another
+   contract of the same code needs only your approval of the deploy itself.
+3. **For anything else**, a transfer for example, it opens the approval page again, and you sign that
+   transaction with your passkey.
+4. **On another computer**, the app's first request that needs your node opens the approval page
+   (sign in there if that browser does not know you yet). Approving it also connects that browser,
+   with the permissions you already gave the app: nothing to choose again.
+
+Your node keeps each app by its website. Disconnect an app on your node's page, and it can do nothing
+more, on any computer.
 
 ## Write a contract
 
@@ -186,8 +201,9 @@ function approve_removal(address member) external view returns (bool);
 
 - **Return what the client needs.** A write's return value is the only result the client gets
   back from it, so return the new id or the new value.
-- **Use `view` functions for reads.** With `contract_read`, nothing changes anyway: the call runs
-  on a copy of the state, which is then thrown away.
+- **Mark reads `view` (or `pure`).** Only those can be read with `contract_read`; every other
+  function is a transaction, ordered with the other members. The web interface lists them under
+  Read and Transactions accordingly.
 - **Use `msg.sender` for "me".** A function like `myVote()` or `whoAmI()` lets an agent ask the
   contract about itself.
 - **Decide who may read.** A read's `msg.sender` is whoever signed it, and anyone can sign one. To
@@ -198,7 +214,13 @@ function approve_removal(address member) external view returns (bool);
 
 ## Compile it
 
-The examples come with a script that compiles them with solc. It needs Node.js, and downloads the
+**Your node compiles.** In the web interface and through apps, you give the Solidity source; your
+node compiles it with its compiler (the `-solc` option: `solc`, or `solcjs` through Node.js), and the
+deploy transaction carries the source, the compiler's version and settings, and the bytecode. The
+API call is [`compile`](api.md#compile).
+
+**To compile yourself**, for the shell client and scripts: the examples come with a script that
+compiles them with solc. It needs Node.js, and downloads the
 compiler the first time:
 
 ```sh
@@ -224,12 +246,12 @@ solcjs names its output files after the source path and the contract, for exampl
 ## Call ibc from the shell
 
 [`examples/scripts/ibc.sh`](../examples/scripts/ibc.sh) is a small client built on `curl`, `jq`
-and the `ibc` program, which signs with your key file. It waits for each write's result on the
-event stream and prints just the result.
+and the `ibc` program, which signs with your root key file. It waits for each write's result on the event stream and
+prints just the result.
 
 ```sh
 export IBC_URL=http://localhost:2611   # the node (this is the default)
-export IBC_KEY=~/.ibc/alice.key        # your key file
+export IBC_KEY=~/.ibc/alice.key        # your root key file
 export IBC_BIN=./ibc                   # the ibc program
 alias ibc=examples/scripts/ibc.sh
 
@@ -264,47 +286,59 @@ Run `examples/scripts/ibc.sh` without arguments for the full list.
 
 ## Call ibc from JavaScript
 
-[`web/static/ibc.mjs`](../web/static/ibc.mjs) is a small client without dependencies; the web
-interface uses it, and every node serves it at `/ibc.mjs`. It works
-in browsers and in Node.js 18 and later. It signs through a *signer*: a browser wallet, or
-any object with `getAddress()` and `signTypedData(domain, types, message)`, such as an ethers.js
-wallet. It opens the event stream for you and resolves each write with its result:
+[`web/static/ibc.mjs`](../web/static/ibc.mjs) is a small client; the web interface uses it, and
+every node serves it at `/ibc.mjs`. It works in browsers and in Node.js 20 and later, with no
+dependencies but the keccak in `web/static/vendor`. It has two parts.
+
+**`IbcApp`, for an app on your own site.** The app never touches the user's keys: it makes a key of
+its own (kept in the browser, which cannot export it), and opens the user's node when the user must
+approve something.
+
+```js
+import { IbcApp } from 'https://node.example/ibc.mjs';
+
+const app = await IbcApp.open('https://node.example');   // the user's node
+
+// On a click (browsers open the node's page only from a click):
+const source = await (await fetch('/Chat.sol')).text();
+const chat = await app.deploy({ source, constructor: { initialTopic: 'lunch' } });
+// The user approves on their node: the deploy, and what the app may do without asking.
+
+await app.write(chat, 'post', { text: 'hi' });            // silent, if the user ticked "post"
+await app.read(chat, 'topic');                            // silent, if the user allowed reading
+await app.write(chat, 'setTopic', { newTopic: 'dinner' }); // opens the node: the user approves
+app.onEvent((event) => console.log(event));                // events of the app's contracts
+```
+
+`read` and `write` try silently first, and open the node's page when the node says the user must
+approve. `app.permit(contract)` asks for permissions on an existing contract (one the user joined),
+and `app.join(contract, memberNode, memberAgent)` asks the user to join one.
+
+**`Ibc`, the user's own client**, with the user's keys: the node's web page uses it, and so can
+tools. The root key signs transactions; a key the node knows (or the root) signs queries.
 
 ```js
 import { Ibc } from './ibc.mjs';
+import { addressOf, newP256Key, p256Signer } from './keys.mjs';
 
-const ibc = await Ibc.connect('http://localhost:2611', Ibc.wallet(window.ethereum));
-await ibc.register();                    // the wallet asks the user to sign
+const rootKey = await newP256Key();                    // in a browser: the root passkey (passkeySigner)
+const agent = addressOf(rootKey.publicKey);
+const ibc = await Ibc.connect('http://localhost:2611', { agent, root: p256Signer(rootKey) });
+await ibc.register();
 
-const code = await (await fetch('/build/Counter.bin')).text();
-const abi = await (await fetch('/build/Counter.abi')).text();
-const counter = await ibc.deploy({ name: 'my-counter', code, abi, constructor: { start: 10 } });
-
-await ibc.write(counter, 'increment', { amount: 5 });   // 15 (one signature)
-await ibc.read(counter, 'count');                       // 15 (one signature)
-
-try {
-  await ibc.write(counter, 'increment', { amount: 0 });
-} catch (err) {
-  console.log(err.message);   // execution reverted: amount must be positive
-}
-
+const compiled = await ibc.compile(source);            // the node compiles
+const counter = await ibc.deploy({ name: 'my-counter', code: compiled.code, abi: compiled.abi,
+  constructor: { start: 10 }, source, compiler: compiled.compiler });
+await ibc.write(counter, 'increment', { amount: 5 });  // 15
+await ibc.read(counter, 'count');                      // 15
 ibc.close();
 ```
 
-Every write, deploy, join and leave asks the user to approve a signature in the wallet. So does
-each read and opening the event stream, unless the client has a **read session**: set
-`ibc.sessionHours = 8` (for example), and the first read asks the wallet once to approve a session
-key, which then signs every read without asking. A session can only read, only on this node, and
-never signs a transaction. `ibc.startSession(hours)` starts one at once, `ibc.endSession()` forgets
-it, and `ibc.useSession(kept)` takes one kept from before (the web interface keeps it in IndexedDB).
-See [read sessions](api.md#read-sessions).
-
 [`examples/js/demo.mjs`](../examples/js/demo.mjs) deploys and calls all three examples from
-Node.js, signing with an ethers.js wallet:
+Node.js, with a WebCrypto key standing in for the passkey. Nothing to install:
 
 ```sh
-cd examples/js && npm install && node demo.mjs http://localhost:2611
+node examples/js/demo.mjs http://localhost:2611
 ```
 
 > **Large numbers in JavaScript.** Results are exact JSON numbers. `JSON.parse` keeps integers
@@ -364,6 +398,15 @@ ibc read "$B" whoAmI
 A struct comes back as a JSON object keyed by its field names, and an array of structs as an array
 of objects.
 
+### Chat
+
+[`Chat.sol`](../examples/contracts/Chat.sol) is a contract for an app: users let the app `post` and
+`like` without approving each message, while changing the topic (`setTopic`) asks every time. Nothing
+in the contract says so; each user decides, on their node, when the app first uses it ([Apps](#apps)).
+`web/e2e/app.html` is a small app that does this: it creates a chat from the source, posts silently,
+and asks for the topic.
+
+### Arguments
 ### Arguments
 
 Pass arguments as a JSON object keyed by the parameter names in the ABI:
@@ -443,11 +486,11 @@ and send the requests from another:
 
 ```sh
 IBC=http://localhost:2611
-KEY=~/.ibc/alice.key
+KEY=~/.ibc/alice.key   # your root key: signs everything
 ME=$(./ibc key address $KEY)
 NODE_KEY=$(curl -s "$IBC/ibc/app?action=node_info" | jq -r .nodeKey)
 
-# Register: a registration signed with your key.
+# Register: a registration signed with your root key.
 ./ibc sign registration -key $KEY -node $IBC -node-key $NODE_KEY |
   curl -s -X PUT "$IBC/ibc/app/$ME?action=register_agent" -H 'Content-Type: application/json' -d @-
 
@@ -485,6 +528,8 @@ keep-alives.
 | `{"message": "… signature does not match the agent"}` | The transaction was changed after it was signed, or signed by another key |
 | `{"message": "transaction signed by 0x…, sent as 0x…"}` | The agent in the URL is not the one who signed |
 | `{"message": "registration authorizes node key 0x…, this node's key is 0x…"}` | Sign the registration with the `nodeKey` from this node's `node_info` |
+| `{"message": "calling setTopic needs your approval on your node's page"}` | An app asked for a call the user did not let it make silently: open the approval page (`IbcApp` does) |
+| `{"message": "this node has no Solidity compiler (see -solc)"}` | Start the node with `-solc` pointing at `solc` or `solcjs` |
 | `{"message": "unknown agent \"0x…\""}` | Register first |
 | `{"message": "consensus: unknown contract 0x…"}` | You are not a partner of this contract on this node: check the id, or join it first |
 | `{"message": "no such contract"}` | A read of a contract you do not have, or whose deployment has not finished |
@@ -494,6 +539,7 @@ keep-alives.
 | `"increment: missing argument \"amount\""` | A key in `values` is missing or misspelled. Names must match the ABI exactly |
 | `"increment: unexpected argument \"amout\""` | A key in `values` that the method does not have |
 | `"unknown method \"incremnt\""` | No function with that name in the ABI |
+| `"increment changes state: send it as a transaction (contract_write)"` | Only `view` and `pure` functions can be read; others are transactions |
 | `"execution reverted: …"` | The contract reverted; the rest is its reason |
 | `"execution reverted"` (nothing after it) | The contract reverted without a reason, for example by calling `sha256` |
 | `"contract deployment failed: …"` | Every call to a contract whose constructor failed. Deploy it again |

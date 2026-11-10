@@ -10,33 +10,35 @@
 <body>
   <header class="top">
     <h1><a href="./">ibc</a></h1>
-    <div class="who"><div id="who">Not connected</div><div id="session"></div></div>
+    <div class="who"><div id="who">Not connected</div><div id="keys"></div></div>
   </header>
   <main>
-    <section class="card" id="connect-card">
-      <h2>Connect</h2>
-      <p>This page works with your contracts on this node. You sign in your browser wallet: the
-        node never holds your key. Each transaction asks for your signature. Reading is signed by a
-        <em>reading session</em> instead: a key this browser makes and you approve once, which can
-        only read, only on this node, for 8 hours.</p>
-      <button id="connect">Connect wallet</button>
+    <section class="card hidden" id="connect-card">
+      <h2>Your identity</h2>
+      <p>On ibc, you are a key in your phone or computer: a <em>passkey</em>. This node never holds
+        it. You approve with it whatever is done in your name: each transaction, and what you let
+        apps do. Apps you connect can read for you, and your node can sign the calls you allow
+        them, without asking each time.</p>
+      <div id="no-passkeys" class="status bad hidden">Passkeys need a secure page: open this node at
+        its https address (or at http://localhost).</div>
+      <label for="name">Your name, to recognize your passkey</label>
+      <input type="text" id="name" autocomplete="off" placeholder="alice">
+      <div class="row" style="margin-top: 12px">
+        <button id="create">Create my identity</button>
+        <button class="secondary" id="sign-in">Sign in with my passkey</button>
+      </div>
       <div class="status" id="connect-status"></div>
-      <p class="hint" style="margin-top: 16px">Any browser wallet for Ethereum keys works, for example
-        <a href="https://metamask.io" target="_blank" rel="noopener noreferrer">MetaMask</a>,
-        <a href="https://rabby.io" target="_blank" rel="noopener noreferrer">Rabby</a>,
-        <a href="https://www.coinbase.com/wallet" target="_blank" rel="noopener noreferrer">Coinbase Wallet</a>,
-        <a href="https://trustwallet.com" target="_blank" rel="noopener noreferrer">Trust Wallet</a>,
-        <a href="https://frame.sh" target="_blank" rel="noopener noreferrer">Frame</a>, or the wallet
-        built into <a href="https://brave.com/wallet/" target="_blank" rel="noopener noreferrer">Brave</a>.
-        Your agent is your key, not the wallet app: the same key in another wallet is the same agent.
-        Smart-contract wallets, such as Safe, do not work, because ibc needs a key's own
-        signature.</p>
+      <p class="hint" style="margin-top: 16px">Creating an identity makes a passkey on this site and
+        registers you on this node. Signing in uses the passkey you already have here, synced to
+        this device or on your phone. Your passkey belongs to this node's address: the node
+        represents you on the internet.</p>
     </section>
 
     <section class="card hidden" id="register-card">
       <h2>Register on this node</h2>
-      <p>Your agent is not registered here yet. Registering authorizes this node to take part in
-        consensus for your contracts. It cannot sign anything as you.</p>
+      <p>Your identity is not registered here (any more). Registering authorizes this node to take
+        part in consensus for your contracts, with your identity passkey. It cannot sign anything as
+        you.</p>
       <button id="register">Register</button>
       <div class="status" id="register-status"></div>
     </section>
@@ -56,17 +58,19 @@
 
       <section class="card">
         <h2>Deploy a contract</h2>
-        <p class="hint">Give the compiled contract: its bytecode (<code>.bin</code>) and its ABI
-          (<code>.abi</code>), for example from <code>solc --bin --abi</code>.</p>
+        <p class="hint">Give the contract's Solidity source (<code>.sol</code>). This node compiles
+          it, and you sign the deployment.</p>
         <form id="deploy">
+          <label for="d-source">Source (.sol)</label>
+          <input type="file" id="d-source-file" accept=".sol,.txt">
+          <textarea id="d-source" placeholder="pragma solidity ^0.8.24;&#10;contract Counter { … }" spellcheck="false"></textarea>
+          <label for="d-contract">Contract name <span class="type">(if the file has several)</span></label>
+          <input type="text" id="d-contract" autocomplete="off">
+          <button type="button" class="secondary" id="d-compile">Compile</button>
+          <div class="status" id="compile-status"></div>
+          <div id="d-compiled" class="hidden">
           <label for="d-name">Name</label>
           <input type="text" id="d-name" required placeholder="my-counter" autocomplete="off">
-          <label for="d-bin">Bytecode (.bin)</label>
-          <input type="file" id="d-bin-file" accept=".bin,.txt">
-          <textarea id="d-bin" placeholder="6080604052…" spellcheck="false"></textarea>
-          <label for="d-abi">ABI (.abi or .json)</label>
-          <input type="file" id="d-abi-file" accept=".abi,.json">
-          <textarea id="d-abi" placeholder='[{"type": "function", …}]' spellcheck="false"></textarea>
           <label for="d-protocol">Consensus protocol</label>
           <select id="d-protocol">
             <option value="cordial">Cordial Miners (default)</option>
@@ -74,6 +78,7 @@
           </select>
           <div id="d-ctor"></div>
           <button type="submit" id="d-submit">Deploy</button>
+          </div>
           <div class="status" id="deploy-status"></div>
         </form>
       </section>
@@ -94,6 +99,16 @@
           <button type="submit" id="j-submit">Ask to join</button>
           <div class="status" id="join-status"></div>
         </form>
+      </section>
+
+      <section class="card">
+        <div class="row" style="justify-content: space-between">
+          <h2 style="margin: 0">Connected apps</h2>
+          <button class="secondary" id="apps-refresh">Refresh</button>
+        </div>
+        <p class="hint">Apps you approved, and what they may do without asking you.</p>
+        <div class="status" id="apps-status"></div>
+        <ul class="events" id="apps"></ul>
       </section>
     </div>
   </main>

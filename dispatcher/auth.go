@@ -9,7 +9,10 @@ import (
 	"time"
 
 	ethcommon "github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 
+	"github.com/ouripoupko/ibc-go/common"
+	"github.com/ouripoupko/ibc-go/execution"
 	"github.com/ouripoupko/ibc-go/identity"
 )
 
@@ -17,57 +20,44 @@ import (
 // query is also accepted only once, so a copied query cannot be sent again.
 var queryWindow = 60 * time.Second
 
-// maxSession is the longest a session may last, from now: a leaked session
-// key reads for at most this long.
-var maxSession = 7 * 24 * time.Hour
-
 var errNoQuery = errors.New("this call needs a signed query")
+
+// errNeedsApproval means the app may not do this without the user: it should
+// send the user to the node's approval page.
+var errNeedsApproval = errors.New("needs your approval on your node's page")
 
 // guard checks signed queries and remembers the ones it accepted until they
 // expire.
 type guard struct {
-	nodeKey ethcommon.Address // sessions must be for this node
-	mu      sync.Mutex
-	seen    map[ethcommon.Hash]time.Time
+	mu   sync.Mutex
+	seen map[ethcommon.Hash]time.Time
 }
 
-func newGuard(nodeKey ethcommon.Address) *guard {
-	return &guard{nodeKey: nodeKey, seen: map[ethcommon.Hash]time.Time{}}
+func newGuard() *guard {
+	return &guard{seen: map[ethcommon.Hash]time.Time{}}
 }
 
 // check verifies a signed query for action on target's copy of contract, and
-// returns who signed it.
-func (g *guard) check(sq identity.SignedQuery, action, target, contract string) (ethcommon.Address, error) {
-	id, err := sq.Verify()
-	if err != nil {
-		return ethcommon.Address{}, fmt.Errorf("query: %w", err)
-	}
+// returns the key that signed it. A query acts for the agent it names, which
+// must be the target: an agent reads only its own copy.
+func (g *guard) check(sq identity.SignedQuery, action, target, contract string) (identity.Signer, error) {
 	now := time.Now()
-	if sq.Session != nil {
-		s := sq.Session.Session
-		if s.NodeKey != g.nodeKey {
-			return ethcommon.Address{}, fmt.Errorf("session for node key %s, this node's key is %s", s.NodeKey.Hex(), g.nodeKey.Hex())
-		}
-		expires := time.Unix(int64(s.Expires), 0)
-		if !now.Before(expires) {
-			return ethcommon.Address{}, errors.New("session expired")
-		}
-		if expires.Sub(now) > maxSession {
-			return ethcommon.Address{}, fmt.Errorf("session lasts longer than %s", maxSession)
-		}
+	id, signer, err := sq.Verify()
+	if err != nil {
+		return identity.Signer{}, fmt.Errorf("query: %w", err)
 	}
 	q := sq.Query
 	if q.Action != action {
-		return ethcommon.Address{}, fmt.Errorf("query for %s sent to %s", q.Action, action)
+		return identity.Signer{}, fmt.Errorf("query for %s sent to %s", q.Action, action)
 	}
-	if canonicalAgent(q.Target) != canonicalAgent(target) {
-		return ethcommon.Address{}, fmt.Errorf("query for agent %s sent to %s", q.Target, target)
+	if canonicalAgent(q.Target) != canonicalAgent(target) || q.Agent.Hex() != canonicalAgent(target) {
+		return identity.Signer{}, fmt.Errorf("query for agent %s sent to %s", q.Target, target)
 	}
 	if !strings.EqualFold(q.Contract, contract) {
-		return ethcommon.Address{}, fmt.Errorf("query for contract %q sent to %q", q.Contract, contract)
+		return identity.Signer{}, fmt.Errorf("query for contract %q sent to %q", q.Contract, contract)
 	}
 	if d := now.Sub(time.Unix(int64(q.Time), 0)); d > queryWindow || d < -queryWindow {
-		return ethcommon.Address{}, errors.New("query expired, or its time is wrong: check the clock")
+		return identity.Signer{}, errors.New("query expired, or its time is wrong: check the clock")
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -77,23 +67,88 @@ func (g *guard) check(sq identity.SignedQuery, action, target, contract string) 
 		}
 	}
 	if _, ok := g.seen[id]; ok {
-		return ethcommon.Address{}, errors.New("query already used")
+		return identity.Signer{}, errors.New("query already used")
 	}
 	g.seen[id] = now
-	return q.Agent, nil
+	return signer, nil
 }
 
-// owner checks a query that only the target agent itself may make.
-func (g *guard) owner(sq *identity.SignedQuery, action, target, contract string) error {
+// caller is who made a query: the agent itself, with its root key, or an app
+// the agent connected.
+type caller struct {
+	agent string
+	app   *appRecord // nil for the root key
+	key   string     // the app's device key, hex
+}
+
+// owner reports whether the caller may see everything of the agent: its
+// root key, or the node's own page.
+func (c caller) owner() bool { return c.app == nil || c.app.owner() }
+
+// authorize checks a signed query and finds who made it.
+func (d *Dispatcher) authorize(sq *identity.SignedQuery, action, target, contract string) (caller, error) {
 	if sq == nil {
-		return errNoQuery
+		return caller{}, errNoQuery
 	}
-	signer, err := g.check(*sq, action, target, contract)
+	signer, err := d.guard.check(*sq, action, target, contract)
+	if err != nil {
+		return caller{}, err
+	}
+	agent := canonicalAgent(target)
+	if signer.Agent.Hex() == agent {
+		return caller{agent: agent}, nil
+	}
+	key := hexutil.Encode(signer.Key)
+	app, err := d.apps.get(agent, key)
+	if err != nil {
+		return caller{}, err
+	}
+	if app == nil {
+		return caller{}, fmt.Errorf("this key is not agent %s's, nor an app it connected: connect the app on the node's page", agent)
+	}
+	return caller{agent: agent, app: app, key: key}, nil
+}
+
+// codeHash returns the code hash of the agent's contract.
+func (d *Dispatcher) codeHash(agent, contract string) (ethcommon.Hash, error) {
+	summary, ok, err := d.navigator.Contract(agent, contract)
+	if err != nil {
+		return ethcommon.Hash{}, err
+	}
+	if !ok {
+		return ethcommon.Hash{}, fmt.Errorf("%w %q", execution.ErrUnknownContract, contract)
+	}
+	code, _ := summary[common.KeyCode].(string)
+	return identity.CodeHash(code)
+}
+
+// canHear checks that the caller may hear the contract's events: it has a
+// permission for the contract's code (to read, or to call silently).
+func (d *Dispatcher) canHear(c caller, contract string) error {
+	if c.owner() {
+		return nil
+	}
+	hash, err := d.codeHash(c.agent, contract)
 	if err != nil {
 		return err
 	}
-	if signer.Hex() != canonicalAgent(target) {
-		return fmt.Errorf("only agent %s may ask this", canonicalAgent(target))
+	if !c.app.permission(hash).any() {
+		return fmt.Errorf("this contract's events %w", errNeedsApproval)
+	}
+	return nil
+}
+
+// canRead checks that the caller may read the contract without asking.
+func (d *Dispatcher) canRead(c caller, contract string) error {
+	if c.owner() {
+		return nil
+	}
+	hash, err := d.codeHash(c.agent, contract)
+	if err != nil {
+		return err
+	}
+	if !c.app.permission(hash).Read {
+		return fmt.Errorf("reading this contract %w", errNeedsApproval)
 	}
 	return nil
 }
@@ -103,11 +158,18 @@ func parseQuery(raw []byte) (*identity.SignedQuery, error) {
 	if len(strings.TrimSpace(string(raw))) == 0 {
 		return nil, nil
 	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return nil, fmt.Errorf("signed query: %w", err)
+	}
+	if _, ok := fields["query"]; !ok {
+		return nil, nil // not a query (a signed transaction, for example)
+	}
 	var sq identity.SignedQuery
 	if err := json.Unmarshal(raw, &sq); err != nil {
 		return nil, fmt.Errorf("signed query: %w", err)
 	}
-	if len(sq.Signature) == 0 {
+	if sq.Signature.Scheme == "" && len(sq.Signature.Sig) == 0 {
 		return nil, nil // not a signed query, e.g. an old client's body
 	}
 	return &sq, nil

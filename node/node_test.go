@@ -4,8 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/elliptic"
-	"crypto/rand"
+	"crypto/ecdsa"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,9 +17,8 @@ import (
 	"testing"
 	"time"
 
-	"crypto/ecdsa"
-
 	ethcommon "github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/crypto"
 
@@ -186,27 +184,55 @@ func (s *stream) waitAction(t *testing.T, action string) map[string]any {
 	}
 }
 
-// user is an agent's owner, holding the root key (MetaMask's role in tests).
+// user is an agent's owner, with the key a phone would hold: a root passkey
+// on the node's domain, which signs everything the user approves. (The
+// browser test uses real WebAuthn; this one is simulated.)
 type user struct {
-	key *ecdsa.PrivateKey
-	id  string // the agent id: the root key's address
+	root       identity.WebAuthnSigner
+	credential []byte // the root passkey's credential id
+	addr       ethcommon.Address
+	id         string // the agent id: the root key's address
 }
 
 func newUser(t *testing.T) *user {
 	t.Helper()
-	key, err := crypto.GenerateKey()
+	rootKey, err := identity.NewP256Key()
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &user{key: key, id: identity.Address(key).Hex()}
+	addr, _ := identity.AddressOf(identity.PublicKey(rootKey))
+	return &user{root: identity.WebAuthnSigner{Key: rootKey, RPID: "localhost"},
+		credential: []byte(identity.NewNonce()), addr: addr, id: addr.Hex()}
+}
+
+// connectApp records u's consent on n for an app's key: for contracts of
+// codeHash, reads without asking if read, and the functions n may sign
+// silently, with the grant for n signed by u's root.
+func (u *user) connectApp(t *testing.T, n *testNode, appKey *ecdsa.PrivateKey, codeHash ethcommon.Hash, read bool, functions ...string) any {
+	t.Helper()
+	consent, err := identity.SignConsent(identity.Consent{Agent: u.addr, App: "https://app.example",
+		AppKey: identity.PublicKey(appKey), CodeHash: codeHash, Read: read, Functions: functions, Nonce: identity.NewNonce()}, u.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := map[string]any{"consent": consent}
+	if len(functions) > 0 {
+		grant, err := identity.CertifyGrant(identity.Grant{Agent: u.addr, NodeKey: ethcommon.HexToAddress(n.NodeKey()),
+			CodeHash: codeHash, Functions: functions, Nonce: identity.NewNonce()}, u.root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body["grant"] = grant
+	}
+	return call(t, n.URL, "PUT", u.id, "register_app", "", "", body)
 }
 
 // register registers the user's agent on n, authorizing n's key.
 func (u *user) register(t *testing.T, n *testNode, events *stream) {
 	t.Helper()
 	info := call(t, n.URL, "GET", "", "node_info", "", "", nil).(map[string]any)
-	sr, err := identity.SignRegistration(identity.Registration{Agent: identity.Address(u.key), Node: n.URL,
-		NodeKey: ethcommon.HexToAddress(info["nodeKey"].(string)), Nonce: identity.NewNonce()}, u.key)
+	sr, err := identity.SignRegistration(identity.Registration{Agent: u.addr, Node: n.URL,
+		NodeKey: ethcommon.HexToAddress(info["nodeKey"].(string)), Credential: u.credential, Nonce: identity.NewNonce()}, u.root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,9 +242,15 @@ func (u *user) register(t *testing.T, n *testNode, events *stream) {
 	}
 }
 
-// query signs a query for action on target's copy of contract; body, if not
-// nil, is marshalled to the JSON body string.
+// query signs a query for action on target's copy of contract, with u's
+// write key; body, if not nil, is marshalled to the JSON body string.
 func (u *user) query(t *testing.T, action, target, contract string, body any) identity.SignedQuery {
+	t.Helper()
+	return u.queryWith(t, u.root, action, target, contract, body)
+}
+
+// queryWith signs a query with the given key of u.
+func (u *user) queryWith(t *testing.T, key identity.KeySigner, action, target, contract string, body any) identity.SignedQuery {
 	t.Helper()
 	raw := ""
 	if body != nil {
@@ -228,8 +260,8 @@ func (u *user) query(t *testing.T, action, target, contract string, body any) id
 		}
 		raw = string(b)
 	}
-	sq, err := identity.SignQuery(identity.Query{Agent: identity.Address(u.key), Action: action, Target: target,
-		Contract: contract, Body: raw, Time: uint64(time.Now().Unix()), Nonce: identity.NewNonce()}, u.key)
+	sq, err := identity.SignQuery(identity.Query{Agent: u.addr, Action: action, Target: target,
+		Contract: contract, Body: raw, Time: uint64(time.Now().Unix()), Nonce: identity.NewNonce()}, key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -273,8 +305,8 @@ func (u *user) sign(t *testing.T, kind, contract string, body any) identity.Sign
 	if err != nil {
 		t.Fatal(err)
 	}
-	stx, err := identity.Sign(identity.Transaction{Contract: contract, Kind: kind, Agent: identity.Address(u.key),
-		Nonce: identity.NewNonce(), Body: string(raw)}, u.key)
+	stx, err := identity.SignTx(identity.Transaction{Contract: contract, Kind: kind, Agent: u.addr,
+		Nonce: identity.NewNonce(), Body: string(raw)}, u.root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -520,11 +552,8 @@ func TestSignatures(t *testing.T) {
 
 	refused("unsigned read", call(t, a.URL, "POST", alice.id, "contract_read", cid, "counter",
 		map[string]any{"values": map[string]any{}}), "signed query")
-	// Anyone may sign a read; the contract decides what it answers (the
-	// examples test checks that msg.sender is the signer).
-	if got := bob.readAs(t, a, alice.id, cid, "counter", nil); got != json.Number("0") {
-		t.Fatalf("bob's read = %v", got)
-	}
+	// An agent reads only its own copy: bob cannot read alice's.
+	refused("bob reads alice's copy", bob.readAs(t, a, alice.id, cid, "counter", nil), "query for agent")
 	sq := alice.query(t, "contract_read", alice.id, cid, readBody)
 	if got := call(t, a.URL, "POST", alice.id, "contract_read", cid, "", sq); got != json.Number("0") {
 		t.Fatalf("signed read = %v", got)
@@ -532,7 +561,7 @@ func TestSignatures(t *testing.T) {
 	refused("replayed read", call(t, a.URL, "POST", alice.id, "contract_read", cid, "", sq), "already used")
 	old := alice.query(t, "contract_read", alice.id, cid, readBody)
 	old.Query.Time -= 120
-	if old, _ = identity.SignQuery(old.Query, alice.key); true {
+	if old, _ = identity.SignQuery(old.Query, alice.root); true {
 		refused("expired read", call(t, a.URL, "POST", alice.id, "contract_read", cid, "", old), "expired")
 	}
 	refused("read signed for another action", call(t, a.URL, "POST", alice.id, "contract_read", cid, "",
@@ -544,7 +573,7 @@ func TestSignatures(t *testing.T) {
 	// Only the agent itself sees its contracts and its stream.
 	refused("unsigned get_contracts", getAuth(t, a.URL, alice.id, "get_contracts", "", ""), "signed query")
 	refused("bob lists alice's contracts", getAuth(t, a.URL, alice.id, "get_contracts", "",
-		bob.auth(t, "get_contracts", alice.id, "", nil)), "only agent")
+		bob.auth(t, "get_contracts", alice.id, "", nil)), "query for agent")
 	for _, auth := range []string{"", bob.auth(t, "stream", alice.id, "", nil)} {
 		resp, err := http.Get(a.URL + "/stream?" + url.Values{"auth": {auth}}.Encode())
 		if err != nil {
@@ -571,97 +600,135 @@ func TestSignatures(t *testing.T) {
 		"serves no member")
 }
 
-// session is a read session: a P-256 key the user authorized once.
-type session struct {
-	signed identity.SignedSession
-	key    *ecdsa.PrivateKey
-}
-
-func (u *user) startSession(t *testing.T, n *testNode, lasts time.Duration) *session {
-	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pub, _ := key.PublicKey.Bytes()
-	ss, err := identity.SignSession(identity.Session{Agent: identity.Address(u.key), NodeKey: ethcommon.HexToAddress(n.NodeKey()),
-		Key: pub, Scope: identity.SessionScope, Expires: uint64(time.Now().Add(lasts).Unix()), Nonce: identity.NewNonce()}, u.key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return &session{signed: ss, key: key}
-}
-
-// query signs a query of u with the session key.
-func (s *session) query(t *testing.T, u *user, action, target, contract string, body any) identity.SignedQuery {
-	t.Helper()
-	q := u.query(t, action, target, contract, body).Query
-	sq, err := identity.SignWithSession(q, s.signed, s.key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return sq
-}
-
-func (s *session) auth(t *testing.T, u *user, action, target, contract string) string {
-	raw, _ := json.Marshal(s.query(t, u, action, target, contract, nil))
-	return string(raw)
-}
-
-// A session key signs reads, contract details and the stream; never transactions.
-func TestReadSessions(t *testing.T) {
+// Apps the user connects: the node reads for them, and signs the calls the
+// user allowed, under the user's grant, which partners check.
+func TestApps(t *testing.T) {
 	a, b := startNode(t, Config{}), startNode(t, Config{})
 	alice, bob := newUser(t), newUser(t)
-	events := openStream(t, a.URL, alice, "")
-	alice.register(t, a, events)
-	cid := alice.deploy(t, a, events, "Registry", "", map[string]any{"initialName": "s", "start": 0})
-	alice.write(t, a, events, cid, "setValue", map[string]any{"value": 3})
+	ea, eb := openStream(t, a.URL, alice, ""), openStream(t, b.URL, bob, "")
+	alice.register(t, a, ea)
+	bob.register(t, b, eb)
+	cid := alice.deploy(t, a, ea, "Registry", "", map[string]any{"initialName": "apps", "start": 0})
+	bob.join(t, b, a, alice, cid)
+	if ev := eb.waitAction(t, "join_contract"); ev["reply"] != true {
+		t.Fatalf("bob's join = %v", ev)
+	}
 	refused := func(what string, got any, want string) {
 		t.Helper()
 		if !strings.Contains(fmt.Sprint(got), want) {
 			t.Fatalf("%s: got %v, want an error with %q", what, got, want)
 		}
 	}
-	readBody := map[string]any{"method": "counter", "values": map[string]any{}}
-	read := func(s *session, u *user) any {
-		return call(t, a.URL, "POST", alice.id, "contract_read", cid, "", s.query(t, u, "contract_read", alice.id, cid, readBody))
+	code, _ := readTestdata(t, "Registry")
+	codeHash, _ := identity.CodeHash(code)
+	app, _ := identity.NewP256Key()
+	appQuery := func(action string, body any) identity.SignedQuery {
+		return alice.queryWith(t, identity.P256Signer{Key: app}, action, alice.id, cid, body)
+	}
+	write := func(value int) any {
+		return call(t, a.URL, "POST", alice.id, "contract_write", cid, "setValue",
+			appQuery("contract_write", map[string]any{"method": "setValue", "values": map[string]any{"value": value}}))
 	}
 
-	s := alice.startSession(t, a, time.Hour)
-	if got := read(s, alice); got != json.Number("1") {
-		t.Fatalf("read with a session = %v", got)
+	refused("an app alice did not connect", write(7), "nor an app it connected")
+	if got := alice.connectApp(t, a, app, codeHash, true, "setValue"); got != true {
+		t.Fatalf("connect = %v", got)
 	}
-	if list := getAuth(t, a.URL, alice.id, "get_contracts", "", s.auth(t, alice, "get_contracts", alice.id, "")).([]any); len(list) != 1 {
-		t.Fatalf("get_contracts with a session = %v", list)
+	// The node signs the app's call silently, under alice's grant; bob's node,
+	// a partner, checks the grant and applies it.
+	id, ok := write(7).(string)
+	if !ok {
+		t.Fatalf("silent write replied %v", id)
 	}
-	resp, err := http.Get(a.URL + "/stream?" + url.Values{"auth": {s.auth(t, alice, "stream", alice.id, "")}}.Encode())
+	if ev := ea.waitFor(t, id); ev["reply"] != json.Number("1") {
+		t.Fatalf("silent write = %v", ev)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for bob.read(t, b, cid, "getValue", map[string]any{"who": alice.id}) != json.Number("7") {
+		if time.Now().After(deadline) {
+			t.Fatal("bob's node did not apply the node-signed call")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if got := call(t, a.URL, "POST", alice.id, "contract_read", cid, "", appQuery("contract_read",
+		map[string]any{"method": "getValue", "values": map[string]any{"who": alice.id}})); got != json.Number("7") {
+		t.Fatalf("app's silent read = %v", got)
+	}
+	refused("a function alice did not allow", call(t, a.URL, "POST", alice.id, "contract_write", cid, "setThenFail",
+		appQuery("contract_write", map[string]any{"method": "setThenFail", "values": map[string]any{"value": 1}})), "needs your approval")
+
+	// A node signing under a grant for other code: partners refuse it in
+	// execution (the call is recorded, and changes nothing).
+	otherCode := crypto.Keccak256Hash([]byte("other code"))
+	wrong, _ := identity.CertifyGrant(identity.Grant{Agent: alice.addr, NodeKey: identity.Address(a.nodeKey),
+		CodeHash: otherCode, Functions: []string{"setValue"}, Nonce: "n"}, alice.root)
+	stx, _ := identity.SignTx(identity.Transaction{Contract: cid, Kind: identity.KindCall, Agent: alice.addr, Nonce: "w",
+		Body: `{"method":"setValue","values":{"value":99}}`}, identity.Secp256k1Signer{Key: a.nodeKey, Cert: wrong})
+	wid := call(t, a.URL, "POST", alice.id, "contract_write", cid, "setValue", stx)
+	if ev := ea.waitFor(t, wid); ev["reply"] != "the node's grant does not apply: it is for other code" {
+		t.Fatalf("call under a grant for other code = %v", ev)
+	}
+
+	// The same app in another browser: a new key, which Alice connects with
+	// one signature; the app's permissions apply to it, nothing to choose again.
+	app2, _ := identity.NewP256Key()
+	write2 := func(value int) any {
+		return call(t, a.URL, "POST", alice.id, "contract_write", cid, "setValue",
+			alice.queryWith(t, identity.P256Signer{Key: app2}, "contract_write", alice.id, cid,
+				map[string]any{"method": "setValue", "values": map[string]any{"value": value}}))
+	}
+	refused("a browser alice did not connect", write2(9), "nor an app it connected")
+	device, _ := identity.SignDevice(identity.Device{Agent: alice.addr, App: "https://app.example",
+		AppKey: identity.PublicKey(app2), Nonce: identity.NewNonce()}, alice.root)
+	if got := call(t, a.URL, "PUT", alice.id, "register_app", "", "", map[string]any{"device": device}); got != true {
+		t.Fatalf("connect a device = %v", got)
+	}
+	id, ok = write2(9).(string)
+	if !ok {
+		t.Fatalf("silent write from the second browser = %v", id)
+	}
+	if ev := ea.waitFor(t, id); ev["reply"] != json.Number("2") {
+		t.Fatalf("silent write from the second browser = %v", ev)
+	}
+	otherSite, _ := identity.SignDevice(identity.Device{Agent: alice.addr, App: "https://unknown.example",
+		AppKey: identity.PublicKey(app2), Nonce: "n"}, alice.root)
+	refused("a device of an app alice never approved", call(t, a.URL, "PUT", alice.id, "register_app", "", "",
+		map[string]any{"device": otherSite}), "has not approved")
+
+	// Alice sees her apps, and disconnects one, with all its browsers, with her root key.
+	apps := getAuth(t, a.URL, alice.id, "get_apps", "", alice.auth(t, "get_apps", alice.id, "", nil)).([]any)
+	if len(apps) != 1 || apps[0].(map[string]any)["app"] != "https://app.example" || len(apps[0].(map[string]any)["keys"].([]any)) != 2 {
+		t.Fatalf("get_apps = %v", apps)
+	}
+	revoke := alice.queryWith(t, alice.root, "revoke_app", alice.id, "", map[string]any{"app": "https://app.example"})
+	if got := call(t, a.URL, "PUT", alice.id, "revoke_app", "", "", revoke); got != true {
+		t.Fatalf("revoke = %v", got)
+	}
+	refused("the second browser of a revoked app", write2(10), "nor an app it connected")
+	refused("a revoked app", write(8), "nor an app it connected")
+
+	// A grant must name this node; the root key alone registers.
+	other, _ := identity.NewP256Key()
+	consent, _ := identity.SignConsent(identity.Consent{Agent: alice.addr, App: "https://x", AppKey: identity.PublicKey(other),
+		CodeHash: codeHash, Functions: []string{"setValue"}, Nonce: "n"}, alice.root)
+	grant, _ := identity.CertifyGrant(identity.Grant{Agent: alice.addr, NodeKey: ethcommon.HexToAddress(b.NodeKey()),
+		CodeHash: codeHash, Functions: []string{"setValue"}, Nonce: "n"}, alice.root)
+	refused("a grant for another node", call(t, a.URL, "PUT", alice.id, "register_app", "", "",
+		map[string]any{"consent": consent, "grant": grant}), "names another node")
+	byApp, _ := identity.SignConsent(consent.Consent, identity.P256Signer{Key: other})
+	refused("a consent the app signed itself", call(t, a.URL, "PUT", alice.id, "register_app", "", "",
+		map[string]any{"consent": byApp}), "signature")
+
+	// agent_info finds the agent from its root passkey, for a new device.
+	resp, err := http.Get(a.URL + "/ibc/app?action=agent_info&credential=" + hexutil.Encode(alice.credential))
 	if err != nil {
 		t.Fatal(err)
 	}
+	var found map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&found)
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("stream with a session: %s", resp.Status)
-	}
-	// Anyone may read with a session of their own; the contract sees them.
-	if got := read(bob.startSession(t, a, time.Hour), bob); got != json.Number("1") {
-		t.Fatalf("bob's read with a session = %v", got)
-	}
-
-	sq := s.query(t, alice, "contract_read", alice.id, cid, readBody)
-	call(t, a.URL, "POST", alice.id, "contract_read", cid, "", sq)
-	refused("replayed session query", call(t, a.URL, "POST", alice.id, "contract_read", cid, "", sq), "already used")
-	refused("session for another node", read(alice.startSession(t, b, time.Hour), alice), "session for node key")
-	refused("expired session", read(alice.startSession(t, a, -time.Minute), alice), "session expired")
-	refused("session longer than 7 days", read(alice.startSession(t, a, 8*24*time.Hour), alice), "longer than")
-	refused("bob's session lists alice's contracts", getAuth(t, a.URL, alice.id, "get_contracts", "",
-		bob.startSession(t, a, time.Hour).auth(t, bob, "get_contracts", alice.id, "")), "only agent")
-	// A session cannot sign a transaction: a write takes only a transaction
-	// signed by the agent's own key.
-	refused("write with a session", call(t, a.URL, "POST", alice.id, "contract_write", cid, "setValue",
-		s.query(t, alice, "contract_write", alice.id, cid, map[string]any{"method": "setValue", "values": map[string]any{"value": 9}})),
-		"needs a call transaction")
-	if got := read(s, alice); got != json.Number("1") {
-		t.Fatalf("counter after the refused write = %v", got)
+	if found["agent"] != alice.id || found["rootScheme"] != "webauthn" {
+		t.Fatalf("agent_info by credential = %v", found)
 	}
 }
 

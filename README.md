@@ -12,9 +12,10 @@ This is the Go version of [ibc](https://github.com/ouripoupko/ibc):
   [go-ethereum](https://github.com/ethereum/go-ethereum), so you write them in Solidity.
 - **Partners agree with [Cordial Miners](docs/consensus.md)**, a Byzantine fault-tolerant
   consensus protocol, run separately for each contract among its partners.
-- **Users sign their own actions** with an Ethereum key, in a browser wallet such as MetaMask. A
-  node never holds anyone's personal key. Reading can use a short-lived, read-only session key
-  instead, so that apps need not ask the wallet for every read.
+- **Users sign with a passkey**, a key kept in their phone's or computer's security hardware: no
+  wallet to install, and a node never holds it. Apps act for users through their node, which does
+  without asking only what the user allowed, per function.
+- **Apps send source code**: the user's node compiles it, and the user signs what was compiled.
 - **A node is a single program** with its own embedded database.
 
 > **Work in progress.** The essentials work end to end, but parts of the design are still to
@@ -28,6 +29,7 @@ This is the Go version of [ibc](https://github.com/ouripoupko/ibc):
 | [Deploying on a server](docs/deploy.md) | Running a node on a Linux server with HTTPS: service, Caddy, backups, updates |
 | [Usage guide](docs/usage.md) | Writing contracts, compiling them, and calling them from the shell or JavaScript |
 | [API reference](docs/api.md) | Every HTTP call, its parameters, replies, events and errors |
+| [Identity and keys](docs/keys.md) | Passkeys, the root and node keys, app permissions and grants, and how signatures are checked |
 | [Example contracts](examples/) | Counter, Poll and Board in Solidity, with a shell client and a JavaScript client |
 | [Architecture](docs/architecture.md) | How the node works inside, and how to develop it |
 | [Consensus design](docs/consensus.md) | The consensus protocol, Cordial Miners, and how membership changes |
@@ -70,10 +72,25 @@ go build -o ibc ./cmd/ibc
 The first build downloads the dependencies and takes a minute. The result is a single
 program, `ibc`.
 
-### 3. Run
+### 3. A Solidity compiler
+
+The node compiles contracts from their source, so it needs a Solidity compiler. Either:
+
+- **solc-js, through Node.js** (if you have Node.js): nothing to install; the node fetches it the
+  first time it compiles. Add `-solc "npx -y -p solc@0.8.38 solcjs"` when you run the node (step 4).
+- **The native `solc`** (faster): download `solc-static-linux` from the
+  [Solidity releases](https://github.com/ethereum/solidity/releases) (version 0.8.38), save it as
+  `solc` in a directory on your `PATH`, and make it executable (`chmod +x`). The node finds it
+  without any option.
+
+Without a compiler the node runs, but answers `this node has no Solidity compiler` when you deploy.
+
+### 4. Run
 
 ```sh
 ./ibc -addr 127.0.0.1:2611 -data ~/ibc-data
+# or, with solc-js:
+./ibc -addr 127.0.0.1:2611 -data ~/ibc-data -solc "npx -y -p solc@0.8.38 solcjs"
 ```
 
 The node is now serving at `http://localhost:2611`. Check it from another terminal:
@@ -85,9 +102,9 @@ curl 'http://localhost:2611/ibc/app?action=node_info'
 
 The reply is the address of the node's key, which the node uses to sign its consensus blocks.
 
-Open **http://localhost:2611** in a browser with a wallet, such as [MetaMask](https://metamask.io)
-or [Rabby](https://rabby.io), to use the node's
-web interface: register, deploy compiled contracts, join contracts, and call their functions.
+Open **http://localhost:2611** in a browser to use the node's web interface: create your identity
+with a passkey, deploy contracts from their source, join contracts, and call their functions. (Passkeys need
+`localhost` or `https`; they do not work at `http://127.0.0.1`.)
 Continue with the [usage guide](docs/usage.md) for the details, and for the shell and JavaScript
 clients.
 
@@ -103,6 +120,7 @@ stays in the data directory, and the node picks up from there when you start it 
 |---|---|---|---|
 | `-addr` | `IBC_ADDR` | `:2611` | Address and port the node listens on |
 | `-data` | `IBC_DATA` | `data` | Directory of the node's database and key |
+| `-solc` | `IBC_SOLC` | `solc` | The Solidity compiler the node runs to compile apps' source: `solc`, or solc-js, for example `"npx -y -p solc@0.8.38 solcjs"` (needs Node.js). Without one, the node cannot compile |
 
 Some things to know about them:
 

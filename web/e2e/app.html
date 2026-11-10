@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Test app</title>
+</head>
+<body>
+  <!-- An app on another site (the browser test serves it on its own port). It holds no
+       key of the user's: it has a key of its own, and asks the user's node, which asks
+       the user on its approval page when needed. -->
+  <button id="deploy">Deploy a chat</button>
+  <button id="post">Post</button>
+  <button id="topic">Read the topic</button>
+  <button id="setTopic">Set the topic</button>
+  <pre id="out"></pre>
+  <script type="module">
+    import { IbcApp } from './ibc.mjs';
+
+    const params = new URLSearchParams(location.search);
+    const out = document.querySelector('#out');
+    const log = (line) => { out.textContent += `${line}\n`; };
+    const app = await IbcApp.open(params.get('node'));
+    let chat = params.get('chat');
+    const run = (name, fn) => document.querySelector(`#${name}`).addEventListener('click', async () => {
+      try {
+        log(`${name} ${JSON.stringify(await fn())}`);
+      } catch (err) {
+        log(`${name} error ${err.message}`);
+      }
+    });
+    run('deploy', async () => {
+      const source = await (await fetch('/Chat.sol')).text();
+      chat = await app.deploy({ source, constructor: { initialTopic: 'lunch' } });
+      return chat;
+    });
+    run('post', () => app.write(chat, 'post', { text: `hello ${Date.now()}` }));
+    run('topic', () => app.read(chat, 'topic'));
+    run('setTopic', () => app.write(chat, 'setTopic', { newTopic: 'dinner' }));
+    window.appReady = true;
+  </script>
+</body>
+</html>

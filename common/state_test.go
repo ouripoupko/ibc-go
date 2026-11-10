@@ -142,7 +142,12 @@ func TestArgumentErrors(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			_, err := s.View("bob", tc.method, tc.values, t1)
+			// Arguments are checked the same way in a transaction (Call) and a read (View).
+			call := s.Call
+			if tc.method == "getValue" {
+				call = s.View
+			}
+			_, err := call("bob", tc.method, tc.values, t1)
 			var ce *ContractError
 			if !errors.As(err, &ce) || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("err = %v, want ContractError containing %q", err, tc.want)

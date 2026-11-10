@@ -16,9 +16,12 @@ When you are done:
 browser / other nodes ──HTTPS:443──► Caddy ──HTTP──► ibc on 127.0.0.1:2611 ──► /var/lib/ibc
 ```
 
-Why HTTPS: browser wallets refuse to work with a page on plain `http://` (except `localhost`), and
-so does the browser cryptography that read sessions use. Other nodes also reach yours at this
-address.
+Why HTTPS: passkeys work only on secure pages: `https://` (or `localhost`). Other nodes also reach yours at this address.
+
+**Choose the address for good.** Your users' passkeys belong to the node's address
+(`ibc.example.com`): the phone lets only that site use them. If the node moves to another address,
+its users cannot use their identity there. The node is its users'
+representation on the internet; give it a name you will keep.
 
 - [1. What you need](#1-what-you-need)
 - [2. Create the server](#2-create-the-server)
@@ -138,6 +141,25 @@ ssh root@SERVER_IP 'install -m 755 /tmp/ibc /usr/local/bin/ibc && rm /tmp/ibc'
 
 The web interface is built into the program; there are no other files to copy.
 
+**The Solidity compiler.** Apps send contracts as source, and the node compiles them, so the server
+needs a compiler. Pick one:
+
+- **x86 servers:** the official static `solc`, one file, from the
+  [Solidity releases](https://github.com/ethereum/solidity/releases) (`solc-static-linux`). Pick a
+  version and keep it: every node that compiles the same source should use the same one.
+
+  ```sh
+  ssh root@SERVER_IP
+  curl -L -o /usr/local/bin/solc https://github.com/ethereum/solidity/releases/download/v0.8.38/solc-static-linux
+  chmod 755 /usr/local/bin/solc
+  solc --version
+  ```
+
+- **Arm servers** (no official Arm build): solc-js through Node.js. Install Node.js (`apt install -y
+  nodejs npm`), and set `IBC_SOLC` to `npx -y -p solc@0.8.38 solcjs` in the service below.
+
+Without a compiler the node still runs, but cannot accept contracts from source.
+
 ## 6. Run ibc as a service
 
 On the server, create the file `/etc/systemd/system/ibc.service`:
@@ -155,6 +177,8 @@ ExecStart=/usr/local/bin/ibc
 # Listen inside the server only; Caddy passes the traffic in.
 Environment=IBC_ADDR=127.0.0.1:2611
 Environment=IBC_DATA=/var/lib/ibc
+# The Solidity compiler (step 5).
+Environment=IBC_SOLC=/usr/local/bin/solc
 # Creates /var/lib/ibc, owned by the ibc user.
 StateDirectory=ibc
 StateDirectoryMode=0700
@@ -236,14 +260,14 @@ If this fails, see [Troubleshooting](#12-troubleshooting).
 
 ## 8. Use it
 
-Open `https://ibc.example.com` in a browser with a wallet, connect, and register. Everything in the
-[usage guide](usage.md) now works against this address.
+Open `https://ibc.example.com` in a browser and create your identity: your passkey is made for
+this address. Everything in the [usage guide](usage.md) now works against it.
 
 - **Register at the HTTPS address.** When an agent registers, the page records the address it was
   opened at as the agent's node. Partners' nodes reach yours there, so always use
   `https://ibc.example.com`, not the IP address.
 - **The shell client** works the same way: `export IBC_URL=https://ibc.example.com`.
-- **One node serves many agents.** Each person registers their own agent with their own wallet.
+- **One node serves many agents.** Each person creates their own identity, with their own passkey.
 - **Partners on other servers** run their own nodes. Each node must be reachable at the address its
   agents registered.
 
@@ -283,7 +307,7 @@ systemctl start ibc
 
 Keep backups private: they hold the node key and the contracts' data. If the node key is lost, the
 node cannot sign for its agents any more. Each agent can then move its contracts to a new node with a
-`rotate_key` transaction, signed in its wallet (see the [API reference](api.md#rotate_key)).
+`rotate_key` transaction, signed with its passkey (see the [API reference](api.md#rotate_key)).
 
 ## 10. Updates
 
@@ -322,8 +346,9 @@ your node.
 |---|---|
 | Caddy cannot get a certificate (`journalctl -u caddy`) | The DNS record does not point at the server yet, or ports 80 and 443 are closed in the firewall |
 | `502 Bad Gateway` | ibc is not running: `systemctl status ibc`, `journalctl -u ibc` |
-| The page says no wallet was found | The browser has no wallet extension |
-| The wallet does nothing, or the header says reads are signed one by one | The page is open at `http://`, not `https://` |
+| The page says passkeys need a secure page | The page is open at `http://`, not `https://` |
+| "This passkey is not an ibc identity on this node" when signing in | The passkey was made on another node's address |
+| "this node has no Solidity compiler" | Install `solc` on the server, or set `IBC_SOLC` (step 5) |
 | `query expired, or its time is wrong` | The clock of the server or of the user's computer is wrong: `timedatectl` |
 | Partners never see your transactions, or a join never completes | Your node is not reachable at the address your agents registered, or theirs is not. Check with `curl https://<their node>/ibc/app?action=node_info` from each side |
 | The service does not start after an update | `journalctl -u ibc -e` shows why; restore the previous program, or a backup |

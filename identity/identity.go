@@ -1,7 +1,10 @@
-// Package identity holds ibc's signed objects: transactions and agent
-// registrations, signed by an agent's root key with EIP-712 (the format of
-// MetaMask's eth_signTypedData_v4), and the node's own key, which signs
-// blocks. Nodes never hold an agent's root key.
+// Package identity holds ibc's signed objects and the one place where their
+// signatures are checked (Verify, in envelope.go). An agent has two keys: its
+// root key, on the user's device, which signs its registration, its grants
+// and its transactions; and its node's key, which signs blocks, and signs
+// calls silently only under a grant from the root, which names the contract
+// code and the functions. Every message is signed as its EIP-712 digest, in
+// an envelope that carries the key and the grant (see docs/keys.md).
 package identity
 
 import (
@@ -11,12 +14,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
 	ethcommon "github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/signer/core/apitypes"
 )
 
@@ -49,25 +54,47 @@ type Transaction struct {
 	Body     string            `json:"body"` // JSON, by kind
 }
 
-// SignedTx is a transaction with the agent's signature.
+// SignedTx is a transaction with its signature: by the agent's root key, or by its node under a grant.
 type SignedTx struct {
-	Tx        Transaction   `json:"tx"`
-	Signature hexutil.Bytes `json:"signature"`
+	Tx        Transaction `json:"tx"`
+	Signature Envelope    `json:"signature"`
+}
+
+// EncodeRLP writes the signed transaction into a block as its JSON text, so
+// that blocks carry envelopes of any shape.
+func (s SignedTx) EncodeRLP(w io.Writer) error {
+	raw, err := json.Marshal(s)
+	if err != nil {
+		return err
+	}
+	return rlp.Encode(w, raw)
+}
+
+// DecodeRLP reads a signed transaction written by EncodeRLP.
+func (s *SignedTx) DecodeRLP(st *rlp.Stream) error {
+	raw, err := st.Bytes()
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(raw, s)
 }
 
 // Registration authorizes a node to act for an agent: to sign blocks of the
-// agent's contracts with the node's key.
+// agent's contracts with the node's key. The agent's root key signs it.
 type Registration struct {
 	Agent   ethcommon.Address `json:"agent"`
 	Node    string            `json:"node"`    // the node's URL
 	NodeKey ethcommon.Address `json:"nodeKey"` // the address of the node's key
-	Nonce   string            `json:"nonce"`
+	// The root passkey's credential id, so that the agent can be found from
+	// its passkey on a new device; empty for other root keys.
+	Credential hexutil.Bytes `json:"credential"`
+	Nonce      string        `json:"nonce"`
 }
 
-// SignedRegistration is a registration with the agent's signature.
+// SignedRegistration is a registration with the root key's signature.
 type SignedRegistration struct {
-	Registration Registration  `json:"registration"`
-	Signature    hexutil.Bytes `json:"signature"`
+	Registration Registration `json:"registration"`
+	Signature    Envelope     `json:"signature"`
 }
 
 var domainType = []apitypes.Type{{Name: "name", Type: "string"}, {Name: "version", Type: "string"}}
@@ -76,7 +103,7 @@ func domain() apitypes.TypedDataDomain {
 	return apitypes.TypedDataDomain{Name: DomainName, Version: DomainVersion}
 }
 
-// TypedData returns the transaction as EIP-712 typed data, as a wallet signs it.
+// TypedData returns the transaction as EIP-712 typed data.
 func (t Transaction) TypedData() apitypes.TypedData {
 	return apitypes.TypedData{
 		Types: apitypes.Types{
@@ -115,16 +142,18 @@ func (r Registration) TypedData() apitypes.TypedData {
 				{Name: "agent", Type: "address"},
 				{Name: "node", Type: "string"},
 				{Name: "nodeKey", Type: "address"},
+				{Name: "credential", Type: "bytes"},
 				{Name: "nonce", Type: "string"},
 			},
 		},
 		PrimaryType: "Registration",
 		Domain:      domain(),
 		Message: apitypes.TypedDataMessage{
-			"agent":   r.Agent.Hex(),
-			"node":    r.Node,
-			"nodeKey": r.NodeKey.Hex(),
-			"nonce":   r.Nonce,
+			"agent":      r.Agent.Hex(),
+			"node":       r.Node,
+			"nodeKey":    r.NodeKey.Hex(),
+			"credential": hexutil.Encode(r.Credential),
+			"nonce":      r.Nonce,
 		},
 	}
 }
@@ -142,8 +171,11 @@ func typedHash(td apitypes.TypedData) (ethcommon.Hash, error) {
 	return ethcommon.BytesToHash(digest), nil
 }
 
-// Verify checks that the transaction is well formed and signed by its agent,
-// and returns its id.
+// Verify checks that the transaction is well formed and signed by one of its
+// agent's root key, or by the agent's node under a grant, and returns its id.
+// A node may sign only calls to the functions its grant names; execution
+// then checks the grant's code hash and node against the contract. It uses
+// no clock, so every partner reaches the same answer.
 func (s SignedTx) Verify() (ethcommon.Hash, error) {
 	if err := s.Tx.check(); err != nil {
 		return ethcommon.Hash{}, err
@@ -152,30 +184,55 @@ func (s SignedTx) Verify() (ethcommon.Hash, error) {
 	if err != nil {
 		return ethcommon.Hash{}, err
 	}
-	signer, err := Recover(hash, s.Signature)
+	signer, err := Verify(hash, s.Signature, ForTransaction)
 	if err != nil {
 		return ethcommon.Hash{}, err
 	}
-	if signer != s.Tx.Agent {
+	if signer.Agent != s.Tx.Agent {
 		return ethcommon.Hash{}, ErrBadSignature
+	}
+	if g := signer.Grant; g != nil {
+		if s.Tx.Kind != KindCall {
+			return ethcommon.Hash{}, errors.New("a node signs only calls: this transaction needs the root key")
+		}
+		body, err := s.Tx.ParseBody()
+		if err != nil {
+			return ethcommon.Hash{}, err
+		}
+		if method := body.(*CallBody).Method; !g.Allows(method) {
+			return ethcommon.Hash{}, fmt.Errorf("the grant does not let the node call %s: it needs the root key", method)
+		}
 	}
 	return hash, nil
 }
 
-// Verify checks that the registration is signed by its agent.
-func (s SignedRegistration) Verify() (ethcommon.Hash, error) {
+// Grant returns the grant a node signed this transaction under, or nil if
+// the agent's root key signed it. (Call it on a verified transaction.)
+func (s SignedTx) Grant() *Grant {
+	if s.Signature.Certificate == nil {
+		return nil
+	}
+	return &s.Signature.Certificate.Grant
+}
+
+// Verify checks that the registration is signed by its agent's root key, and
+// returns its digest and the root key.
+func (s SignedRegistration) Verify() (ethcommon.Hash, Signer, error) {
 	hash, err := s.Registration.Hash()
 	if err != nil {
-		return ethcommon.Hash{}, err
+		return ethcommon.Hash{}, Signer{}, err
 	}
-	signer, err := Recover(hash, s.Signature)
+	if s.Signature.Certificate != nil {
+		return ethcommon.Hash{}, Signer{}, errors.New("a registration is signed by the root key")
+	}
+	signer, err := Verify(hash, s.Signature, ForRoot)
 	if err != nil {
-		return ethcommon.Hash{}, err
+		return ethcommon.Hash{}, Signer{}, err
 	}
-	if signer != s.Registration.Agent {
-		return ethcommon.Hash{}, ErrBadSignature
+	if signer.Agent != s.Registration.Agent {
+		return ethcommon.Hash{}, Signer{}, ErrBadSignature
 	}
-	return hash, nil
+	return hash, signer, nil
 }
 
 func (t Transaction) check() error {
@@ -211,6 +268,10 @@ type (
 		Constructor map[string]any    `json:"constructor,omitempty"`
 		Node        string            `json:"node"`
 		NodeKey     ethcommon.Address `json:"nodeKey"`
+		// The Solidity source and how the node compiled it, when the node
+		// compiled Code from it (see package compiler).
+		Source   string          `json:"source,omitempty"`
+		Compiler json.RawMessage `json:"compiler,omitempty"`
 	}
 	CallBody struct {
 		Method string         `json:"method"`
@@ -317,34 +378,35 @@ func Recover(hash ethcommon.Hash, sig []byte) (ethcommon.Address, error) {
 	return crypto.PubkeyToAddress(*pub), nil
 }
 
-// Sign signs a transaction with a root key. Wallets do this for real users;
-// this is for tests and command-line tools.
-func Sign(t Transaction, key *ecdsa.PrivateKey) (SignedTx, error) {
+// SignTx signs a transaction (the command line and tests; apps sign in the
+// browser).
+func SignTx(t Transaction, s KeySigner) (SignedTx, error) {
 	hash, err := t.Hash()
 	if err != nil {
 		return SignedTx{}, err
 	}
-	sig, err := SignHash(hash, key)
+	env, err := s.SignDigest(hash)
 	if err != nil {
 		return SignedTx{}, err
 	}
-	return SignedTx{Tx: t, Signature: sig}, nil
+	return SignedTx{Tx: t, Signature: env}, nil
 }
 
-// SignRegistration signs a registration with a root key (tests and tools).
-func SignRegistration(r Registration, key *ecdsa.PrivateKey) (SignedRegistration, error) {
+// SignRegistration signs a registration with a root key (the command line
+// and tests).
+func SignRegistration(r Registration, s KeySigner) (SignedRegistration, error) {
 	hash, err := r.Hash()
 	if err != nil {
 		return SignedRegistration{}, err
 	}
-	sig, err := SignHash(hash, key)
+	env, err := s.SignDigest(hash)
 	if err != nil {
 		return SignedRegistration{}, err
 	}
-	return SignedRegistration{Registration: r, Signature: sig}, nil
+	return SignedRegistration{Registration: r, Signature: env}, nil
 }
 
-// Address returns the address of a key.
+// Address returns the address of a secp256k1 key, such as a node key.
 func Address(key *ecdsa.PrivateKey) ethcommon.Address {
 	return crypto.PubkeyToAddress(key.PublicKey)
 }
@@ -367,4 +429,14 @@ func LoadOrCreateNodeKey(path string) (*ecdsa.PrivateKey, error) {
 		return nil, fmt.Errorf("save node key %s: %w", path, err)
 	}
 	return key, nil
+}
+
+// CodeHash is a contract code's hash, as grants and consents name it: the
+// keccak256 of the creation bytecode (hex, with or without 0x).
+func CodeHash(code string) (ethcommon.Hash, error) {
+	raw, err := hex.DecodeString(strings.TrimPrefix(strings.TrimSpace(code), "0x"))
+	if err != nil || len(raw) == 0 {
+		return ethcommon.Hash{}, errors.New("code must be hex bytecode")
+	}
+	return crypto.Keccak256Hash(raw), nil
 }

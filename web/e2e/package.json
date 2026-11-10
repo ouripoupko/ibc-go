@@ -4,7 +4,6 @@
   "type": "module",
   "description": "Browser test of the ibc web interface (optional; needs Chrome)",
   "dependencies": {
-    "ethers": "6.13.4",
     "puppeteer-core": "23.11.1"
   }
 }

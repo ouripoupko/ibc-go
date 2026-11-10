@@ -21,6 +21,7 @@ import (
 	"github.com/ethereum/go-ethereum/ethdb"
 
 	"github.com/ouripoupko/ibc-go/common"
+	"github.com/ouripoupko/ibc-go/compiler"
 	"github.com/ouripoupko/ibc-go/consensus"
 	"github.com/ouripoupko/ibc-go/consensus/cordial"
 	"github.com/ouripoupko/ibc-go/dispatcher"
@@ -43,6 +44,9 @@ type Config struct {
 	Sender common.Sender
 	// Params are the consensus rules; zero for the defaults.
 	Params cordial.Params
+	// Solc is the Solidity compiler command, for compiling apps' source
+	// (for example ["solc"]); empty: the node cannot compile.
+	Solc []string
 }
 
 // Node is a running ibc node.
@@ -106,7 +110,14 @@ func New(cfg Config) (*Node, error) {
 	if cfg.DB == nil {
 		data.dir = cfg.DataDir
 	}
-	api := dispatcher.New(n.navigator, n.consensus, n.broker, identity.Address(n.nodeKey), data.Size, n.done)
+	var solc *compiler.Solc
+	if len(cfg.Solc) > 0 {
+		solc = &compiler.Solc{Command: cfg.Solc}
+	}
+	api := dispatcher.New(n.navigator, n.consensus, n.broker, dispatcher.Options{
+		NodeKey: n.nodeKey, Storage: data.Size, Compiler: solc,
+		Apps: common.NewKVStore(n.db).Collection(dispatcher.AppsCollection),
+	}, n.done)
 	mux := http.NewServeMux()
 	mux.Handle("/ibc/", api)
 	mux.Handle("/stream", api)

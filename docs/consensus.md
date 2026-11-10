@@ -63,16 +63,17 @@ dissemination is all-to-all.
 
 ## 3. Keys and signatures
 
-All keys are secp256k1, the curve of Ethereum.
+Agents' keys are described in [Identity and keys](keys.md); in short:
 
 | Key | Held by | Signs |
 |---|---|---|
-| An agent's **root key** | The agent, in MetaMask (or any Ethereum wallet) | Transactions and the agent's registration |
-| The **node key** | The node; one per node, created on first start | Blocks |
+| An agent's **root key** | The agent: a passkey (P-256), or a secp256k1 key file | The agent's registration and transactions, and grants for its node |
+| The **node key** | The node; one per node, created on first start (secp256k1) | Blocks; and calls an agent allows, under the agent's grant |
 
 - **The agent id is the root key's address** (`0x…`, 40 hex digits). It is also the agent's
   `msg.sender` in contracts.
-- **Nodes never hold personal keys.** A node signs blocks only, with its own key.
+- **Nodes never hold personal keys.** A node signs blocks with its own key, and calls only under an
+  agent's grant, which names the code and the functions.
 - **An agent authorizes its node by registering.** The registration names the node and its node key
   and is signed by the agent. Contracts learn a member's node key from the member's deploy or join
   transaction, which is signed by the member's root key.
@@ -81,8 +82,10 @@ All keys are secp256k1, the curve of Ethereum.
 
 ## 4. Transactions
 
-A transaction is signed by the agent's root key with EIP-712 (`eth_signTypedData_v4` in
-MetaMask), so the wallet shows the fields before signing.
+A transaction is signed by the agent's root key, or, for a call the agent allows silently, by its
+node under the agent's grant, as its EIP-712 digest, in an envelope that carries the key and the
+grant. Any partner checks it
+from the block alone, without a clock ([Identity and keys](keys.md#6-the-signature-envelope)).
 
 ```
 domain:  { name: "ibc", version: "1" }
@@ -344,7 +347,7 @@ all three variants with equivocating miners.
 | # | Decision |
 |---|---|
 | D1 | The agent id is the address of the agent's root key |
-| D2 | No custodial mode: nodes never hold personal keys; users sign in their wallets (MetaMask or another) |
+| D2 | No custodial mode: nodes never hold personal keys; users sign with passkeys ([keys](keys.md)) |
 | — | One node key per node, authorized by each hosted agent's registration |
 | — | secp256k1 keys; EIP-712 signatures |
 | D3 | One blocklace; membership changes freeze the contract until output, and switch at the leader that output them (§10) |
@@ -360,7 +363,7 @@ all three variants with equivocating miners.
 ## 13. Not in this version
 
 - The personal two-pointer ledger of the ssDA paper (same-contract and same-agent pointers).
-- Session keys for transactions. (Read sessions exist; transactions stay signed by the agents'
-  own keys, so every ledger entry is.)
+- Recovery of a lost root key through trusted friends, and a native
+  app for the root key.
 - A timeout in eventual synchrony, and the asynchronous variant with a shared coin.
 - Contract events (logs).

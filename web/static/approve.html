@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ibc · Approve</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <h1><a href="./" target="_blank">ibc</a></h1>
+    <div class="who" id="who"></div>
+  </header>
+  <main>
+    <section class="card">
+      <h2 id="title">Waiting for the app…</h2>
+      <p id="what"></p>
+      <dl class="details hidden" id="details"></dl>
+      <p class="hidden" id="code-toggle"><button type="button" class="link" id="show-code">Show the code</button></p>
+      <pre class="result hidden" id="code"></pre>
+
+      <div class="hidden" id="permissions">
+        <h3 style="font-size: 15px; margin: 18px 0 4px">What may this app do without asking you?</h3>
+        <label class="check"><input type="checkbox" id="perm-read" checked> Read these contracts</label>
+        <p class="hint" id="perm-writes-hint">Call these functions (your node signs them for you):</p>
+        <div id="perm-writes"></div>
+        <p class="hint">Everything else, it asks you here, each time.</p>
+      </div>
+
+      <div class="hidden" id="sign-in-box">
+        <p>Sign in with your passkey to continue.</p>
+        <button id="sign-in">Sign in</button>
+      </div>
+
+      <div class="row hidden" id="buttons" style="margin-top: 16px">
+        <button id="approve">Approve</button>
+        <button class="secondary" id="deny">Deny</button>
+      </div>
+      <div class="status" id="status"></div>
+    </section>
+  </main>
+  <script type="module" src="approve.mjs"></script>
+</body>
+</html>

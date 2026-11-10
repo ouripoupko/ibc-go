@@ -21,11 +21,11 @@ connected through Redis, and kept its data in MongoDB. Contracts were Python cla
 The Go node is one process. Its parts are goroutines connected by function calls, the data is in an
 embedded [Pebble](https://github.com/cockroachdb/pebble) database, contracts run on the EVM from
 [go-ethereum](https://github.com/ethereum/go-ethereum), and partners agree with
-[Cordial Miners](consensus.md). Users sign every change with their own Ethereum key; nodes never
-hold personal keys.
+[Cordial Miners](consensus.md). Users sign every change with their own keys (passkeys; see
+[Identity and keys](keys.md)); nodes never hold personal keys.
 
 ```
-client (a wallet signs)
+client (a passkey signs)
    │ signed transaction
    ▼
 HTTP (dispatcher) ── reads ──────────────────► execution: read-only call on the latest state
@@ -50,7 +50,8 @@ execution.Navigator.Submit
 | [`cmd/ibc`](../cmd/ibc) | `ibc.py`, `*_service.py` | The program: the node, and key and signing tools |
 | [`node`](../node) | `docker-start.sh` | Wires storage, execution, consensus and HTTP in one process; startup recovery; orderly shutdown |
 | [`dispatcher`](../dispatcher) | `ibc.py`, `dispatcher/` | HTTP API, Server-Sent Events, the in-process event broker |
-| [`web`](../web) | — | The web interface: static pages and the JavaScript client, embedded in the binary and served at `/`. They call the API from the browser and sign with the browser wallet; reads are signed by a read session the browser keeps |
+| [`web`](../web) | — | The web interface: static pages and the JavaScript client, embedded in the binary and served at `/`. They call the API from the browser; the root passkey signs, and the page's own key reads. `approve.html` is where apps send the user to approve |
+| [`compiler`](../compiler) | — | Runs the Solidity compiler (`solc` or `solcjs`, `-solc`) on apps' source, with fixed settings |
 | [`identity`](../identity) | — | Signed transactions and registrations (EIP-712), the node key |
 | [`consensus`](../consensus) | `consensus/` | The `Protocol` interface and the `Router`, which runs each contract's protocol, carries miners' messages between nodes, and syncs joining nodes |
 | [`consensus/cordial`](../consensus/cordial) | `consensus/pbft.py` | Cordial Miners: blocks, the blocklace, τ, the miner, its store, and the simulator tests |
@@ -60,7 +61,8 @@ execution.Navigator.Submit
 ## The life of a transaction
 
 1. **The client** builds a transaction (deploy, call, join, leave or rotate_key) and has the user
-   sign it, in a wallet or with a key file.
+   sign it with the root key (a passkey, or a key file); or, for a call an app may make silently,
+   the node signs it under the user's grant.
 2. **The dispatcher** checks that the agent in the URL is the signer and hands the transaction to
    the router.
 3. **The router** verifies the signature and gives it to the agent's miner of the contract, which
@@ -93,8 +95,9 @@ the old root, and the record is applied again.
 
 ### Reads
 
-`contract_read` does not go through consensus or the contract's goroutine. It opens the contract's
-state at its latest root and runs the call on a copy that is thrown away. A read never deploys a
+`contract_read` does not go through consensus or the contract's goroutine. It runs only `view` and
+`pure` functions (it refuses others: they are transactions), on the contract's state at its latest
+root. A read never deploys a
 contract: a contract whose deploy record has not been applied yet is reported as unknown.
 
 ### Signatures on every call
@@ -108,11 +111,14 @@ The dispatcher checks a signature on every call that changes or shows an agent's
   60 seconds of the node's clock, and accepted once. A read runs with `msg.sender` set to the
   signer, so the contract's own `view` functions decide what each reader may see; the other calls
   are for the agent itself only.
-- **Read sessions** ([`identity/session.go`](../identity/session.go)) let a P-256 key, made by
-  the browser and approved once by the agent, sign queries on one node until a time (7 days at
-  most). They are stateless: each query carries its signed session, and the node keeps nothing.
-  Only queries accept them; transactions and registrations take only the agent's own key, so every
-  ledger entry is signed by an agent itself.
+- **Every signature** is checked by one function, `identity.Verify`
+  ([`identity/envelope.go`](../identity/envelope.go)): the scheme (secp256k1, P-256 or WebAuthn),
+  and, for a call the node signed, the grant the agent's root signed (its functions; execution also
+  checks its code hash and node). Inside consensus it uses no clock. The dispatcher, the miners and a
+  joining node's ledger replay all call it. See [Identity and keys](keys.md).
+- **Apps** ([`dispatcher/apps.go`](../dispatcher/apps.go)): the node keeps, per agent and app key,
+  what the user allowed per contract code: reading, and the functions the node may call silently,
+  with the grant. The dispatcher answers an app's reads and signs its silent calls accordingly.
 - **Node-to-node messages** are signed with the sending node's key when they are sent, not when
   they are queued, so the outbox's retries stay fresh ([`consensus/a2a.go`](../consensus/a2a.go)).
   Requests for blocks or the ledger are answered only for the nodes of the contract's members.
@@ -203,9 +209,12 @@ go vet ./...
 web/e2e/run.sh       # optional: the web interface in headless Chrome (needs Node.js and Chrome)
 ```
 
-The browser test starts two nodes and drives the web interface as two users, with a stand-in for
-browser wallet that signs with an ethers.js wallet: register, deploy, write, read, invite, join. It is
-not part of `go test`.
+The browser test starts two nodes and drives the web interface as two users, with Chrome's virtual
+passkey authenticator in place of a phone: create an identity, deploy, write, read, invite, join,
+sign in on a new device, and an app on another site that deploys a chat (the user chooses its
+permissions on the node's approval page), posts silently, asks for the rest, and is disconnected. It is not part of `go test`. `node --test web/test/*.test.mjs` checks that the
+JavaScript client computes the same digests and addresses as Go (`identity/testdata/vectors.json`;
+refresh it with `go test ./identity -run TestVectors -update`).
 
 The tests include:
 
@@ -246,8 +255,8 @@ upgrade together.
 
 - **The personal ledger** of the ssDA paper: one DAG per agent with same-contract and same-agent
   pointers, linking an agent's actions across contracts.
-- **Ending a read session early.** The node keeps no record of sessions, so a session lasts until
-  it expires; the app can only forget its key.
+- **Recovering an identity** whose passkey is lost: future work, through trusted friends.
+- **A native app for the root key.** The root passkey belongs to the node's web address for now.
 - **Contract events.** Logs emitted by contracts are discarded.
 - **Precompile addresses.** There are no precompiles, but a call to one of their addresses does not
   fail: `ecrecover` and `ripemd160` return zero, `sha256` reverts.

@@ -7,8 +7,9 @@ The complete HTTP interface of an ibc node. For a guided introduction with examp
 - [Signatures](#signatures)
 - [Values](#values)
 - [The node](#the-node): `node_info`
-- [Agents](#agents): `register_agent`, `is_exist_agent`
-- [Contracts](#contracts): `deploy_contract`, `get_contracts`, `get_contract`
+- [Agents](#agents): `register_agent`, `is_exist_agent`, `agent_info`
+- [Apps](#apps): `register_app`, `get_apps`, `revoke_app`
+- [Contracts](#contracts): `compile`, `deploy_contract`, `get_contracts`, `get_contract`
 - [Calling a contract](#calling-a-contract): `contract_write`, `contract_read`
 - [Membership](#membership): `join_contract`, `leave_contract`, `rotate_key`
 - [The event stream](#the-event-stream): `/stream`
@@ -71,53 +72,124 @@ answered with status `204`, allowing the methods `GET`, `POST`, `PUT` and `DELET
 
 ### Who may do what
 
-Every change is signed by the agent that makes it, and checked by the node and by every partner.
-Every read is signed too, as a [query](#queries):
+Everything done in an agent's name is signed by the agent's root key, or, for the calls the agent
+lets an app make silently, by the agent's node under the agent's grant. The node and every partner
+check it. Reads are signed too, as [queries](#queries).
 
 | Call | Who may make it |
 |---|---|
-| `contract_read` | Anyone with a key. The contract sees the signer as `msg.sender`, and decides what to answer |
-| `get_contracts`, `get_contract`, the event stream | The agent itself only |
-| `node_info`, `is_exist_agent` | Anyone, unsigned |
+| `register_agent`, `register_app`, `revoke_app` | The agent, with its root key |
+| `deploy_contract`, `contract_write`, `join_contract`, `leave_contract`, `rotate_key` | The agent, with its root key |
+| `contract_write` with a query | An app the agent connected, for a function the agent lets it call silently: the node signs |
+| `contract_read`, `get_contract`, `get_contracts`, the event stream | The agent's root key, or an app the agent connected and lets read |
+| `get_apps` | The agent (its root key, or its node's own page) |
+| `node_info`, `is_exist_agent`, `agent_info`, `compile` | Anyone, unsigned |
 | Node to node (`a2a_consent`) | Nodes, signed with their node key; see [Node to node](#node-to-node) |
 
-The node never shows one agent's data to another, except what a contract's own functions return.
-The node's operator can still see everything stored on the node.
+An agent reads only its own copy of a contract. The node's operator can still see everything stored
+on the node.
 
 ## Signatures
 
-Agents sign with their Ethereum key, using [EIP-712](https://eips.ethereum.org/EIPS/eip-712)
-typed data: a browser wallet's `eth_signTypedData_v4` (MetaMask, Rabby, …), or `signTypedData` of
-ethers.js. The signature is
-the usual 65-byte `0x`-hex string.
+An agent has two keys (the design is in [Identity and keys](keys.md)):
+
+| Key | Signs |
+|---|---|
+| **Root key:** a passkey, or a key file; its address is the agent id | Registrations, transactions, and the agent's permissions for apps (consents and grants) |
+| **Node key:** the node's own key | Blocks; and calls the agent lets an app make silently, under the agent's grant |
+
+Apps have keys of their own, which sign their [queries](#queries) to the node.
+
+Every message is signed as its [EIP-712](https://eips.ethereum.org/EIPS/eip-712) digest, with this
+domain and these types:
 
 ```js
 const domain = { name: 'ibc', version: '1' };
 const types = {
   Transaction: [
-    { name: 'contract', type: 'string' },   // the contract id; "" for a deploy
-    { name: 'kind',     type: 'string' },   // deploy | call | join | leave | rotate_key
-    { name: 'agent',    type: 'address' },  // the signer
-    { name: 'nonce',    type: 'string' },   // random, to make each transaction unique
-    { name: 'body',     type: 'string' },   // JSON text, by kind (below)
+    { name: 'contract',   type: 'string' },   // the contract id; "" for a deploy
+    { name: 'kind',       type: 'string' },   // deploy | call | join | leave | rotate_key
+    { name: 'agent',      type: 'address' },  // the agent
+    { name: 'nonce',      type: 'string' },   // random, to make each transaction unique
+    { name: 'body',       type: 'string' },   // JSON text, by kind (below)
   ],
   Registration: [
-    { name: 'agent',    type: 'address' },  // the signer
-    { name: 'node',     type: 'string' },   // the node's URL
-    { name: 'nodeKey',  type: 'address' },  // the node's key, from node_info
-    { name: 'nonce',    type: 'string' },
+    { name: 'agent',      type: 'address' },
+    { name: 'node',       type: 'string' },   // the node's URL
+    { name: 'nodeKey',    type: 'address' },  // the node's key, from node_info
+    { name: 'credential', type: 'bytes' },    // the root passkey's credential id, or empty
+    { name: 'nonce',      type: 'string' },
   ],
   Query: [
-    { name: 'agent',    type: 'address' },  // the signer: who asks
-    { name: 'action',   type: 'string' },   // contract_read | get_contract | get_contracts | stream
-    { name: 'target',   type: 'string' },   // the agent whose copy is asked: the URL's <agent>
-    { name: 'contract', type: 'string' },   // the URL's <contract>, or ""
-    { name: 'body',     type: 'string' },   // JSON text, by action (below), or ""
-    { name: 'time',     type: 'uint64' },   // unix seconds when signed
-    { name: 'nonce',    type: 'string' },
+    { name: 'agent',      type: 'address' },  // the agent the query acts for
+    { name: 'action',     type: 'string' },   // contract_read | get_contract | get_contracts | stream | ...
+    { name: 'target',     type: 'string' },   // the URL's <agent>: the same agent
+    { name: 'contract',   type: 'string' },   // the URL's <contract>, or ""
+    { name: 'body',       type: 'string' },   // JSON text, by action (below), or ""
+    { name: 'time',       type: 'uint64' },   // unix seconds when signed
+    { name: 'nonce',      type: 'string' },
+  ],
+  Grant: [                                     // lets the agent's node sign calls silently
+    { name: 'agent',      type: 'address' },
+    { name: 'nodeKey',    type: 'address' },  // the node that may sign
+    { name: 'codeHash',   type: 'bytes32' },  // keccak256 of the contract's creation code
+    { name: 'functions',  type: 'string[]' }, // the functions it may call
+    { name: 'nonce',      type: 'string' },
+  ],
+  Device: [                                    // connects another browser of an approved app (kept by the node)
+    { name: 'agent',      type: 'address' },
+    { name: 'app',        type: 'string' },   // the app's origin
+    { name: 'appKey',     type: 'bytes' },    // the new browser's P-256 public key
+    { name: 'nonce',      type: 'string' },
+  ],
+  Consent: [                                   // what the agent lets an app do (kept by the node)
+    { name: 'agent',      type: 'address' },
+    { name: 'app',        type: 'string' },   // the app's origin, e.g. https://wishes.example.com
+    { name: 'appKey',     type: 'bytes' },    // the app's P-256 public key, uncompressed
+    { name: 'codeHash',   type: 'bytes32' },  // the contract code; zero: every contract (read only)
+    { name: 'read',       type: 'bool' },     // may read without asking
+    { name: 'functions',  type: 'string[]' }, // may have the node call these without asking
+    { name: 'nonce',      type: 'string' },
+  ],
+  Batch: [                                     // one signature over several messages
+    { name: 'items',      type: 'bytes32[]' }, // their digests
   ],
 };
 ```
+
+### The envelope
+
+A signature is sent as an envelope that carries everything needed to check it:
+
+```json
+{
+  "scheme": "webauthn",
+  "key": "0x04…",
+  "sig": "0x3045…",
+  "authenticatorData": "0x49960de5…",
+  "clientDataJSON": "{\"type\":\"webauthn.get\",\"challenge\":\"…\",\"origin\":\"https://ibc.example.com\"}"
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `scheme` | `secp256k1-eip712`: a 65-byte secp256k1 signature of the digest (key files, node keys). `p256`: ECDSA P-256 with SHA-256 over the digest, 64 bytes (`r`, `s`) (app keys). `webauthn`: a passkey assertion whose challenge is the digest; `sig` is DER |
+| `key` | The signing public key, uncompressed, 65 bytes. Optional for `secp256k1-eip712` |
+| `authenticatorData`, `clientDataJSON` | `webauthn` only, as the passkey returned them |
+| `certificate` | Only on a call the node signed: `{"grant": {…}, "signature": <the root's envelope>}` |
+| `batch` | For a batch signature: the digests of all the messages signed at once. The key signed the `Batch` digest, and this message's digest must be in the list |
+
+A transaction is accepted if the agent's root key signed it, or if the agent's node signed it under
+a grant the root signed, for a `call` to a function the grant names. Execution then also checks the
+grant's `codeHash` against the contract's code, and its `nodeKey` against the agent's node in this
+contract; otherwise the call is recorded with the result `"the node's grant does not apply: it is for
+other code"` (or `for another node`) and changes nothing. Errors include: `signature does not match
+the agent`; `the grant does not let the node call setTopic: it needs the root key`; `a node signs only
+calls: this transaction needs the root key`; `grant: not signed by the agent's root key`; `signature:
+not by the node the grant names`; `webauthn: the user did not approve`; `webauthn: the signature is
+for another message`; `signature: the message is not in its batch`.
+
+### Transactions
 
 A signed transaction is sent as:
 
@@ -125,16 +197,16 @@ A signed transaction is sent as:
 {
   "tx": {"contract": "0x67bb…", "kind": "call", "agent": "0x86D6…", "nonce": "9f2c…",
          "body": "{\"method\":\"increment\",\"values\":{\"amount\":5}}"},
-  "signature": "0x…"
+  "signature": { "scheme": "webauthn", "key": "0x04…", "sig": "0x…", "…": "…" }
 }
 ```
 
-The **transaction id** is the EIP-712 digest of the transaction. A deploy's id is the new contract's
-id. The bodies, by kind:
+The **transaction id** is the EIP-712 digest of the transaction, whoever signs it. A deploy's id is
+the new contract's id. The bodies, by kind:
 
 | Kind | Body |
 |---|---|
-| `deploy` | `{"name", "contract", "protocol", "default_app", "profile", "code", "abi", "constructor", "node", "nodeKey"}`: see [deploy_contract](#deploy_contract) |
+| `deploy` | `{"name", "contract", "protocol", "default_app", "profile", "code", "abi", "constructor", "node", "nodeKey", "source", "compiler"}`: see [deploy_contract](#deploy_contract) |
 | `call` | `{"method": "increment", "values": {"amount": 5}}` |
 | `join` | `{"node": "<your node's URL>", "nodeKey": "<your node's key>", "profile": …}` |
 | `leave` | `{"member": "<agent id>"}`: yourself to leave, or another member to remove |
@@ -142,83 +214,38 @@ id. The bodies, by kind:
 
 ### Queries
 
-A query is a signed request to see something. It is never ordered or stored, and its EIP-712 type
-is not a transaction's, so a signed query can never be used as a transaction. A signed query is:
+A query is a signed request to the agent's own node. It is never ordered or stored, and its EIP-712
+type is not a transaction's, so a signed query can never be used as a transaction. A signed query is:
 
 ```json
 {
-  "query": {"agent": "0x5B38…", "action": "contract_read", "target": "0x86D6…", "contract": "0x67bb…",
+  "query": {"agent": "0x86D6…", "action": "contract_read", "target": "0x86D6…", "contract": "0x67bb…",
             "body": "{\"method\":\"count\",\"values\":{}}", "time": 1789000000, "nonce": "4e1a…"},
-  "signature": "0x…"
+  "signature": { "scheme": "p256", "key": "0x04…", "sig": "0x…" }
 }
 ```
 
-- `contract_read` sends it as the request body. The other calls send its JSON in the `auth` URL
-  parameter, URL-encoded, because a `GET` (and a browser's `EventSource`) has no body.
+- It is signed by the agent's root key, or by an app's key the agent connected
+  ([`register_app`](#register_app)); the node decides which from the key, and applies the app's
+  permissions.
+- `agent` and `target` are the agent whose copy is asked: an agent reads only its own copy.
+- `contract_read` and a silent `contract_write` send it as the request body. The other calls send
+  its JSON in the `auth` URL parameter, URL-encoded, because a `GET` (and a browser's `EventSource`)
+  has no body.
 - `action`, `target` and `contract` must be those of the call it is sent with.
 - `time` must be within 60 seconds of the node's clock, and the node accepts each query only once.
   Sign a new query for every call, including when you reconnect the event stream.
-- Errors: `this call needs a signed query`; `query: signature does not match the agent`;
-  `query for get_contract sent to contract_read` (and the same for agent and contract); `query
-  expired, or its time is wrong: check the clock`; `query already used`; `only agent 0x… may ask
-  this`.
+- Errors: `this call needs a signed query`; `query: …` (a signature error, above); `query for agent
+  0x… sent to 0x…`; `query for get_contract sent to contract_read` (and the same for contract);
+  `query expired, or its time is wrong: check the clock`; `query already used`; `this key is not
+  agent 0x…'s, nor an app it connected`; `… needs your approval on your node's page` (the app may not
+  do this silently: send the user to the [approval page](keys.md#8-the-approval-page)).
 
 | Action | Body |
 |---|---|
-| `contract_read` | `{"method": "count", "values": {…}}` |
-| `get_contracts`, `get_contract`, `stream` | `""` |
-
-### Read sessions
-
-A query can be signed by a **read session** instead of the agent's own key, so that an app can read
-without asking the wallet each time. The agent signs a `Session` once, in its wallet; the app then
-signs each query with the session's key.
-
-- **Read only.** A session signs queries: `contract_read`, `get_contract`, `get_contracts` and the
-  event stream. It can never sign a transaction, a registration or anything else that enters a
-  ledger: those take only the agent's own signature. Its `scope` must be `"read"`.
-- **One node.** `nodeKey` is the node's key, from `node_info`; other nodes refuse the session.
-- **Until a time.** `expires` is in unix seconds. The node refuses a session that has expired, or
-  that lasts more than 7 days from now. It keeps no record of sessions: a session cannot be ended
-  early on the node, only forgotten by the app, so keep sessions short.
-- **The key** is a P-256 (secp256r1) key, the kind browsers make with WebCrypto, which can keep it
-  unextractable. `key` is its public key, uncompressed (65 bytes, starting with `04`).
-
-```js
-Session: [
-  { name: 'agent',    type: 'address' },  // the signer: the agent
-  { name: 'nodeKey',  type: 'address' },  // the node it is for, from node_info
-  { name: 'key',      type: 'bytes' },    // the session's P-256 public key, uncompressed
-  { name: 'scope',    type: 'string' },   // "read"
-  { name: 'expires',  type: 'uint64' },   // unix seconds
-  { name: 'nonce',    type: 'string' },
-],
-```
-
-A query signed by a session carries the signed session with it, and its `signature` is the session
-key's:
-
-```json
-{
-  "query": {"agent": "0x86d6…", "action": "contract_read", …},
-  "signature": "0x…",
-  "session": {
-    "session": {"agent": "0x86d6…", "nodeKey": "0x57E3…", "key": "0x04…", "scope": "read",
-                "expires": 1789030000, "nonce": "…"},
-    "signature": "0x…"
-  }
-}
-```
-
-- The session key signs, with ECDSA P-256 and SHA-256, the query's fields one per line:
-  `"ibc query v1"`, `agent` (lower-case hex), `action`, `target`, `contract`, `body`, `time`
-  (decimal) and `nonce`, joined with `\n`. The signature is 64 bytes, `r` then `s`, as WebCrypto
-  gives it.
-- The query's `agent` must be the session's `agent`. The rest of the query's rules are unchanged:
-  60 seconds, accepted once, bound to its action, agent and contract.
-- Errors: `session for node key 0x…, this node's key is 0x…`; `session expired`; `session lasts
-  longer than 168h0m0s`; `session scope "…": only "read" is allowed`; `session: signature does not
-  match the agent`; `query: signature does not match the session key`.
+| `contract_read`, `contract_write` | `{"method": "count", "values": {…}}` |
+| `revoke_app` | `{"app": "https://wishes.example.com"}` |
+| `get_contracts`, `get_contract`, `get_apps`, `stream` | `""` |
 
 ## Values
 
@@ -263,28 +290,33 @@ Logs are not counted: the node writes them to standard error, not to the data fo
 
 ### `register_agent`
 
-Registers an agent on the node. The agent authorizes the node's key to sign consensus blocks for
-it. Registering again updates the registration.
+Registers an agent on the node. The agent's root key authorizes the node's key to sign consensus
+blocks for it, and to sign the calls the agent allows apps under the agent's grants. Registering
+again updates the registration.
 
 ```
 PUT /ibc/app/<agent>?action=register_agent
 {
-  "registration": {"agent": "0x86D6…", "node": "http://localhost:2611",
-                   "nodeKey": "0x57E3…", "nonce": "…"},
-  "signature": "0x…"
+  "registration": {"agent": "0x86D6…", "node": "https://ibc.example.com",
+                   "nodeKey": "0x57E3…", "credential": "0x…", "nonce": "…"},
+  "signature": { "scheme": "webauthn", "key": "0x04…", "sig": "0x…", "…": "…" }
 }
 ```
 
 | Field | Meaning |
 |---|---|
-| `agent` | The agent; must sign, and must be the agent in the URL |
+| `agent` | The agent; its root key signs, and it must be the agent in the URL |
 | `node` | The node's URL, at which partners' nodes reach this agent |
 | `nodeKey` | This node's key, from `node_info` |
+| `credential` | The root passkey's credential id (`"0x"` for a root key that is not a passkey), so the agent can be found from its passkey on a new device |
+
+The node keeps the root key, its scheme and the credential id, which `agent_info` returns.
 
 **Reply:** a request id. **Event:** `register_agent` with `reply: true` and `contract: null`.
 
-**Errors:** `signature does not match the agent`; `registration of 0x… sent as 0x…`;
-`registration authorizes node key 0x…, this node's key is 0x…`.
+**Errors:** `register_agent: a registration is signed by the root key`;
+`signature does not match the agent`; `registration of 0x… sent as 0x…`; `registration authorizes
+node key 0x…, this node's key is 0x…`.
 
 ### `is_exist_agent`
 
@@ -294,7 +326,96 @@ GET /ibc/app/<agent>?action=is_exist_agent
 
 **Reply:** `true` if the agent is registered on this node, otherwise `false`.
 
+### `agent_info`
+
+What the node knows of a registered agent's identity, by agent id or by its root passkey:
+
+```
+GET /ibc/app/<agent>?action=agent_info
+GET /ibc/app?action=agent_info&credential=<root passkey credential id, hex>
+```
+
+**Reply:** `{"agent": "0x86D6…", "rootKey": "0x04…", "rootScheme": "webauthn", "credential": "0x…"}`,
+or `{"message": "no such agent on this node"}` (`no agent with this passkey on this node`). The web
+interface uses the credential form to sign in on a new device.
+
+## Apps
+
+An app on another site acts for an agent through the agent's node, with a key of its own. The agent
+decides, per contract code, what the app may do without asking: read, and have the node call some
+functions. The [approval page](keys.md#8-the-approval-page) does this with the agent's root key;
+these are the calls behind it.
+
+### `register_app`
+
+Records what the agent lets an app do, for contracts of one code; or connects another browser of an
+app the agent approved before. The node keeps apps by their site (origin), with the keys of their
+browsers.
+
+```
+PUT /ibc/app/<agent>?action=register_app
+{
+  "consent": {"consent": {"agent": "0x86D6…", "app": "https://wishes.example.com", "appKey": "0x04…",
+                          "codeHash": "0x…", "read": true, "functions": ["post"], "nonce": "…"},
+              "signature": <the root key's envelope>},
+  "grant":   {"grant": {"agent": "0x86D6…", "nodeKey": "<this node's key>", "codeHash": "0x…",
+                        "functions": ["post"], "nonce": "…"},
+              "signature": <the root key's envelope>}
+}
+```
+
+- The root key signs both. `grant` is needed when `functions` is not empty, and must name the same
+  agent, code and functions, and this node's key.
+- A consent replaces the app's permission for that code. A `codeHash` of zero means every contract,
+  and may only allow reading: the node's own page uses it.
+- A consent also connects its `appKey` as one of the app's browsers.
+- To connect another browser without changing permissions, send a device instead:
+  `{"device": {"device": {"agent", "app", "appKey", "nonce"}, "signature": <the root key's envelope>}}`.
+  The app must have been approved before. A key belongs to one app only.
+
+**Reply:** `true`. **Errors:** `register_app: signature does not match the agent`; `register_app:
+the grant does not match the consent, or names another node`; `a consent for every contract only
+lets the app read`; `agent 0x… is not registered here`; `agent 0x… has not approved
+https://… yet`.
+
+### `get_apps`
+
+```
+GET /ibc/app/<agent>?action=get_apps&auth=<signed query>
+```
+
+The agent's connected apps: `[{"agent", "app", "keys": ["0x04…"], "permissions": {"<codeHash>":
+{"read", "functions", "grant"}}}]`. Signed by the root key, or by the node's own page's key.
+
+### `revoke_app`
+
+Disconnects an app: the node forgets all its browsers and permissions at once.
+
+```
+PUT /ibc/app/<agent>?action=revoke_app
+<a query signed by the root key, action "revoke_app", body {"app": "https://wishes.example.com"}>
+```
+
+**Reply:** `true`.
+
 ## Contracts
+
+### `compile`
+
+Compiles Solidity source on the node, with its compiler (`-solc`) and fixed settings. Apps send
+source; the node produces the bytecode the user signs.
+
+```
+POST /ibc/app?action=compile
+{"source": "pragma solidity ^0.8.24; contract Chat { … }", "contract": "Chat"}
+```
+
+`contract` names the contract to compile when the source has several; it may be omitted otherwise.
+
+**Reply:** `{"contract": "Chat", "code": "6080…", "abi": [...], "codeHash": "0x…", "compiler":
+{"version": "0.8.38+commit.1835d247", "settings": {"optimizer": {"enabled": true, "runs": 200}}}}`.
+**Errors:** `this node has no Solidity compiler (see -solc)`; `the source does not compile: …`; `the
+source has 2 contracts (A, B): say which one`.
 
 ### `deploy_contract`
 
@@ -303,19 +424,20 @@ with the agent's address as `msg.sender`.
 
 ```
 PUT /ibc/app/<agent>?action=deploy_contract
-{"tx": {"contract": "", "kind": "deploy", "agent": "0x86D6…", "nonce": "…", "body": "<JSON>"}, "signature": "0x…"}
+{"tx": {"contract": "", "kind": "deploy", "agent": "0x86D6…", "nonce": "…", "body": "<JSON>"}, "signature": <the root key's envelope>}
 ```
 
 The body:
 
 | Field | Required | Meaning |
 |---|---|---|
-| `code` | yes | The contract's bytecode as compiled (`.bin`), as hex, with or without `0x` |
+| `code` | yes | The contract's bytecode, as hex, with or without `0x`: from [compile](#compile), or `.bin` |
 | `abi` | yes | The contract's ABI (`.abi`), as a JSON array |
 | `constructor` | if the constructor has parameters | The constructor's arguments, as [values](#values) |
 | `node` | yes | This node's URL |
 | `nodeKey` | yes | This node's key, from `node_info` |
 | `protocol` | no | The consensus protocol: `cordial` (the default; `BFT` means the same) or `immediate`, which orders the creator's own transactions locally, with no partners, for testing |
+| `source`, `compiler` | no | The Solidity source and how the node compiled `code` from it (the `compiler` of [compile](#compile)). Kept with the contract, so members can read and check the code |
 | `name`, `contract`, `default_app`, `profile` | no | Labels kept with the contract and returned by `get_contract` |
 
 **Reply:** the transaction id, which is the new contract's id. Use it as `<contract>` in every later
@@ -336,10 +458,10 @@ later call to it is answered with `"contract deployment failed: <reason>"`.
 GET /ibc/app/<agent>?action=get_contracts&auth=<signed query>
 ```
 
-Only the agent itself may ask: the [query](#queries) is signed by `<agent>`.
+The [query](#queries) is signed by the agent's root key, or by an app the agent connected.
 
 **Reply:** an array of [contract summaries](#contract-summary), one for each contract the agent
-has on this node, sorted by contract id.
+has on this node, sorted by contract id. An app sees the contracts it may read.
 
 ### `get_contract`
 
@@ -347,7 +469,8 @@ has on this node, sorted by contract id.
 GET /ibc/app/<agent>/<contract>?action=get_contract&auth=<signed query>
 ```
 
-Only the agent itself may ask: the [query](#queries) is signed by `<agent>`, for `<contract>`.
+The [query](#queries) is signed by the agent's root key, or by an app the agent lets read this
+contract.
 
 **Reply:** the [contract summary](#contract-summary), or `{}` if the agent has no such contract.
 
@@ -361,10 +484,17 @@ the consensus protocol gives.
 ```
 POST /ibc/app/<agent>/<contract>/<method>?action=contract_write
 {"tx": {"contract": "<contract>", "kind": "call", "agent": "<agent>", "nonce": "…",
-        "body": "{\"method\":\"<method>\",\"values\":{…}}"}, "signature": "0x…"}
+        "body": "{\"method\":\"<method>\",\"values\":{…}}"}, "signature": <the root key's envelope>}
 ```
 
 The contract and method in the URL must match the transaction's.
+
+**A silent call, by an app.** The body may instead be a [query](#queries) signed by an app's key, with
+action `contract_write` and body `{"method", "values"}`. If the agent lets the app call this function
+silently (its [consent](#register_app)), the node signs the call with its own key, under the agent's
+grant, and sends it to consensus; the reply and the event are the same. Otherwise the answer is
+`{"message": "calling <method> needs your approval on your node's page"}`: send the user to the
+approval page.
 
 **Reply:** the transaction id.
 
@@ -389,21 +519,24 @@ match the agent`; `0x… is not a member`.
 
 ### `contract_read`
 
-Runs a contract function without keeping any change, like `eth_call`. Nothing is added to the
-ledger, and no event is sent. The body is a signed [query](#queries):
+Runs a `view` or `pure` function of a contract: one that does not change the state. Nothing goes
+through consensus, nothing is added to the ledger, and no event is sent. A function that may change
+the state is a transaction: send it with [`contract_write`](#contract_write); reading it answers
+`"<method> changes state: send it as a transaction (contract_write)"`. The body is a signed
+[query](#queries):
 
 ```
 POST /ibc/app/<agent>/<contract>/<method>?action=contract_read
-{"query": {"agent": "<signer>", "action": "contract_read", "target": "<agent>", "contract": "<contract>",
+{"query": {"agent": "<agent>", "action": "contract_read", "target": "<agent>", "contract": "<contract>",
            "body": "{\"method\":\"getValue\",\"values\":{\"who\":\"0x86D6…\"}}",
            "time": 1789000000, "nonce": "…"},
- "signature": "0x…"}
+ "signature": { "scheme": "p256", "key": "0x04…", "sig": "0x…" }}
 ```
 
-`<agent>` is whose copy of the contract to read, on this node. Anyone may sign the query: the
-function sees `msg.sender` set to **the signer**, so the contract decides what each reader may see,
-for example with `require(isMember[msg.sender])`. The `<method>` in the URL is optional; if given,
-it must match the query's. The function sees the latest state, and `block.timestamp` set to the
+The query is signed by the agent's root key, or by an app the agent lets read this contract's code
+(otherwise: `reading this contract needs your approval on your node's page`). The agent reads its own
+copy, and the function sees `msg.sender` set to **the agent**. The `<method>` in the URL is optional;
+if given, it must match the query's. The function sees the latest state, and `block.timestamp` set to the
 time of the request.
 
 **Reply:** the function's result, or the error as a string (the same strings as for
@@ -480,8 +613,9 @@ GET /stream?auth=<signed query>[&auth=<signed query>…]
 A [Server-Sent Events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events)
 stream of the outcomes of asynchronous calls.
 
-- Each `auth` is a [query](#queries) with action `stream`, signed by the agent whose events it
-  subscribes to, with `target` set to that agent. Only the agent itself may open its stream.
+- Each `auth` is a [query](#queries) with action `stream`, for the agent whose events it subscribes
+  to, signed by the agent's root key or by an app the agent connected. An app hears only about the
+  contracts it has a permission for.
 - The query's `contract` chooses the events: empty for every event of the agent, or a contract
   id for that contract's events only.
 - Repeat `auth` to subscribe to several agents or contracts. An event is delivered once if it

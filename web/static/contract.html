@@ -10,15 +10,13 @@
 <body>
   <header class="top">
     <h1><a href="./">ibc</a> <span id="title-name" class="hint"></span></h1>
-    <div class="who"><div id="who">Not connected</div><div id="session"></div></div>
+    <div class="who"><div id="who">Not connected</div><div id="keys"></div></div>
   </header>
   <main>
     <p><a href="./">← Your contracts</a></p>
 
     <section class="card" id="connect-card">
-      <h2>Connect</h2>
-      <p>Connect your wallet to open this contract.</p>
-      <button id="connect">Connect wallet</button>
+      <h2>Opening the contract</h2>
       <div class="status" id="connect-status"></div>
     </section>
 
@@ -26,6 +24,8 @@
       <section class="card">
         <h2 id="name"></h2>
         <dl class="details" id="details"></dl>
+        <p class="hidden" id="code-toggle"><button type="button" class="link" id="show-code">Show the code</button></p>
+        <pre class="result hidden" id="code"></pre>
       </section>
 
       <section class="card">
@@ -40,15 +40,14 @@
 
       <section class="card" id="reads-card">
         <h2>Read</h2>
-        <p class="hint">A read changes nothing. It is signed by your reading session; the
-          contract sees you as <code>msg.sender</code>.</p>
+        <p class="hint">A read changes nothing, and does not ask you: this page reads for you.</p>
         <div id="reads"></div>
       </section>
 
       <section class="card" id="writes-card">
         <h2>Transactions</h2>
         <p class="hint">A transaction is ordered with the other members and applied by all of them.
-          The result appears when it has been applied.</p>
+          You approve each one with your passkey; the result appears when it has been applied.</p>
         <div id="writes"></div>
       </section>
 

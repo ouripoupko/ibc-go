@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/ethereum/go-ethereum/ethdb"
 
@@ -21,6 +22,12 @@ const PartnersCollection = "pda_partners"
 // ErrAlreadyCreated is returned by Create for a contract that already has
 // its deploy record applied.
 var ErrAlreadyCreated = errors.New("contract already created")
+
+// ErrGrantDoesNotApply is the outcome of a call the agent's node signed under
+// a grant that does not fit this contract: made for another code, or for a
+// node that is no longer the agent's node here. The call is recorded and
+// changes nothing.
+var ErrGrantDoesNotApply = errors.New("the node's grant does not apply")
 
 // Ledger is a contract's ordered list of records.
 type Ledger interface {
@@ -209,6 +216,17 @@ func (c *ContractExecution) apply(index uint64, record Record) (Outcome, error) 
 		}
 		out.Value, err = c.create(record)
 	case ActionWrite:
+		if record.Tx != nil {
+			if g := record.Tx.Grant(); g != nil {
+				// Signed by the agent's node: the grant must be for this code
+				// and for the agent's current node here.
+				if gerr := c.checkGrant(record.Agent, g); gerr != nil {
+					out.Result, err = c.state.Advance()
+					out.Err = gerr
+					break
+				}
+			}
+		}
 		out.Result, err = c.state.Call(record.Agent, record.Method, record.Message.Values, record.Timestamp)
 		out.Value = out.Result.Value
 	case ActionJoin, ActionLeave, ActionRotateKey:
@@ -232,6 +250,28 @@ func (c *ContractExecution) apply(index uint64, record Record) (Outcome, error) 
 		out.Result = common.Result{StateRoot: c.state.Root(), BlockNumber: c.state.BlockNumber()}
 	}
 	return out, nil
+}
+
+// checkGrant checks a node's grant against the contract: the grant's code
+// hash must be the contract's, and its node the agent's node in this
+// contract (so a grant stops working when the agent moves to another node).
+func (c *ContractExecution) checkGrant(agent string, g *identity.Grant) error {
+	fields, err := c.contractDoc.Fields()
+	if err != nil {
+		return err
+	}
+	code, _ := fields[common.KeyCode].(string)
+	if hash, err := identity.CodeHash(code); err != nil || hash != g.CodeHash {
+		return fmt.Errorf("%w: it is for other code", ErrGrantDoesNotApply)
+	}
+	partner, err := c.partnersDB.Document(agent).Fields()
+	if err != nil {
+		return err
+	}
+	if nodeKey, _ := partner["nodeKey"].(string); !strings.EqualFold(nodeKey, g.NodeKey.Hex()) {
+		return fmt.Errorf("%w: it is for another node", ErrGrantDoesNotApply)
+	}
+	return nil
 }
 
 // decide applies a membership change (§10 of docs/consensus.md):

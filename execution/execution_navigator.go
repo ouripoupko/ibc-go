@@ -154,9 +154,13 @@ func (n *Navigator) Submit(agent string, record Record) error {
 // registerAgent stores the agent's node address and node key, from the
 // agent's signed registration (checked by the dispatcher).
 func (n *Navigator) registerAgent(agent string, record Record) error {
-	address, _ := record.Message.Fields["address"].(string)
-	nodeKey, _ := record.Message.Fields["nodeKey"].(string)
-	if err := n.agents.Document(agent).Update(map[string]any{"address": address, "nodeKey": nodeKey}); err != nil {
+	fields := map[string]any{}
+	for _, k := range AgentFields {
+		if v, ok := record.Message.Fields[k].(string); ok {
+			fields[k] = v
+		}
+	}
+	if err := n.agents.Document(agent).Update(fields); err != nil {
 		return err
 	}
 	n.cfg.Output.Publish(agent, Reply{Request: record.HashCode, Action: record.Action, Reply: true})

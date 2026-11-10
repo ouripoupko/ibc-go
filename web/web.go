@@ -1,5 +1,5 @@
 // Package web is the node's web interface: static pages, built into the
-// binary, that talk to the node's API from the browser and sign with MetaMask.
+// binary, that talk to the node's API from the browser and sign with passkeys.
 package web
 
 import (
@@ -8,7 +8,7 @@ import (
 	"net/http"
 )
 
-//go:embed static
+//go:embed all:static
 var files embed.FS
 
 // Handler serves the web interface's files.

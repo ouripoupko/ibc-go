@@ -3,6 +3,7 @@ package execution
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/ouripoupko/ibc-go/common"
 )
@@ -13,8 +14,48 @@ import (
 // SummaryFields are the contract document fields returned by
 // get_contracts / get_contract: Python's list, plus abi and the EVM fields.
 var SummaryFields = []string{
-	"id", "name", "contract", "code", "protocol", "default_app", "pid", "address", "profile",
+	"id", "name", "contract", "code", "protocol", "default_app", "pid", "address", "profile", "source", "compiler",
 	common.KeyABI, common.KeyEVMAddress, common.KeyStateRoot, common.KeyBlockNumber, common.KeyDeployError,
+}
+
+// AgentFields are what a registration stores about an agent: its node's URL
+// and key, and its root key, the root key's scheme and, for a passkey, its
+// credential id.
+var AgentFields = []string{"address", "nodeKey", "rootKey", "rootScheme", "credential"}
+
+// AgentInfo returns what agent_info shows of a registered agent: its id, root
+// key, scheme and credential id. ok is false if the agent is not registered.
+func (n *Navigator) AgentInfo(agent string) (map[string]any, bool, error) {
+	doc := n.agents.Document(agent)
+	exists, err := doc.Exists()
+	if err != nil || !exists {
+		return nil, false, err
+	}
+	fields, err := doc.Fields()
+	if err != nil {
+		return nil, false, err
+	}
+	return map[string]any{"agent": agent, "rootKey": fields["rootKey"], "rootScheme": fields["rootScheme"],
+		"credential": fields["credential"]}, true, nil
+}
+
+// AgentByCredential finds the agent whose root passkey has the credential id
+// (hex), so that a passkey can sign in on a new device.
+func (n *Navigator) AgentByCredential(credential string) (string, bool, error) {
+	agents, err := n.agents.Keys()
+	if err != nil {
+		return "", false, err
+	}
+	for _, agent := range agents {
+		fields, err := n.agents.Document(agent).Fields()
+		if err != nil {
+			return "", false, err
+		}
+		if c, _ := fields["credential"].(string); c != "" && strings.EqualFold(c, credential) {
+			return agent, true, nil
+		}
+	}
+	return "", false, nil
 }
 
 // AgentExists reports whether agent is registered on this node.

@@ -205,13 +205,10 @@ func TestViewCallChangesNothing(t *testing.T) {
 	if got := a.view(t, "counter", `{}`); got != json.Number("8") {
 		t.Errorf("counter = %v, want 8", got)
 	}
-	// Even a state-changing method, called read-only, is discarded (eth_call).
-	res, err := a.exec.Call(viewRecord(t, bob, "setValue", `{"value": 99}`), false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res.Value != json.Number("9") || res.StateRoot != root {
-		t.Errorf("read-only setValue = %v root %s", res.Value, res.StateRoot)
+	// A state-changing method cannot be read: it is a transaction.
+	if _, err := a.exec.Call(viewRecord(t, bob, "setValue", `{"value": 99}`), false); err == nil ||
+		!strings.Contains(err.Error(), "changes state") {
+		t.Errorf("read-only setValue: %v", err)
 	}
 
 	if a.exec.State().Root() != root {
@@ -347,12 +344,12 @@ func TestBuiltinStubsNotImplemented(t *testing.T) {
 	}
 }
 
-// signedRecord builds the record of a transaction signed by key, as
-// consensus hands it to execution.
+// signedRecord builds the record of a transaction signed by the agent's root
+// key, as consensus hands it to execution.
 func signedRecord(t *testing.T, key *ecdsa.PrivateKey, kind, contractID, body, timestamp string) Record {
 	t.Helper()
-	stx, err := identity.Sign(identity.Transaction{Contract: contractID, Kind: kind,
-		Agent: identity.Address(key), Nonce: identity.NewNonce(), Body: body}, key)
+	stx, err := identity.SignTx(identity.Transaction{Contract: contractID, Kind: kind,
+		Agent: identity.Address(key), Nonce: identity.NewNonce(), Body: body}, identity.Secp256k1Signer{Key: key})
 	if err != nil {
 		t.Fatal(err)
 	}

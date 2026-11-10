@@ -1,0 +1,111 @@
+{
+  "keys": [
+    {
+      "publicKey": "0x044e3b81af9c2234cad09d679ce6035ed1392347ce64ce405f5dcd36228a25de6e47fd35c4215d1edf53e6f83de344615ce719bdb0fd878f6ed76f06dd277956de",
+      "address": "0x2c7536E3605D9C16a7a3D7b1898e529396a65c23"
+    },
+    {
+      "publicKey": "0x0426efcebd0ee9e34a669187e18b3a9122b2f733945b649cc9f9f921e9f9dad81290238bde9cc7bb330d150c67704dd25ae7055205744b6f31bf4070745872d0e6",
+      "address": "0x3DCb6EA136ecB6Bea95D4b0e2bfFce44a8f6B861"
+    }
+  ],
+  "messages": [
+    {
+      "type": "Transaction",
+      "message": {
+        "agent": "0x2c7536e3605d9c16a7a3d7b1898e529396a65c23",
+        "body": "{\"code\":\"6080\",\"abi\":[],\"node\":\"http://localhost:2611\",\"nodeKey\":\"0x0000000000000000000000000000000000000001\"}",
+        "contract": "",
+        "kind": "deploy",
+        "nonce": "00112233445566778899aabbccddeeff"
+      },
+      "digest": "0x87226137f43f8c410a76fcfbda7f06cb6d8b2f119517fff2b7d53d1cc145c150"
+    },
+    {
+      "type": "Registration",
+      "message": {
+        "agent": "0x2c7536e3605d9c16a7a3d7b1898e529396a65c23",
+        "credential": "0xcafe",
+        "node": "https://ibc.example.com",
+        "nodeKey": "0x57e3339b18e36035656375139a5e66b19dc7d60d",
+        "nonce": "n1"
+      },
+      "digest": "0x6b2923a9195b47c467ec9d59008611b62a6252888c5baef1dded05daae461709"
+    },
+    {
+      "type": "Query",
+      "message": {
+        "action": "contract_read",
+        "agent": "0x2c7536e3605d9c16a7a3d7b1898e529396a65c23",
+        "body": "{\"method\":\"count\",\"values\":{}}",
+        "contract": "0xabc",
+        "nonce": "n2",
+        "target": "0x2c7536E3605D9C16a7a3D7b1898e529396a65c23",
+        "time": 1789000000
+      },
+      "digest": "0x0e5cc074d4ef96db969f0047ee5196878dc28c7e83757323c1465b19d0ba3975"
+    },
+    {
+      "type": "Grant",
+      "message": {
+        "agent": "0x2c7536e3605d9c16a7a3d7b1898e529396a65c23",
+        "codeHash": "0x2dc081a8d6d4714c79b5abd2e9b08c3a33b4ef1dcf946ef8b8cf6c495014f47b",
+        "functions": [
+          "post",
+          "like"
+        ],
+        "nodeKey": "0x57e3339b18e36035656375139a5e66b19dc7d60d",
+        "nonce": "n3"
+      },
+      "digest": "0x0e693cf38da4d915d6ea9bf96987839077853366d85efd6fa627affa1d704982"
+    },
+    {
+      "type": "Consent",
+      "message": {
+        "agent": "0x2c7536e3605d9c16a7a3d7b1898e529396a65c23",
+        "app": "https://app.example",
+        "appKey": "0x0426efcebd0ee9e34a669187e18b3a9122b2f733945b649cc9f9f921e9f9dad81290238bde9cc7bb330d150c67704dd25ae7055205744b6f31bf4070745872d0e6",
+        "codeHash": "0x2dc081a8d6d4714c79b5abd2e9b08c3a33b4ef1dcf946ef8b8cf6c495014f47b",
+        "functions": [
+          "post"
+        ],
+        "nonce": "n4",
+        "read": true
+      },
+      "digest": "0xea6418aa5954eccd1c2c9ed50e8b6bbb1528ddbb4b603ff982a01ba4067206b5"
+    },
+    {
+      "type": "Consent",
+      "message": {
+        "agent": "0x2c7536e3605d9c16a7a3d7b1898e529396a65c23",
+        "app": "https://ibc.example.com",
+        "appKey": "0x0426efcebd0ee9e34a669187e18b3a9122b2f733945b649cc9f9f921e9f9dad81290238bde9cc7bb330d150c67704dd25ae7055205744b6f31bf4070745872d0e6",
+        "codeHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "functions": [],
+        "nonce": "n5",
+        "read": true
+      },
+      "digest": "0x5c2eb0fc598dc168c62ea1e5ef92908b1a56e4c709f4385fc5ad108d539b8a60"
+    },
+    {
+      "type": "Device",
+      "message": {
+        "agent": "0x2c7536e3605d9c16a7a3d7b1898e529396a65c23",
+        "app": "https://app.example",
+        "appKey": "0x0426efcebd0ee9e34a669187e18b3a9122b2f733945b649cc9f9f921e9f9dad81290238bde9cc7bb330d150c67704dd25ae7055205744b6f31bf4070745872d0e6",
+        "nonce": "n6"
+      },
+      "digest": "0x79384fb1573373ca5fb2585d3059d2594bbc8b39d41dd3f2539b2b29be04348a"
+    },
+    {
+      "type": "Batch",
+      "message": {
+        "items": [
+          "0x23dc111d7c3ad1df9806ce1e8eb4f55f57dba117339c545e7593d1f6c3b02662",
+          "0x332c39dcd398ea34a48b871898d589f55fc4c7bce00562fb670c972e7e1b0720"
+        ]
+      },
+      "digest": "0x5f4e868d932344a26e965b01236b18bb6d240c8169abe5331cad67b745f0afb2"
+    }
+  ]
+}

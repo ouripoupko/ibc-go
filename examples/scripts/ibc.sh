@@ -1,20 +1,18 @@
 #!/usr/bin/env bash
 # A small command-line client for an ibc node, built on curl, jq and the
-# ibc program (which signs with your key file; apps use MetaMask instead).
+# ibc program (which signs with your key files; apps use passkeys instead).
 #
 #   export IBC_URL=http://localhost:2611   # the node (this is the default)
-#   export IBC_KEY=~/.ibc/alice.key        # your root key file (required)
+#   export IBC_KEY=~/.ibc/alice.key        # your root key file (required): your identity
 #   export IBC_BIN=./ibc                   # the ibc program (default: ibc on the PATH)
 #
-#   ibc.sh newkey                                create the key file IBC_KEY
+#   ibc.sh newkey                                create the root key IBC_KEY
 #   ibc.sh whoami                                your agent id (the key's address)
 #   ibc.sh register                              register yourself on the node
 #   ibc.sh exists                                are you registered?
 #   ibc.sh deploy NAME [CONSTRUCTOR_JSON]        deploy build/NAME.bin; prints the contract id
 #   ibc.sh write CONTRACT METHOD [VALUES_JSON]   a transaction; waits for and prints its result
-#   ibc.sh read CONTRACT METHOD [VALUES_JSON] [OWNER]
-#                                                a read-only call, signed by you, of your copy
-#                                                (or OWNER's copy on this node); prints its result
+#   ibc.sh read CONTRACT METHOD [VALUES_JSON]    a read of a view function; prints its result
 #   ibc.sh join CONTRACT MEMBER_URL MEMBER_ID    ask a member to let you join; waits for the answer
 #   ibc.sh leave CONTRACT [MEMBER_ID]            leave a contract (or ask to remove a member)
 #   ibc.sh contracts                             list your contracts
@@ -61,12 +59,12 @@ fail_on_message() {
     fi
 }
 
-# sign KIND CONTRACT BODY_JSON: a transaction signed with IBC_KEY.
+# sign KIND CONTRACT BODY_JSON: a transaction signed with the root key.
 sign() {
     "$IBC_BIN" sign tx -key "$IBC_KEY" -kind "$1" -contract "$2" -body "$3"
 }
 
-# query ACTION CONTRACT [BODY_JSON] [TARGET]: a query signed with IBC_KEY.
+# query ACTION CONTRACT [BODY_JSON] [TARGET]: a query signed with the root key.
 query() {
     "$IBC_BIN" sign query -key "$IBC_KEY" -action "$1" -contract "$2" -body "${3:-}" -target "${4:-}"
 }
@@ -111,7 +109,7 @@ submit_and_wait() {
 }
 
 cmd=${1:-}
-[ -n "$cmd" ] || { sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
+[ -n "$cmd" ] || { sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
 shift
 
 case "$cmd" in
@@ -162,9 +160,8 @@ read)
     contract=${1:?usage: ibc.sh read CONTRACT METHOD [VALUES_JSON]}
     method=${2:?usage: ibc.sh read CONTRACT METHOD [VALUES_JSON]}
     values=${3:-{\}}
-    owner=${4:-$AGENT}
     body=$(jq -cn --arg m "$method" --argjson v "$values" '{method: $m, values: $v}')
-    reply=$(request POST "$owner/$contract/$method" contract_read "$(query contract_read "$contract" "$body" "$owner")")
+    reply=$(request POST "$AGENT/$contract/$method" contract_read "$(query contract_read "$contract" "$body")")
     fail_on_message "$reply"
     jq -c . <<<"$reply"
     ;;

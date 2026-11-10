@@ -1,19 +1,19 @@
 package identity
 
 import (
-	"crypto/ecdsa"
 	"errors"
 	"strconv"
 
 	ethcommon "github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/signer/core/apitypes"
 )
 
-// Query is a signed request to see something on a node: a contract read, a
-// contract's details, the agent's contracts, or the event stream. It never
-// reaches consensus or a ledger. Its EIP-712 type differs from Transaction,
-// so a signed query can never pass for a transaction.
+// Query is a signed request to the agent's node, by the agent's root key or by
+// an app the agent connected: a contract read, a contract's details, the
+// agent's contracts, the event stream, or, from an app, a call for the node
+// to sign silently. It never reaches consensus or a ledger. Its EIP-712 type
+// differs from Transaction, so a signed query can never pass for a
+// transaction.
 type Query struct {
 	Agent    ethcommon.Address `json:"agent"`    // who asks: the signer
 	Action   string            `json:"action"`   // the API action, e.g. contract_read
@@ -24,12 +24,11 @@ type Query struct {
 	Nonce    string            `json:"nonce"`
 }
 
-// SignedQuery is a query with its signature: by the agent's own key, or,
-// when Session is given, by that session's key.
+// SignedQuery is a query with its signature: by the agent's root key, or by
+// the key of an app the agent connected.
 type SignedQuery struct {
-	Query     Query          `json:"query"`
-	Signature hexutil.Bytes  `json:"signature"`
-	Session   *SignedSession `json:"session,omitempty"`
+	Query     Query    `json:"query"`
+	Signature Envelope `json:"signature"`
 }
 
 // TypedData returns the query as EIP-712 typed data.
@@ -66,40 +65,36 @@ func (q Query) Hash() (ethcommon.Hash, error) {
 	return typedHash(q.TypedData())
 }
 
-// Verify checks that the query is signed by its agent, directly or through a
-// session the agent signed, and returns a digest that identifies the query.
-// For a session, the caller must still check that the session is for its
-// node and has not expired.
-func (s SignedQuery) Verify() (ethcommon.Hash, error) {
+// Verify checks the query's signature, and returns its digest and the key
+// that signed it. Whose key it is (the agent's root, or an app the agent
+// connected) is for the node to decide.
+func (s SignedQuery) Verify() (ethcommon.Hash, Signer, error) {
 	if s.Query.Agent == (ethcommon.Address{}) {
-		return ethcommon.Hash{}, errors.New("query has no agent")
+		return ethcommon.Hash{}, Signer{}, errors.New("query has no agent")
 	}
-	if s.Session != nil {
-		return s.verifySession()
+	if s.Signature.Certificate != nil {
+		return ethcommon.Hash{}, Signer{}, errors.New("a query carries no grant")
 	}
 	hash, err := s.Query.Hash()
 	if err != nil {
-		return ethcommon.Hash{}, err
+		return ethcommon.Hash{}, Signer{}, err
 	}
-	signer, err := Recover(hash, s.Signature)
+	signer, err := Verify(hash, s.Signature, ForQuery)
 	if err != nil {
-		return ethcommon.Hash{}, err
+		return ethcommon.Hash{}, Signer{}, err
 	}
-	if signer != s.Query.Agent {
-		return ethcommon.Hash{}, ErrBadSignature
-	}
-	return hash, nil
+	return hash, signer, nil
 }
 
-// SignQuery signs a query with a root key (tests and tools).
-func SignQuery(q Query, key *ecdsa.PrivateKey) (SignedQuery, error) {
+// SignQuery signs a query (the command line and tests).
+func SignQuery(q Query, s KeySigner) (SignedQuery, error) {
 	hash, err := q.Hash()
 	if err != nil {
 		return SignedQuery{}, err
 	}
-	sig, err := SignHash(hash, key)
+	env, err := s.SignDigest(hash)
 	if err != nil {
 		return SignedQuery{}, err
 	}
-	return SignedQuery{Query: q, Signature: sig}, nil
+	return SignedQuery{Query: q, Signature: env}, nil
 }

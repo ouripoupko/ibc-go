@@ -1,11 +1,11 @@
 // Command ibc runs an ibc node, and signs on a user's behalf from the
-// command line (for scripts and testing; in apps, users sign in MetaMask).
+// command line (for scripts and testing; in apps, users sign with passkeys).
 //
 //	ibc [-addr ADDR] [-data DIR]          run a node
-//	ibc key new FILE                       create a root key file; prints its address
-//	ibc key address FILE                   print a key file's address
-//	ibc sign tx -key FILE -kind KIND [-contract ID] -body JSON
-//	ibc sign registration -key FILE -node URL -node-key ADDRESS
+//	ibc key new FILE                       create a root key file; prints the agent id
+//	ibc key address FILE                   print the agent id of a key file
+//	ibc sign tx -key ROOT_KEY -kind KIND [-contract ID] -body JSON
+//	ibc sign registration -key ROOT_KEY -node URL -node-key ADDRESS
 //	ibc sign query -key FILE -action ACTION [-target AGENT] [-contract ID] [-body JSON]
 package main
 
@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -52,13 +53,14 @@ func runCommand(args []string) error {
 	fs := flag.NewFlagSet("ibc", flag.ExitOnError)
 	addr := fs.String("addr", envOr("IBC_ADDR", ":2611"), "address to serve the API on (env IBC_ADDR)")
 	dataDir := fs.String("data", envOr("IBC_DATA", "data"), "directory of the node's database and key (env IBC_DATA)")
+	solc := fs.String("solc", envOr("IBC_SOLC", "solc"), "the Solidity compiler command, solc or solcjs, used to compile apps' source (env IBC_SOLC)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	n, err := node.New(node.Config{DataDir: *dataDir})
+	n, err := node.New(node.Config{DataDir: *dataDir, Solc: strings.Fields(*solc)})
 	if err != nil {
 		return err
 	}
@@ -67,11 +69,14 @@ func runCommand(args []string) error {
 }
 
 func keyCommand(args []string) error {
-	if len(args) != 2 {
+	if len(args) < 1 {
 		return errors.New("usage: ibc key new FILE | ibc key address FILE")
 	}
 	switch args[0] {
 	case "new":
+		if len(args) != 2 {
+			return errors.New("usage: ibc key new FILE")
+		}
 		if _, err := os.Stat(args[1]); err == nil {
 			return fmt.Errorf("%s exists; not overwriting a key", args[1])
 		}
@@ -82,13 +87,16 @@ func keyCommand(args []string) error {
 		if err := crypto.SaveECDSA(args[1], key); err != nil {
 			return err
 		}
-		fmt.Println(identity.Address(key).Hex())
+		fmt.Println(identity.RootAddress(key).Hex())
 	case "address":
-		key, err := crypto.LoadECDSA(args[1])
+		if len(args) != 2 {
+			return errors.New("usage: ibc key address FILE")
+		}
+		_, agent, err := loadSigner(args[1])
 		if err != nil {
 			return err
 		}
-		fmt.Println(identity.Address(key).Hex())
+		fmt.Println(agent.Hex())
 	default:
 		return fmt.Errorf("unknown key command %q", args[0])
 	}
@@ -110,12 +118,12 @@ func signCommand(args []string) error {
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		key, err := crypto.LoadECDSA(*keyFile)
+		signer, agent, err := loadSigner(*keyFile)
 		if err != nil {
 			return err
 		}
-		stx, err := identity.Sign(identity.Transaction{Contract: *contract, Kind: *kind,
-			Agent: identity.Address(key), Nonce: identity.NewNonce(), Body: *body}, key)
+		stx, err := identity.SignTx(identity.Transaction{Contract: *contract, Kind: *kind,
+			Agent: agent, Nonce: identity.NewNonce(), Body: *body}, signer)
 		if err != nil {
 			return err
 		}
@@ -132,13 +140,16 @@ func signCommand(args []string) error {
 		if !ethcommon.IsHexAddress(*nodeKey) {
 			return errors.New("-node-key must be an address")
 		}
-		key, err := crypto.LoadECDSA(*keyFile)
+		signer, agent, err := loadSigner(*keyFile)
 		if err != nil {
 			return err
 		}
-		sr, err := identity.SignRegistration(identity.Registration{Agent: identity.Address(key), Node: *nodeURL,
-			NodeKey: ethcommon.HexToAddress(*nodeKey), Nonce: identity.NewNonce()}, key)
+		sr, err := identity.SignRegistration(identity.Registration{Agent: agent, Node: *nodeURL,
+			NodeKey: ethcommon.HexToAddress(*nodeKey), Nonce: identity.NewNonce()}, signer)
 		if err != nil {
+			return err
+		}
+		if _, _, err := sr.Verify(); err != nil {
 			return err
 		}
 		out = sr
@@ -150,15 +161,15 @@ func signCommand(args []string) error {
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		key, err := crypto.LoadECDSA(*keyFile)
+		signer, agent, err := loadSigner(*keyFile)
 		if err != nil {
 			return err
 		}
 		if *target == "" {
-			*target = identity.Address(key).Hex()
+			*target = agent.Hex()
 		}
-		sq, err := identity.SignQuery(identity.Query{Agent: identity.Address(key), Action: *action, Target: *target,
-			Contract: *contract, Body: *body, Time: uint64(time.Now().Unix()), Nonce: identity.NewNonce()}, key)
+		sq, err := identity.SignQuery(identity.Query{Agent: agent, Action: *action, Target: *target,
+			Contract: *contract, Body: *body, Time: uint64(time.Now().Unix()), Nonce: identity.NewNonce()}, signer)
 		if err != nil {
 			return err
 		}
@@ -174,4 +185,17 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// loadSigner reads a root key file (a secp256k1 key, in hex), and returns
+// its signer and the agent it is.
+func loadSigner(path string) (identity.KeySigner, ethcommon.Address, error) {
+	if path == "" {
+		return nil, ethcommon.Address{}, errors.New("-key is required")
+	}
+	key, err := crypto.LoadECDSA(path)
+	if err != nil {
+		return nil, ethcommon.Address{}, fmt.Errorf("root key %s: %w", path, err)
+	}
+	return identity.Secp256k1Signer{Key: key}, identity.RootAddress(key), nil
 }

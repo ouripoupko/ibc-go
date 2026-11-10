@@ -230,7 +230,7 @@ func (m *Miner) SubmitTx(stx identity.SignedTx) (ethcommon.Hash, error) {
 	if err := m.txAllowed(stx, id, m.lace.cfg); err != nil {
 		return id, err
 	}
-	if m.outputTx[id] || m.inMempool(id) || m.included[id].Signature != nil {
+	if _, included := m.included[id]; m.outputTx[id] || m.inMempool(id) || included {
 		return id, nil // already known
 	}
 	if err := m.store.SaveMempool(id, stx); err != nil {
