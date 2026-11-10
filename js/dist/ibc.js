@@ -82,6 +82,21 @@ export class Ibc {
             throw new IbcError(reply.message);
         return reply;
     }
+    /**
+     * An anonymous read of a public contract: a view or pure function of the
+     * agent's copy, if the agent lets anyone read it. No key and no signature;
+     * the function runs with msg.sender the zero address.
+     */
+    static async publicRead(url, agent, contract, method, values = {}) {
+        const base = url.replace(/\/+$/, '');
+        const path = [agent, contract, method].map(encodeURIComponent).join('/');
+        const res = await fetch(`${base}/ibc/app/${path}?action=public_read&values=${encodeURIComponent(JSON.stringify(values))}`);
+        const reply = await res.json();
+        if (reply && typeof reply === 'object' && !Array.isArray(reply) && 'message' in reply) {
+            throw new IbcError(String(reply.message));
+        }
+        return reply;
+    }
     constructor(url, agent) {
         this.url = url.replace(/\/+$/, '');
         this.agent = agent;
@@ -407,6 +422,23 @@ export class Ibc {
     registerDevice(device) {
         return this.request('PUT', 'register_app', { body: { device } });
     }
+    /** The message that makes the agent's copy of a contract public (or not), for the root to sign. */
+    publishing(contract, isPublic) {
+        return { agent: this.agent, contract, public: isPublic, time: Date.now(), nonce: nonce() };
+    }
+    /**
+     * Lets anyone read this agent's copy of a contract (public_read), or stops
+     * it. The root signs; signature: its envelope, if signed already (in a batch).
+     */
+    async setPublic(contract, isPublic, signed = null) {
+        if (!signed) {
+            if (!this.root)
+                throw new IbcError('no root key to sign with');
+            const publish = this.publishing(contract, isPublic);
+            signed = { publish, signature: (await sign(this.root, 'Publish', publish)).envelope };
+        }
+        return this.request('PUT', 'set_public', { contract: signed.publish.contract, body: signed });
+    }
     /** Disconnects an app (by its site), with all its browsers. The root signs. */
     async revokeApp(app) {
         const body = await this.query('revoke_app', { body: { app }, signer: this.root });
@@ -570,18 +602,29 @@ export class IbcApp {
      * Deploys a contract from Solidity source: the user's node compiles it, and
      * the user approves on the node's page, choosing the app's permissions the
      * first time this code is used. Resolves with the contract's id.
+     * public: true proposes to let anyone read the user's copy (public_read);
+     * the user decides, and it is off unless proposed.
      */
     async deploy(input) {
         const { source, contract = '', name, protocol } = input;
-        return (await this.#approve({ type: 'deploy', source, contract, name, constructor: ctorOf(input), protocol })).contract;
+        return (await this.#approve({
+            type: 'deploy', source, contract, name, constructor: ctorOf(input), protocol, public: input.public === true,
+        })).contract;
     }
-    /** Asks the user for permissions on an existing contract (one the agent joined). */
-    async permit(contract) {
-        return this.#approve({ type: 'permit', contract });
+    /**
+     * Asks the user for permissions on an existing contract (one the agent
+     * joined); with { public }, proposes to let anyone read it, or to stop it.
+     */
+    async permit(contract, options = {}) {
+        return this.#approve({ type: 'permit', contract, ...(typeof options.public === 'boolean' ? { public: options.public } : {}) });
     }
-    /** Asks the user to join a contract, through a member's node; as a guest with { guest: true }. */
-    async join(contract, memberNode, memberAgent, { guest = false } = {}) {
-        return (await this.#approve({ type: 'join', contract, memberNode, memberAgent, guest })).joined;
+    /**
+     * Asks the user to join a contract, through a member's node; as a guest
+     * with { guest: true }. public: true proposes to let anyone read the user's
+     * copy (not for a guest, who keeps none).
+     */
+    async join(contract, memberNode, memberAgent, { guest = false, public: isPublic = false } = {}) {
+        return (await this.#approve({ type: 'join', contract, memberNode, memberAgent, guest, public: isPublic })).joined;
     }
     /** Reads silently if the user allowed it, and otherwise asks the user. */
     async read(contract, method, values = {}) {

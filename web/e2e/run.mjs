@@ -153,6 +153,7 @@ async function appClick(appPage, button, { approve = null } = {}) {
     approve.seen = {
       title: await text(popup, '#title'), what: await text(popup, '#what'),
       permissions: await popup.$eval('#permissions', (p) => !p.classList.contains('hidden')),
+      public: await popup.$eval('#public-box', (b) => !b.classList.contains('hidden') && b.querySelector('#public').checked),
     };
     for (const fn of approve.check ?? []) await popup.click(`#perm-writes input[value="${fn}"]`);
     if (SHOTS && approve.shot) await popup.screenshot({ path: `${SHOTS}${approve.shot}.png`, fullPage: true });
@@ -199,6 +200,19 @@ try {
   check('count -> 15, read without asking', r.text === '15' && since(n).length === 0, `${r.text} ${since(n)}`);
   const invite = await text(pa, '#invite');
   if (SHOTS) await pa.screenshot({ path: `${SHOTS}contract.png`, fullPage: true });
+
+  // Alice makes her copy public: anyone reads it, unsigned; then private again.
+  const anyone = (agent, contract, method) => fetch(`${A}/ibc/app/${agent}/${contract}/${method}?action=public_read`)
+    .then((res) => res.json());
+  check('private by default', /no public contract/.test((await anyone(alice.agent, counter, 'count')).message ?? ''));
+  n = boxes.length;
+  await pa.click('#public-toggle');
+  await waitText(pa, '#public-state', /Anyone may read/);
+  check('made public, one approval', /^Sign request: make public/.test(since(n).join()), since(n).join(' | '));
+  check('anyone reads count -> 15', await anyone(alice.agent, counter, 'count') === 15);
+  await pa.click('#public-toggle');
+  await waitText(pa, '#public-state', /Only you/);
+  check('private again', /no public contract/.test((await anyone(alice.agent, counter, 'count')).message ?? ''));
 
   // Bob on node B: create an identity, join with the invite, read and write.
   const pb = await pageFor(ctx, 390);
@@ -252,6 +266,14 @@ try {
   line = await appClick(pApp, 'deploy', { approve: a });
   check('the same code again: approve the deploy, no permissions to choose', /^deploy "0x/.test(line) && !a.seen.permissions, line);
   const chat = JSON.parse(line.slice('deploy '.length));
+
+  // The app proposes a public chat: the box is ticked on the node, and anyone reads the topic.
+  a = { ...approveAs };
+  line = await appClick(pApp, 'deployPublic', { approve: a });
+  check('the app proposes a public chat', /^deployPublic "0x/.test(line) && a.seen.public, `${line} · public ${a.seen.public}`);
+  line = await appClick(pApp, 'publicTopic');
+  check('anyone reads its topic, unsigned', line === 'publicTopic "lunch"', line);
+  check('a chat deployed without it stays private', /no public contract/.test((await anyone(alice.agent, chat, 'topic')).message ?? ''));
 
   // Alice uses the app on another computer. Its first request opens the node: she signs in there
   // (a new browser for the node too), and approving connects this browser of the app, with the

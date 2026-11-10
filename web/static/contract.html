@@ -38,6 +38,17 @@
         </div>
       </section>
 
+      <section class="card hidden" id="public-card">
+        <h2>Public</h2>
+        <p class="hint">A public contract can be read by anyone, without signing in: its read
+          functions, on your copy, run for an unknown reader (<code>msg.sender</code> is the zero
+          address), and its code decides what that reader sees. Nobody can change anything this way.</p>
+        <p id="public-state"></p>
+        <p class="hidden" id="public-link-row">Read it at <code id="public-link" class="mono" style="overflow-wrap: anywhere"></code></p>
+        <button class="secondary" id="public-toggle"></button>
+        <div class="status" id="public-status"></div>
+      </section>
+
       <section class="card" id="reads-card">
         <h2>Read</h2>
         <p class="hint">A read changes nothing, and does not ask you: this page reads for you.</p>

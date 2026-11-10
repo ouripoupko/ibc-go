@@ -69,6 +69,9 @@ const (
 	// GasLimit bounds every execution. Gas is not paid for; it only stops
 	// runaway code. It must be the same on every partner.
 	GasLimit uint64 = 100_000_000
+	// PublicGasLimit bounds an anonymous read (public_read): anyone may send
+	// one, so it gets less than a partner's call.
+	PublicGasLimit uint64 = 10_000_000
 	// ChainID is returned by the CHAINID opcode. It is a fixed constant.
 	ChainID = 0x1bc
 	// TimestampLayout is the record timestamp format, YYYYMMDDHHMMSSffffff (UTC).
@@ -406,7 +409,7 @@ func (s *State) Call(caller, method string, values map[string]any, timestamp str
 	blockNumber := s.blockNumber
 	result := Result{StateRoot: s.root, BlockNumber: blockNumber}
 
-	value, statedb, rules, callErr := s.execute(caller, method, values, timestamp, blockNumber)
+	value, statedb, rules, callErr := s.execute(caller, method, values, timestamp, blockNumber, GasLimit)
 	var contractErr *ContractError
 	if callErr != nil && !errors.As(callErr, &contractErr) {
 		return result, callErr // infrastructure failure: nothing is recorded
@@ -487,7 +490,7 @@ func (s *State) Decide(caller, method string, subject ethcommon.Address, timesta
 	blockNumber := s.blockNumber
 	result := Result{StateRoot: s.root, BlockNumber: blockNumber}
 	values := map[string]any{argumentKey(m.Inputs[0], 0): subject.Hex()}
-	value, statedb, rules, callErr := s.execute(caller, method, values, timestamp, blockNumber)
+	value, statedb, rules, callErr := s.execute(caller, method, values, timestamp, blockNumber, GasLimit)
 	var contractErr *ContractError
 	if callErr != nil && !errors.As(callErr, &contractErr) {
 		return false, result, callErr
@@ -523,6 +526,11 @@ func (s *State) Decide(caller, method string, subject ethcommon.Address, timesta
 // call with should_log=False and dispatcher/contract_view.py. If timestamp
 // is empty, the timestamp of the last write is used.
 func (s *State) View(caller, method string, values map[string]any, timestamp string) (Result, error) {
+	return s.ViewGas(caller, method, values, timestamp, GasLimit)
+}
+
+// ViewGas is View with a gas limit.
+func (s *State) ViewGas(caller, method string, values map[string]any, timestamp string, gas uint64) (Result, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -544,7 +552,7 @@ func (s *State) View(caller, method string, values map[string]any, timestamp str
 	if timestamp == "" {
 		timestamp = s.lastTimestamp
 	}
-	value, _, _, err := s.execute(caller, method, values, timestamp, s.blockNumber)
+	value, _, _, err := s.execute(caller, method, values, timestamp, s.blockNumber, gas)
 	result.Value = value
 	return result, err
 }
@@ -572,7 +580,7 @@ func (s *State) BlockNumber() uint64 {
 
 // execute runs method on a fresh StateDB opened at the current root. The
 // caller decides whether to commit the returned StateDB.
-func (s *State) execute(caller, method string, values map[string]any, timestamp string, blockNumber uint64) (any, *state.StateDB, params.Rules, error) {
+func (s *State) execute(caller, method string, values map[string]any, timestamp string, blockNumber, gas uint64) (any, *state.StateDB, params.Rules, error) {
 	m, ok := s.abi.Methods[method]
 	if !ok {
 		return nil, nil, params.Rules{}, &ContractError{Err: fmt.Errorf("unknown method %q", method)}
@@ -594,7 +602,7 @@ func (s *State) execute(caller, method string, values map[string]any, timestamp 
 	from := AgentAddress(caller)
 	statedb.Prepare(rules, from, ethcommon.Address{}, &s.address, nil, nil)
 	evm.SetTxContext(vm.TxContext{Origin: from, GasPrice: new(uint256.Int)})
-	ret, _, err := evm.Call(from, s.address, append(slices.Clone(m.ID), args...), vm.NewGasBudget(GasLimit, 0), new(uint256.Int))
+	ret, _, err := evm.Call(from, s.address, append(slices.Clone(m.ID), args...), vm.NewGasBudget(gas, 0), new(uint256.Int))
 	if err != nil {
 		return nil, nil, rules, s.contractError(err, ret)
 	}

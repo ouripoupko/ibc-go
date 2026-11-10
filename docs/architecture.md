@@ -103,6 +103,13 @@ root. A read never deploys a
 contract: a contract whose deploy record has not been applied yet is reported as unknown. A guest's
 node has no state: it sends the read to a host's node, which runs it on its copy, as the guest.
 
+A **public read** (`public_read`, [`dispatcher/public.go`](../dispatcher/public.go)) is the one
+unsigned read: of an agent's copy that the agent made public, with a root-signed `Publish` the node
+keeps in the contract document (`public`, and `public_time`, which orders the agent's choices). It
+runs like `contract_read`, with `msg.sender` the zero address and a gas limit of 10,000,000, and the
+dispatcher limits these reads per client address and in total. A contract that is not public, and a
+contract the agent does not have, get the same answer.
+
 ### Signatures on every call
 
 The dispatcher checks a signature on every call that changes or shows an agent's data
@@ -113,7 +120,8 @@ The dispatcher checks a signature on every call that changes or shows an agent's
   ([`identity/query.go`](../identity/query.go)): bound to its action, agent and contract, within
   60 seconds of the node's clock, and accepted once. A read runs with `msg.sender` set to the
   signer, so the contract's own `view` functions decide what each reader may see; the other calls
-  are for the agent itself only.
+  are for the agent itself only. The exception is a public read, unsigned, of a copy its agent made
+  public (above).
 - **Every signature** is checked by one function, `identity.Verify`
   ([`identity/envelope.go`](../identity/envelope.go)): the scheme (secp256k1, P-256 or WebAuthn),
   and, for a call the node signed, the grant the agent's root signed (its functions; execution also

@@ -81,6 +81,9 @@ func TestVectors(t *testing.T) {
 	device := Device{Agent: agent, App: "https://app.example", AppKey: PublicKey(p256), Nonce: "n6"}
 	h, err = device.Hash()
 	add("Device", device, h, err)
+	publish := Publish{Agent: agent, Contract: "0x67bb", Public: true, Time: 1700000000, Nonce: "n7"}
+	h, err = publish.Hash()
+	add("Publish", publish, h, err)
 	items := []ethcommon.Hash{crypto.Keccak256Hash([]byte("one")), crypto.Keccak256Hash([]byte("two"))}
 	h, err = BatchHash(items)
 	add("Batch", map[string]any{"items": items}, h, err)

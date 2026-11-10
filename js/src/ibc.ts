@@ -16,7 +16,7 @@
 
 import {
   type Address, type Envelope, type Hex, type P256Key, type Signer, type Transaction, type Query, type Registration,
-  type Consent, type Grant, type Device,
+  type Consent, type Grant, type Device, type Publish,
   newP256Key, nonce, now, p256Signer, sign, toHex,
 } from './keys.js';
 
@@ -79,6 +79,8 @@ export interface ContractSummary {
   source?: string;
   compiler?: unknown;
   role: 'partner' | 'guest';
+  /** Whether the agent lets anyone read its copy (public_read). */
+  public?: boolean;
   hosts?: { agent: Address; nodeKey: Address; node: string }[];
   evm_address?: Address;
   state_root?: Hex;
@@ -206,6 +208,23 @@ export class Ibc {
     const res = await fetch(`${base}/ibc/app${path}?action=agent_info${credential ? `&credential=${credential}` : ''}`);
     const reply = await res.json();
     if (reply?.message) throw new IbcError(reply.message);
+    return reply;
+  }
+
+  /**
+   * An anonymous read of a public contract: a view or pure function of the
+   * agent's copy, if the agent lets anyone read it. No key and no signature;
+   * the function runs with msg.sender the zero address.
+   */
+  static async publicRead(url: string, agent: Address, contract: string, method: string,
+    values: Record<string, unknown> = {}): Promise<unknown> {
+    const base = url.replace(/\/+$/, '');
+    const path = [agent, contract, method].map(encodeURIComponent).join('/');
+    const res = await fetch(`${base}/ibc/app/${path}?action=public_read&values=${encodeURIComponent(JSON.stringify(values))}`);
+    const reply = await res.json();
+    if (reply && typeof reply === 'object' && !Array.isArray(reply) && 'message' in reply) {
+      throw new IbcError(String(reply.message));
+    }
     return reply;
   }
 
@@ -546,6 +565,25 @@ export class Ibc {
     return this.request('PUT', 'register_app', { body: { device } });
   }
 
+  /** The message that makes the agent's copy of a contract public (or not), for the root to sign. */
+  publishing(contract: string, isPublic: boolean): Publish {
+    return { agent: this.agent, contract, public: isPublic, time: Date.now(), nonce: nonce() };
+  }
+
+  /**
+   * Lets anyone read this agent's copy of a contract (public_read), or stops
+   * it. The root signs; signature: its envelope, if signed already (in a batch).
+   */
+  async setPublic(contract: string, isPublic: boolean,
+    signed: { publish: Publish; signature: Envelope } | null = null): Promise<boolean> {
+    if (!signed) {
+      if (!this.root) throw new IbcError('no root key to sign with');
+      const publish = this.publishing(contract, isPublic);
+      signed = { publish, signature: (await sign(this.root, 'Publish', publish)).envelope };
+    }
+    return this.request('PUT', 'set_public', { contract: signed.publish.contract, body: signed });
+  }
+
   /** Disconnects an app (by its site), with all its browsers. The root signs. */
   async revokeApp(app: string): Promise<boolean> {
     const body = await this.query('revoke_app', { body: { app }, signer: this.root });
@@ -592,11 +630,11 @@ export class Ibc {
 /** A request to the node's approval page. */
 export type ApprovalRequest =
   | { type: 'connect' }
-  | { type: 'deploy'; source: string; contract?: string; name?: string; constructor?: ConstructorArgs; protocol?: string }
-  | { type: 'permit'; contract: string }
+  | { type: 'deploy'; source: string; contract?: string; name?: string; constructor?: ConstructorArgs; protocol?: string; public?: boolean }
+  | { type: 'permit'; contract: string; public?: boolean }
   | { type: 'call'; contract: string; method: string; values?: Record<string, unknown> }
   | { type: 'read'; contract: string; method: string; values?: Record<string, unknown> }
-  | { type: 'join'; contract: string; memberNode: string; memberAgent: Address; guest?: boolean };
+  | { type: 'join'; contract: string; memberNode: string; memberAgent: Address; guest?: boolean; public?: boolean };
 
 /** What the approval page answers: the agent, and the request's result. */
 export interface ApprovalResult {
@@ -606,6 +644,8 @@ export interface ApprovalResult {
   reply?: unknown;
   value?: unknown;
   joined?: unknown;
+  /** Whether the user made the contract public (deploy, join, permit). */
+  public?: boolean;
   [field: string]: unknown;
 }
 
@@ -737,22 +777,34 @@ export class IbcApp {
    * Deploys a contract from Solidity source: the user's node compiles it, and
    * the user approves on the node's page, choosing the app's permissions the
    * first time this code is used. Resolves with the contract's id.
+   * public: true proposes to let anyone read the user's copy (public_read);
+   * the user decides, and it is off unless proposed.
    */
-  async deploy(input: { source: string; contract?: string; name?: string; constructor?: ConstructorArgs; protocol?: string }):
-    Promise<string> {
+  async deploy(input: {
+    source: string; contract?: string; name?: string; constructor?: ConstructorArgs; protocol?: string; public?: boolean;
+  }): Promise<string> {
     const { source, contract = '', name, protocol } = input;
-    return (await this.#approve({ type: 'deploy', source, contract, name, constructor: ctorOf(input), protocol })).contract!;
+    return (await this.#approve({
+      type: 'deploy', source, contract, name, constructor: ctorOf(input), protocol, public: input.public === true,
+    })).contract!;
   }
 
-  /** Asks the user for permissions on an existing contract (one the agent joined). */
-  async permit(contract: string): Promise<ApprovalResult> {
-    return this.#approve({ type: 'permit', contract });
+  /**
+   * Asks the user for permissions on an existing contract (one the agent
+   * joined); with { public }, proposes to let anyone read it, or to stop it.
+   */
+  async permit(contract: string, options: { public?: boolean } = {}): Promise<ApprovalResult> {
+    return this.#approve({ type: 'permit', contract, ...(typeof options.public === 'boolean' ? { public: options.public } : {}) });
   }
 
-  /** Asks the user to join a contract, through a member's node; as a guest with { guest: true }. */
-  async join(contract: string, memberNode: string, memberAgent: Address, { guest = false }: { guest?: boolean } = {}):
-    Promise<unknown> {
-    return (await this.#approve({ type: 'join', contract, memberNode, memberAgent, guest })).joined;
+  /**
+   * Asks the user to join a contract, through a member's node; as a guest
+   * with { guest: true }. public: true proposes to let anyone read the user's
+   * copy (not for a guest, who keeps none).
+   */
+  async join(contract: string, memberNode: string, memberAgent: Address,
+    { guest = false, public: isPublic = false }: { guest?: boolean; public?: boolean } = {}): Promise<unknown> {
+    return (await this.#approve({ type: 'join', contract, memberNode, memberAgent, guest, public: isPublic })).joined;
   }
 
   /** Reads silently if the user allowed it, and otherwise asks the user. */

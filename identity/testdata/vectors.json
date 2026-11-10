@@ -98,6 +98,17 @@
       "digest": "0x79384fb1573373ca5fb2585d3059d2594bbc8b39d41dd3f2539b2b29be04348a"
     },
     {
+      "type": "Publish",
+      "message": {
+        "agent": "0x2c7536e3605d9c16a7a3d7b1898e529396a65c23",
+        "contract": "0x67bb",
+        "nonce": "n7",
+        "public": true,
+        "time": 1700000000
+      },
+      "digest": "0x7e4cd9e0e78c39d56cded0bedbc782447d198f29d210f86783ba069836876256"
+    },
+    {
       "type": "Batch",
       "message": {
         "items": [

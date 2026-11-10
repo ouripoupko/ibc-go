@@ -14,7 +14,7 @@ import (
 // SummaryFields are the contract document fields returned by
 // get_contracts / get_contract: Python's list, plus abi and the EVM fields.
 var SummaryFields = []string{
-	"id", "name", "contract", "code", "protocol", "default_app", "pid", "address", "profile", "source", "compiler", KeyRole, KeyHosts,
+	"id", "name", "contract", "code", "protocol", "default_app", "pid", "address", "profile", "source", "compiler", KeyRole, KeyHosts, KeyPublic,
 	common.KeyABI, common.KeyEVMAddress, common.KeyStateRoot, common.KeyBlockNumber, common.KeyDeployError,
 }
 
@@ -131,6 +131,10 @@ func (n *Navigator) Ledger(agent, contract string, from uint64) ([]LedgerEntry, 
 // latest applied state of agent's contract. It never deploys: a contract
 // whose deploy record has not been applied yet is reported as unknown.
 func (n *Navigator) Read(agent, caller string, record Record) (common.Result, error) {
+	return n.read(agent, caller, record, common.GasLimit)
+}
+
+func (n *Navigator) read(agent, caller string, record Record, gas uint64) (common.Result, error) {
 	doc := n.contracts(agent).Document(record.Contract)
 	fields, err := doc.Fields()
 	if err != nil {
@@ -144,5 +148,5 @@ func (n *Navigator) Read(agent, caller string, record Record) (common.Result, er
 	if err := st.Run("", ""); err != nil && !isDeterministic(err) {
 		return common.Result{}, err
 	}
-	return st.View(caller, record.Method, record.Message.Values, record.Timestamp)
+	return st.ViewGas(caller, record.Method, record.Message.Values, record.Timestamp, gas)
 }

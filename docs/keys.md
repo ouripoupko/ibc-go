@@ -20,7 +20,7 @@ An agent has two keys:
 
 | Key | Where | Signs |
 |---|---|---|
-| **Root key** | The user's device: a passkey, made on the node's web page (or a key file, from the command line) | Everything the user approves: the registration, deploys, joins, leaves, every transaction the user approves, and the user's permissions for apps |
+| **Root key** | The user's device: a passkey, made on the node's web page (or a key file, from the command line) | Everything the user approves: the registration, deploys, joins, leaves, every transaction the user approves, the user's permissions for apps, and which of the user's contracts are public |
 | **Node key** | The user's node (one key per node, shared by the agents it serves) | Consensus blocks; and calls the user lets apps make silently, under the user's **grant** |
 
 The node never holds the root key. The root key is the agent's identity: its address is the agent id
@@ -93,7 +93,18 @@ An app on any site acts for the user through the user's node, never with the use
   browsers and permissions at once.
 
 Only the agent itself reads its copy of a contract: queries are signed by the root key or by an app
-the agent connected, and contracts see the agent as `msg.sender`.
+the agent connected, and contracts see the agent as `msg.sender`. The one exception is the agent's
+own choice: a **public** contract.
+
+**Public contracts.** The user may let anyone read their copy of a contract, to publish information.
+The root signs a `Publish` message (for one contract, kept by the node; partners never see it), and
+then the node answers unsigned reads of that copy ([`public_read`](api.md#public-contracts)). Such a
+read acts for no one: only `view` and `pure` functions run, with `msg.sender` the zero address, so
+the contract decides what an unknown reader sees, and can refuse with
+`require(msg.sender != address(0))`. It is off unless the user turns it on: at a deploy or a join
+(an app may propose it, ticking the box on the approval page), or on the contract's page. Each
+partner decides for their own copy; one partner can publish what all partners share, as any partner
+could already show it.
 
 ## 5. Deploying: the node compiles
 
@@ -151,11 +162,16 @@ with it:
    | `type` | Fields | The user approves |
    |---|---|---|
    | `connect` | none | Connecting the app: it learns the agent id, with no permissions |
-   | `deploy` | `source`, `contract` (name, optional), `name`, `constructor`, `protocol` | The deploy, compiled by the node; and the app's permissions for this code, the first time |
-   | `permit` | `contract` | The app's permissions for an existing contract's code |
+   | `deploy` | `source`, `contract` (name, optional), `name`, `constructor`, `protocol`, `public` | The deploy, compiled by the node; and the app's permissions for this code, the first time |
+   | `permit` | `contract`, `public` | The app's permissions for an existing contract's code |
    | `call` | `contract`, `method`, `values` | A transaction, signed by the root |
    | `read` | `contract`, `method`, `values` | A read, signed by the root |
-   | `join` | `contract`, `memberNode`, `memberAgent` | Joining a contract |
+   | `join` | `contract`, `memberNode`, `memberAgent`, `guest`, `public` | Joining a contract |
+
+   `public` (optional, `true` or `false`) is what the app proposes for "Anyone may read this
+   contract": the box on the page starts ticked or not, and the user decides. Without it, the box
+   starts off for a deploy or a join, and as it is for a permit. The root signs the `Publish` in the
+   same approval. A guest has no copy, so a guest's join shows no box.
 
 3. The page answers `{type: "ibc-done", result}` (with the agent's id) or `{type: "ibc-denied",
    reason}`.
@@ -175,6 +191,7 @@ ibc key new alice.key                                 # a root key (secp256k1); 
 ibc sign registration -key alice.key -node URL -node-key 0x57E3…
 ibc sign tx -key alice.key -kind call -contract ID -body '{"method": "increment"}'
 ibc sign query -key alice.key -action get_contracts
+ibc sign publish -key alice.key -contract ID -public=true   # let anyone read your copy (set_public)
 ```
 
 The root key file signs everything; `ibc.sh` uses it.

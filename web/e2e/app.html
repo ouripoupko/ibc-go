@@ -13,9 +13,11 @@
   <button id="post">Post</button>
   <button id="topic">Read the topic</button>
   <button id="setTopic">Set the topic</button>
+  <button id="deployPublic">Deploy a public chat</button>
+  <button id="publicTopic">Read the topic as anyone</button>
   <pre id="out"></pre>
   <script type="module">
-    import { IbcApp } from './js/index.js'; // the client package, @ouripoupko/ibc
+    import { Ibc, IbcApp } from './js/index.js'; // the client package, @ouripoupko/ibc
 
     const params = new URLSearchParams(location.search);
     const out = document.querySelector('#out');
@@ -38,6 +40,13 @@
     run('post', () => app.write(chat, 'post', { text: `hello ${Date.now()}` }));
     run('topic', () => app.read(chat, 'topic'));
     run('setTopic', () => app.write(chat, 'setTopic', { newTopic: 'dinner' }));
+    run('deployPublic', async () => {
+      const source = await (await fetch('/Chat.sol')).text();
+      chat = await app.deploy({ source, constructor: { initialTopic: 'lunch' }, public: true });
+      return chat;
+    });
+    // Anyone, with no key: an unsigned read of the user's public copy.
+    run('publicTopic', () => Ibc.publicRead(app.node, app.agent, chat, 'topic'));
     window.appReady = true;
   </script>
 </body>

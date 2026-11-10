@@ -16,6 +16,9 @@
 #   ibc.sh join CONTRACT MEMBER_URL MEMBER_ID    ask a member to let you join; waits for the answer
 #   ibc.sh guest CONTRACT MEMBER_URL MEMBER_ID   join as a guest: no copy here; calls and reads go to the member
 #   ibc.sh leave CONTRACT [MEMBER_ID]            leave a contract (or ask to remove a member)
+#   ibc.sh public CONTRACT                       let anyone read your copy, unsigned
+#   ibc.sh private CONTRACT                      stop it
+#   ibc.sh anyone AGENT CONTRACT METHOD [VALUES_JSON]   read a public contract, unsigned, as anyone
 #   ibc.sh contracts                             list your contracts
 #   ibc.sh contract CONTRACT                     one contract's summary
 #   ibc.sh stream [CONTRACT]                     follow your event stream (Ctrl-C to stop)
@@ -189,9 +192,27 @@ leave)
     event=$(submit_and_wait "$contract" PUT "$AGENT" leave_contract "$tx")
     jq -c .reply <<<"$event"
     ;;
+public | private)
+    need_key
+    contract=${1:?usage: ibc.sh $cmd CONTRACT}
+    flag=$([ "$cmd" = public ] && echo true || echo false)
+    reply=$(request PUT "$AGENT/$contract" set_public "$("$IBC_BIN" sign publish -key "$IBC_KEY" -contract "$contract" -public="$flag")")
+    fail_on_message "$reply"
+    jq -c . <<<"$reply"
+    ;;
+anyone)
+    agent=${1:?usage: ibc.sh anyone AGENT CONTRACT METHOD [VALUES_JSON]}
+    contract=${2:?usage: ibc.sh anyone AGENT CONTRACT METHOD [VALUES_JSON]}
+    method=${3:?usage: ibc.sh anyone AGENT CONTRACT METHOD [VALUES_JSON]}
+    values=${4:-{\}}
+    reply=$(curl -sS -G "$IBC_URL/ibc/app/$agent/$contract/$method" --data-urlencode action=public_read \
+        --data-urlencode "values=$values")
+    fail_on_message "$reply"
+    jq -c . <<<"$reply"
+    ;;
 contracts)
     need_key
-    signed_get "$AGENT" get_contracts "" | jq '[.[] | {id, name, contract, role, evm_address, block_number}]'
+    signed_get "$AGENT" get_contracts "" | jq '[.[] | {id, name, contract, role, public, evm_address, block_number}]'
     ;;
 contract)
     need_key

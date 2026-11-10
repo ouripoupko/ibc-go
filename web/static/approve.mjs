@@ -5,11 +5,14 @@
 // to its opener; the app answers with a request, which always carries the API
 // version it speaks (apiVersion) and its key (appKey, a P-256 public key, hex):
 //   { type: 'connect', appKey }            who the user is: connects the app, with no permissions
-//   { type: 'deploy', source, contract, name, constructor, protocol, appKey }
-//   { type: 'permit', contract, appKey }   permissions on an existing contract
+//   { type: 'deploy', source, contract, name, constructor, protocol, public, appKey }
+//   { type: 'permit', contract, public, appKey }   permissions on an existing contract
 //   { type: 'call', contract, method, values, appKey }
 //   { type: 'read', contract, method, values, appKey }
-//   { type: 'join', contract, memberNode, memberAgent, guest, appKey }
+//   { type: 'join', contract, memberNode, memberAgent, guest, public, appKey }
+// public (a boolean) proposes whether anyone may read the user's copy of the
+// contract (public_read); the user decides here. Unless proposed, it is off
+// (deploy, join) or unchanged (permit).
 // and this page replies { type: 'ibc-done', result } or { type: 'ibc-denied', reason }.
 // The app's site (its origin) is what the user sees and what the node records.
 // A user with no identity on this node yet can create one here, or sign in.
@@ -17,7 +20,7 @@ import {
   $, el, status, errorText, loadIdentity, connect, rootSigner, signIn, createIdentity, isKnown, reregister, parseAbi, isRead,
   pretty, short,
 } from './app.mjs';
-import { API_VERSION, fromHex, keccak256, nonce, now, signBatch, toHex } from './js/index.js';
+import { API_VERSION, digestOf, fromHex, keccak256, nonce, now, signBatch, toHex } from './js/index.js';
 
 const opener = window.opener;
 let origin;
@@ -174,6 +177,23 @@ async function registerSigned(ibc, items, envs) {
   }
 }
 
+/**
+ * Shows the choice of letting anyone read the user's copy; returns a reader of
+ * it. current: what the node has (permit), else off.
+ */
+function publicForm(current = false) {
+  $('#public').checked = typeof request.public === 'boolean' ? request.public : current;
+  $('#public-box').classList.remove('hidden');
+  return () => $('#public').checked;
+}
+
+/** The message that makes the user's copy of a contract public, or not. */
+const publishItem = (ibc, contract, isPublic) => ({ type: 'Publish', message: ibc.publishing(contract, isPublic) });
+
+/** Records a publish the root signed (in a batch). */
+const registerPublish = (ibc, item, signature) => ibc.setPublic(item.message.contract, item.message.public,
+  { publish: item.message, signature });
+
 /** Shows the permissions form for the contract's functions; returns a reader of the choices. */
 function permissionsForm(abi, current = null) {
   const writes = parseAbi(typeof abi === 'string' ? abi : JSON.stringify(abi))
@@ -228,6 +248,7 @@ async function showDeploy(ibc, identity, host) {
   showCode(request.source);
   const app = await siteOf(ibc);
   const choose = app.site?.permissions?.[compiled.codeHash] ? null : permissionsForm(compiled.abi);
+  const isPublic = publicForm();
   return async () => {
     const items = choose ? permissionMessages(ibc, identity, compiled.codeHash, choose()) : deviceItems(identity, app);
     const tx = {
@@ -237,10 +258,13 @@ async function showDeploy(ibc, identity, host) {
         protocol: request.protocol, source: request.source, compiler: compiled.compiler,
       })),
     };
-    const envs = await signBatch(rootSigner(identity), [...items, { type: 'Transaction', message: tx }]);
+    // The contract's id is its deploy transaction's digest: the publish names it before it exists.
+    const publish = isPublic() ? [publishItem(ibc, toHex(digestOf('Transaction', tx)), true)] : [];
+    const envs = await signBatch(rootSigner(identity), [...items, ...publish, { type: 'Transaction', message: tx }]);
     await registerSigned(ibc, items, envs);
     const contract = await ibc.deploy(null, { tx, signature: envs[envs.length - 1] });
-    return { contract, codeHash: compiled.codeHash };
+    if (publish.length) await registerPublish(ibc, publish[0], envs[items.length]);
+    return { contract, codeHash: compiled.codeHash, public: publish.length > 0 };
   };
 }
 
@@ -254,11 +278,14 @@ async function showPermit(ibc, identity, host) {
   showCode(c.source);
   const app = await siteOf(ibc);
   const choose = permissionsForm(c.abi, app.site?.permissions?.[codeHash]);
+  const isPublic = c.role === 'guest' ? null : publicForm(c.public === true);
   return async () => {
     const items = permissionMessages(ibc, identity, codeHash, choose());
-    const envs = await signBatch(rootSigner(identity), items);
+    const publish = isPublic && isPublic() !== (c.public === true) ? [publishItem(ibc, c.id, isPublic())] : [];
+    const envs = await signBatch(rootSigner(identity), [...items, ...publish]);
     await registerSigned(ibc, items, envs);
-    return { contract: c.id };
+    if (publish.length) await registerPublish(ibc, publish[0], envs[items.length]);
+    return { contract: c.id, public: isPublic ? isPublic() : false };
   };
 }
 
@@ -315,16 +342,23 @@ async function showJoin(ibc, identity, host) {
     : 'You become a member: your node takes part in it, and receives its history.';
   details([['Contract', short(request.contract)], ['Through', `${request.memberNode} (${short(request.memberAgent)})`]]);
   const app = await siteOf(ibc);
+  const isPublic = guest ? () => false : publicForm(); // a guest keeps no copy to show
   return async () => {
     const tx = {
       contract: request.contract, kind: 'join', agent: identity.agent, nonce: nonce(),
       body: JSON.stringify({ node: ibc.url, nodeKey: ibc.nodeKey, profile: '',
         ...(guest ? { guest: true, host: request.memberAgent } : {}) }),
     };
-    const signature = await signWithDevice(ibc, identity, app, { type: 'Transaction', message: tx });
+    const items = [...deviceItems(identity, app), ...(isPublic() ? [publishItem(ibc, request.contract, true)] : []),
+      { type: 'Transaction', message: tx }];
+    const envs = await signBatch(rootSigner(identity), items);
+    await registerSigned(ibc, items, envs);
     const event = await ibc.submit('PUT', 'join_contract', {
-      body: { tx, signature, partner: { address: request.memberNode, agent: request.memberAgent } },
+      body: { tx, signature: envs[envs.length - 1], partner: { address: request.memberNode, agent: request.memberAgent } },
     });
-    return { joined: event.reply };
+    // Once joined, this node holds the user's copy: the publish applies to it.
+    const at = items.findIndex((i) => i.type === 'Publish');
+    if (at >= 0 && event.reply === true) await registerPublish(ibc, items[at], envs[at]);
+    return { joined: event.reply, public: at >= 0 && event.reply === true };
   };
 }

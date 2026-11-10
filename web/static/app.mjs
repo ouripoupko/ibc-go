@@ -290,6 +290,8 @@ function explain(type, m, batch) {
     if (consent) return explain('Consent', consent.message);
     const query = batch?.find((b) => b.type === 'Query');
     if (query) return explain('Query', query.message);
+    const publish = batch?.find((b) => b.type === 'Publish');
+    if (publish) return explain('Publish', publish.message);
     const device = batch?.find((b) => b.type === 'Device');
     if (device) return explain('Device', device.message);
     return words(`${batch?.length ?? 0} requests`);
@@ -298,6 +300,7 @@ function explain(type, m, batch) {
     case 'Registration:': return words('register on', location.host);
     case 'Consent:': return words('allow', new URL(m.app).host);
     case 'Device:': return words('connect', new URL(m.app).host);
+    case 'Publish:': return words(m.public ? 'make public' : 'make private', short(m.contract));
     case 'Grant:': return words('let your node call', m.functions.join(' '));
     case 'Query:contract_read': return words('read', body.method, values(body.values));
     case 'Query:revoke_app': return words('disconnect app');

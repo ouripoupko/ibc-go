@@ -456,3 +456,64 @@ func TestChatGuest(t *testing.T) {
 	expect(t, "bob's read after leaving", bob.read(chat, "count", nil), `{"message":"no such contract"}`)
 	expect(t, "alice's count", alice.read(chat, "count", nil), `4`)
 }
+
+// publicRead is anyone's read of a public contract: no key, no signature.
+func publicRead(t *testing.T, nodeURL, agent, contract, method string, values map[string]any) any {
+	t.Helper()
+	raw, _ := json.Marshal(values)
+	resp, err := http.Get(nodeURL + "/ibc/app/" + agent + "/" + contract + "/" + method + "?" +
+		url.Values{"action": {"public_read"}, "values": {string(raw)}}.Encode())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	dec := json.NewDecoder(resp.Body)
+	dec.UseNumber()
+	var out any
+	if err := dec.Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// setPublic makes the user's copy of a contract public, or not, signed by the root.
+func (c *client) setPublic(contract string, public bool) any {
+	c.t.Helper()
+	sp, err := identity.SignPublish(identity.Publish{Agent: identity.Address(c.key), Contract: contract, Public: public,
+		Time: uint64(time.Now().UnixMilli()), Nonce: identity.NewNonce()}, c.writer)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	return c.request("PUT", "set_public", contract, "", sp)
+}
+
+// A public Chat: anyone reads its topic and its number of messages, without
+// signing in; the messages themselves need a signed read.
+func TestChatPublic(t *testing.T) {
+	alice, bob := newClient(t), newClient(t)
+	alice.register()
+	bob.register()
+	chat, _ := alice.deploy("Chat", map[string]any{"initialTopic": "lunch"})
+	expect(t, "alice posts", alice.write(chat, "post", map[string]any{"text": "hi"}), `0`)
+
+	expect(t, "private by default", publicRead(t, alice.url, alice.agent, chat, "topic", nil),
+		fmt.Sprintf(`{"message":"agent %s has no public contract %s"}`, alice.agent, chat))
+	expect(t, "alice makes it public", alice.setPublic(chat, true), `true`)
+	expect(t, "anyone reads the topic", publicRead(t, alice.url, alice.agent, chat, "topic", nil), `"lunch"`)
+	expect(t, "anyone counts", publicRead(t, alice.url, alice.agent, chat, "count", nil), `1`)
+	expect(t, "but not the messages", publicRead(t, alice.url, alice.agent, chat, "latest", map[string]any{"limit": 1}),
+		`"execution reverted: sign in to read the messages"`)
+	expect(t, "nor posts", publicRead(t, alice.url, alice.agent, chat, "post", map[string]any{"text": "spam"}),
+		`"post changes state: send it as a transaction (contract_write)"`)
+	if latest := alice.read(chat, "latest", map[string]any{"limit": 1}).([]any); len(latest) != 1 {
+		t.Errorf("alice's signed read of latest = %v", latest)
+	}
+
+	// A guest keeps no copy, so has none to make public.
+	expect(t, "bob joins as a guest", bob.joinAsGuest(alice, chat), `true`)
+	expect(t, "a guest's publish", bob.setPublic(chat, true), `{"message":"a guest has no copy of the contract to make public"}`)
+
+	expect(t, "alice makes it private", alice.setPublic(chat, false), `false`)
+	expect(t, "private again", publicRead(t, alice.url, alice.agent, chat, "count", nil),
+		fmt.Sprintf(`{"message":"agent %s has no public contract %s"}`, alice.agent, chat))
+}

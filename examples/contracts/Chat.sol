@@ -6,6 +6,10 @@ pragma solidity ^0.8.24;
 /// changing the topic is approved every time. Anyone may join as a guest:
 /// guests post, like and read through the partners' nodes, without taking
 /// part in consensus.
+///
+/// A user may make their copy public: then anyone reads the topic and the
+/// number of messages without signing in (msg.sender is the zero address),
+/// but not the messages themselves.
 contract Chat {
     struct Message {
         address author;
@@ -48,8 +52,10 @@ contract Chat {
         topic = newTopic;
     }
 
-    /// The newest messages, newest first, at most limit of them.
+    /// The newest messages, newest first, at most limit of them. Not for
+    /// unknown readers, even when the user made the contract public.
     function latest(uint256 limit) external view returns (Message[] memory page) {
+        require(msg.sender != address(0), "sign in to read the messages");
         uint256 n = limit < messages.length ? limit : messages.length;
         page = new Message[](n);
         for (uint256 i = 0; i < n; i++) {

@@ -112,6 +112,22 @@ export declare const TYPES: {
         readonly name: "nonce";
         readonly type: "string";
     }];
+    readonly Publish: readonly [{
+        readonly name: "agent";
+        readonly type: "address";
+    }, {
+        readonly name: "contract";
+        readonly type: "string";
+    }, {
+        readonly name: "public";
+        readonly type: "bool";
+    }, {
+        readonly name: "time";
+        readonly type: "uint64";
+    }, {
+        readonly name: "nonce";
+        readonly type: "string";
+    }];
     readonly Batch: readonly [{
         readonly name: "items";
         readonly type: "bytes32[]";
@@ -165,6 +181,15 @@ export interface Device {
     appKey: Hex;
     nonce: string;
 }
+/** Lets anyone read the agent's copy of a contract (public_read), or stops it. */
+export interface Publish {
+    agent: Address;
+    contract: string;
+    public: boolean;
+    /** Unix milliseconds: the node takes only a newer choice than it has. */
+    time: number;
+    nonce: string;
+}
 export interface Batch {
     items: Hex[];
 }
@@ -176,6 +201,7 @@ export interface Messages {
     Grant: Grant;
     Consent: Consent;
     Device: Device;
+    Publish: Publish;
     Batch: Batch;
 }
 /** One message to sign, with its type. */

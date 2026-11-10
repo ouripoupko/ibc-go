@@ -13,6 +13,7 @@ Every call used here is described in full in the [API reference](api.md).
 - [Call ibc from JavaScript](#call-ibc-from-javascript)
 - [The example contracts](#the-example-contracts)
 - [Sharing a contract](#sharing-a-contract)
+- [Publishing: public contracts](#publishing-public-contracts)
 - [Without the helpers: curl](#without-the-helpers-curl)
 - [Common errors](#common-errors)
 
@@ -337,7 +338,10 @@ approve. The event stream reconnects by itself when it breaks; `app.onStatus((st
 says when it is `open`, `reconnecting` or `closed`, and events sent while it was down are lost, so
 read again when it reopens (see the [package's README](../js/README.md#the-event-stream)). `app.permit(contract)` asks for permissions on an existing contract (one the user joined),
 and `app.join(contract, memberNode, memberAgent)` asks the user to join one;
-`app.join(contract, memberNode, memberAgent, { guest: true })` as a guest.
+`app.join(contract, memberNode, memberAgent, { guest: true })` as a guest. `deploy`, `join` and
+`permit` also take `public`, to propose letting anyone read the user's copy, and anyone reads one
+with `Ibc.publicRead(node, agent, contract, method, values)`: see
+[Publishing](#publishing-public-contracts).
 
 **`Ibc`, the user's own client**, with the user's keys: the node's web page uses it, and so can
 tools. The root key signs transactions; a key the node knows (or the root) signs queries.
@@ -429,7 +433,9 @@ of objects.
 in the contract says so; each user decides, on their node, when the app first uses it ([Apps](#apps)).
 `web/e2e/app.html` is a small app that does this: it creates a chat from the source, posts silently,
 and asks for the topic. Chat also lets anyone join as a guest (`approve_guest` returns `true`): see
-[Joining as a guest](#joining-as-a-guest).
+[Joining as a guest](#joining-as-a-guest). And if a user makes their copy public, anyone reads its
+topic and count, but `latest` refuses an unknown reader: see
+[Publishing](#publishing-public-contracts).
 
 ### Arguments
 
@@ -524,6 +530,46 @@ As a guest you use the same calls, apps and permissions as a partner; your node 
 the web interface, a guest's contract page shows its hosts and has no invite: others join through a
 partner.
 
+## Publishing: public contracts
+
+To publish information, you may let anyone read your copy of a contract: no sign-in, no key, no
+signature. It is your choice, for your copy, on your node; the other partners each decide for theirs.
+A public read changes nothing and acts for no one: only `view` and `pure` functions run, with
+`msg.sender` set to the zero address.
+
+So the contract decides what a stranger sees. In a contract that mixes public and private
+information, the private functions refuse an unknown reader. Chat does it for its messages:
+
+```solidity
+function latest(uint256 limit) external view returns (Message[] memory page) {
+    require(msg.sender != address(0), "sign in to read the messages");
+    …
+}
+```
+
+Public is off until you turn it on: on the contract's page in the web interface ("Make it public"),
+when an app asks you to deploy or join (the box "Anyone may read this contract" starts ticked if the
+app proposes it), or from the shell:
+
+```sh
+ibc.sh public "$C"                                   # true
+ibc.sh anyone "$(ibc.sh whoami)" "$C" topic          # anyone, unsigned: "lunch"
+ibc.sh anyone "$(ibc.sh whoami)" "$C" latest '{"limit": 5}'
+# ibc.sh: execution reverted: sign in to read the messages
+ibc.sh private "$C"                                  # false
+```
+
+Anyone reads with a plain GET; the URL names your agent, since a node keeps one copy per agent:
+
+```sh
+curl -G "http://localhost:2611/ibc/app/<agent>/<contract>/topic" --data-urlencode action=public_read
+curl -G "http://localhost:2611/ibc/app/<agent>/<contract>/latest" --data-urlencode action=public_read \
+     --data-urlencode 'values={"limit": 5}'
+```
+
+The node limits public reads per client address and in total ([Limits](api.md#limits)). A guest
+keeps no copy, so has none to make public.
+
 ## Without the helpers: curl
 
 Every call is one HTTP request. A write carries a signed transaction, and a read or the event
@@ -587,6 +633,8 @@ keep-alives.
 | `{"message": "consensus: unknown contract 0x…"}` | You are not a partner of this contract on this node: check the id, or join it first |
 | `{"message": "no such contract"}` | A read of a contract you do not have, or whose deployment has not finished |
 | `{"message": "no host answered: …"}` | You are a guest, and none of the contract's hosts' nodes answered |
+| `{"message": "agent 0x… has no public contract 0x…"}` | A public read of a copy its agent has not made public (or a wrong agent or contract id) |
+| `{"message": "too many public reads: slow down"}` | Public reads are limited per client address (HTTP 429) |
 | `{"message": "0x… is not a guest of this contract"}` | You were a guest and were removed: leave the contract on your node |
 | `{"message": "this call needs a signed query"}` | Reads, `get_contract(s)` and the event stream are signed: see the [API reference](api.md#queries) |
 | `{"message": "query expired, or its time is wrong: check the clock"}` | Sign the query just before you send it; the node accepts it for 60 seconds |

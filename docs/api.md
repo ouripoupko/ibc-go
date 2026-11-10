@@ -11,6 +11,7 @@ The complete HTTP interface of an ibc node. For a guided introduction with examp
 - [Apps](#apps): `register_app`, `get_apps`, `revoke_app`
 - [Contracts](#contracts): `compile`, `deploy_contract`, `get_contracts`, `get_contract`
 - [Calling a contract](#calling-a-contract): `contract_write`, `contract_read`
+- [Public contracts](#public-contracts): `set_public`, `public_read`
 - [Membership](#membership): `join_contract`, `leave_contract`, `rotate_key`
 - [The event stream](#the-event-stream): `/stream`
 - [Node to node](#node-to-node): `a2a_consent`
@@ -78,16 +79,18 @@ check it. Reads are signed too, as [queries](#queries).
 
 | Call | Who may make it |
 |---|---|
-| `register_agent`, `register_app`, `revoke_app` | The agent, with its root key |
+| `register_agent`, `register_app`, `revoke_app`, `set_public` | The agent, with its root key |
 | `deploy_contract`, `contract_write`, `join_contract`, `leave_contract`, `rotate_key` | The agent, with its root key |
 | `contract_write` with a query | An app the agent connected, for a function the agent lets it call silently: the node signs |
 | `contract_read`, `get_contract`, `get_contracts`, the event stream | The agent's root key, or an app the agent connected and lets read |
 | `get_apps` | The agent (its root key, or its node's own page) |
 | `node_info`, `is_exist_agent`, `agent_info`, `compile` | Anyone, unsigned |
+| `public_read` | Anyone, unsigned: only a contract the agent made [public](#public-contracts), only its read functions |
 | Node to node (`a2a_consent`) | Nodes, signed with their node key; see [Node to node](#node-to-node) |
 
 An agent reads only its own copy of a contract; a [guest](#guests) has none, and its node reads a
-host's copy for it, as the guest. The node's operator can still see everything stored on the node.
+host's copy for it, as the guest. An agent may also let anyone read its copy: a
+[public contract](#public-contracts). The node's operator can still see everything stored on the node.
 
 ## Signatures
 
@@ -95,7 +98,7 @@ An agent has two keys (the design is in [Identity and keys](keys.md)):
 
 | Key | Signs |
 |---|---|
-| **Root key:** a passkey, or a key file; its address is the agent id | Registrations, transactions, and the agent's permissions for apps (consents and grants) |
+| **Root key:** a passkey, or a key file; its address is the agent id | Registrations, transactions, the agent's permissions for apps (consents and grants), and which of its contracts are public |
 | **Node key:** the node's own key | Blocks; and calls the agent lets an app make silently, under the agent's grant |
 
 Apps have keys of their own, which sign their [queries](#queries) to the node.
@@ -149,6 +152,13 @@ const types = {
     { name: 'codeHash',   type: 'bytes32' },  // the contract code; zero: every contract (read only)
     { name: 'read',       type: 'bool' },     // may read without asking
     { name: 'functions',  type: 'string[]' }, // may have the node call these without asking
+    { name: 'nonce',      type: 'string' },
+  ],
+  Publish: [                                   // lets anyone read the agent's copy (kept by the node)
+    { name: 'agent',      type: 'address' },
+    { name: 'contract',   type: 'string' },   // the contract id
+    { name: 'public',     type: 'bool' },     // true: public; false: private again
+    { name: 'time',       type: 'uint64' },   // unix milliseconds: orders the agent's choices
     { name: 'nonce',      type: 'string' },
   ],
   Batch: [                                     // one signature over several messages
@@ -550,6 +560,70 @@ For a contract the agent is a [guest](#guests) of, the node sends the read to a 
 on its copy with `msg.sender` set to the agent. The reply is the same; if no host answers:
 `no host answered: …`.
 
+## Public contracts
+
+An agent may let anyone read its copy of a contract, without signing: to publish information. It
+is the agent's choice, for its own copy, on its own node; partners never see it, and each one
+decides for its own copy. A public read acts for no one: the function runs with `msg.sender` set to
+the zero address (`address(0)`), only `view` and `pure` functions run, and nothing is recorded.
+
+The contract's code decides what an unknown reader sees. A function that must stay private refuses
+one:
+
+```solidity
+function latest(uint256 limit) external view returns (Message[] memory) {
+    require(msg.sender != address(0), "sign in to read the messages");
+    …
+}
+```
+
+Public is off until the agent turns it on: when deploying or joining (an app may propose it, and the
+user decides on the [approval page](keys.md#8-the-approval-page)), or later on the contract's page.
+A [guest](#guests) has no copy, so has none to make public.
+
+### `set_public`
+
+Makes the agent's copy of a contract public, or private again. The root key signs a `Publish`
+message ([its type](#signatures)), which stays on the node:
+
+```
+PUT /ibc/app/<agent>/<contract>?action=set_public
+{"publish": {"agent": "<agent>", "contract": "<contract>", "public": true, "time": 1789000000000, "nonce": "…"},
+ "signature": <the root key's envelope>}
+```
+
+`time` is in unix milliseconds, and orders the agent's choices: the node takes only a newer one than
+it has, so an old message cannot be sent again. It may not be more than a minute ahead of the node's
+clock.
+
+**Reply:** the new setting, `true` or `false`. **Errors:** `set_public: signature does not match the
+agent`; `publish of 0x… sent as 0x…`; `agent 0x… has no contract 0x…`; `a guest has no copy of the
+contract to make public`; `an older choice than the one this node has`; `set_public: its time is in
+the future: check the clock`.
+
+### `public_read`
+
+Anyone's read of a public contract: no key, no signature. The URL names the agent whose copy is
+read, since a node keeps a copy per agent.
+
+```
+GET /ibc/app/<agent>/<contract>/<method>?action=public_read&values=<the arguments as URL-encoded JSON>
+```
+
+`values` is the same object as in a `contract_read` body, e.g. `{"limit":5}`, and may be left out
+for a function without arguments.
+
+**Reply:** the function's result, or the error as a string, as for `contract_read`, e.g.
+`"execution reverted: sign in to read the messages"`. `{"message": "agent 0x… has no public
+contract 0x…"}` if the agent's copy is not public, or the agent has no such contract: the answer is
+the same, so a stranger learns nothing of private contracts.
+
+Anyone may send one, so the node limits them: 10 a second per client address (20 at once), and 16
+running at once on the node. Beyond that: HTTP 429, `{"message": "too many public reads: slow
+down"}` or `{"message": "the node is busy with public reads: try again"}`. Behind a proxy on the same
+machine ([Caddy](deploy.md#7-add-https-with-caddy)), the client address is the last one the proxy
+adds to `X-Forwarded-For`. A public read has a smaller gas limit, see [Limits](#limits).
+
 ## Membership
 
 A contract's partners change through `join`, `leave` and `rotate_key` transactions, which are
@@ -756,6 +830,7 @@ Returned by `get_contracts` and `get_contract`. Fields are present only when the
 | `source`, `compiler` | The Solidity source and how the node compiled it, if it did |
 | `role` | `partner`, or `guest`: the agent is a [guest](#guests), and this node has no copy of the contract (no state fields) |
 | `hosts` | For a guest: the contract's members, `[{agent, nodeKey, node}]`, to whom its node sends its transactions and reads |
+| `public` | Whether the agent lets anyone read its copy ([public contracts](#public-contracts)) |
 | `evm_address` | The contract's address in its own EVM state |
 | `state_root` | The state root after the last successful transaction |
 | `block_number` | How many transactions the contract has processed |
@@ -784,6 +859,8 @@ A transaction as the ledger keeps it.
 |---|---|
 | Request body | 16 MiB |
 | Gas per call | 100,000,000 |
+| Gas per public read | 10,000,000 |
+| Public reads | 10 a second per client address (bursts of 20); 16 at once per node |
 | Events a stream client may fall behind | 256 |
 | Event stream keep-alive | every 10 seconds |
 | Requests to other nodes | 30 seconds |

@@ -60,6 +60,13 @@ export const TYPES = {
         { name: 'appKey', type: 'bytes' },
         { name: 'nonce', type: 'string' },
     ],
+    Publish: [
+        { name: 'agent', type: 'address' },
+        { name: 'contract', type: 'string' },
+        { name: 'public', type: 'bool' },
+        { name: 'time', type: 'uint64' },
+        { name: 'nonce', type: 'string' },
+    ],
     Batch: [{ name: 'items', type: 'bytes32[]' }],
 };
 export const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';

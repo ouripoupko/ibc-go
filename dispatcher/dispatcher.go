@@ -71,6 +71,7 @@ type Dispatcher struct {
 	done      <-chan struct{}
 	mux       *http.ServeMux
 	guard     *guard
+	public    *limiter
 }
 
 // Options are a Dispatcher's dependencies besides the node's parts.
@@ -95,7 +96,7 @@ func New(navigator *execution.Navigator, protocol consensus.Protocol, broker *Br
 	}
 	d := &Dispatcher{navigator: navigator, consensus: protocol, broker: broker, key: opts.NodeKey,
 		nodeKey: identity.Address(opts.NodeKey), storage: storage, compiler: opts.Compiler,
-		apps: &apps{coll: opts.Apps}, done: done, guard: newGuard()}
+		apps: &apps{coll: opts.Apps}, done: done, guard: newGuard(), public: newLimiter()}
 	d.mux = http.NewServeMux()
 	d.mux.HandleFunc("/ibc/app", d.handleApp)
 	d.mux.HandleFunc("/ibc/app/{path...}", d.handleApp)
@@ -144,6 +145,16 @@ func (d *Dispatcher) handleApp(w http.ResponseWriter, r *http.Request) {
 		Timestamp: Timestamp(time.Now()),
 	}
 	record.HashCode = hashRecord(record)
+
+	if record.Action == actionPublicRead {
+		// Anyone may send one: it is limited per client address.
+		release, err := d.public.acquire(clientAddress(r))
+		if err != nil {
+			writeJSON(w, http.StatusTooManyRequests, message(err.Error()))
+			return
+		}
+		defer release()
+	}
 
 	if record.Action != execution.ActionConsent {
 		slog.Info("request", "hash", short(record.HashCode), "agent", record.Agent,
@@ -242,6 +253,12 @@ func (d *Dispatcher) handle(ctx context.Context, record execution.Record, body [
 			return d.silentWrite(record, sq)
 		}
 		return d.submit(record, body, identity.KindCall)
+
+	case route{http.MethodPut, actionSetPublic}:
+		return d.setPublic(record, body)
+
+	case route{http.MethodGet, actionPublicRead}:
+		return d.publicRead(record, query)
 
 	case route{http.MethodPut, actionRegisterApp}:
 		return d.registerApp(record, body)

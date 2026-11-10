@@ -42,6 +42,24 @@ approve. Also: `app.permit(contract)` asks for permissions on an existing contra
 `app.join(contract, memberNode, memberAgent, { guest })` asks the user to join one, as a partner or
 as a guest.
 
+## Public contracts
+
+A user may let anyone read their copy of a contract, unsigned: its `view` and `pure` functions run
+with `msg.sender` the zero address, so the contract decides what an unknown reader sees. The app
+proposes it, and the user decides on the approval page:
+
+```js
+const board = await app.deploy({ source, public: true });   // the box starts ticked
+await app.join(contract, memberNode, memberAgent, { public: true });
+await app.permit(contract, { public: false });              // propose making it private again
+
+// Anyone, with no key, in any page or in Node.js:
+import { Ibc } from '@ouripoupko/ibc';
+await Ibc.publicRead('https://node.example', agent, contract, 'topic');
+```
+
+The user's own client has `ibc.setPublic(contract, true | false)`, signed by the root.
+
 ## The event stream
 
 Events (the outcomes of transactions) arrive on a stream from the node. `onEvent` opens it, and it

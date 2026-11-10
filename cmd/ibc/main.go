@@ -105,7 +105,7 @@ func keyCommand(args []string) error {
 
 func signCommand(args []string) error {
 	if len(args) < 1 {
-		return errors.New("usage: ibc sign tx|registration|query ...")
+		return errors.New("usage: ibc sign tx|registration|query|publish ...")
 	}
 	fs := flag.NewFlagSet("ibc sign "+args[0], flag.ExitOnError)
 	keyFile := fs.String("key", "", "the root key file")
@@ -174,6 +174,25 @@ func signCommand(args []string) error {
 			return err
 		}
 		out = sq
+	case "publish":
+		contract := fs.String("contract", "", "the contract id")
+		public := fs.Bool("public", true, "true: anyone may read your copy; false: private again")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		signer, agent, err := loadSigner(*keyFile)
+		if err != nil {
+			return err
+		}
+		sp, err := identity.SignPublish(identity.Publish{Agent: agent, Contract: *contract, Public: *public,
+			Time: uint64(time.Now().UnixMilli()), Nonce: identity.NewNonce()}, signer)
+		if err != nil {
+			return err
+		}
+		if err := sp.Verify(); err != nil {
+			return err
+		}
+		out = sp
 	default:
 		return fmt.Errorf("unknown sign command %q", args[0])
 	}

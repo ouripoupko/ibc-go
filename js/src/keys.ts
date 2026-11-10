@@ -73,6 +73,13 @@ export const TYPES = {
     { name: 'appKey', type: 'bytes' },
     { name: 'nonce', type: 'string' },
   ],
+  Publish: [
+    { name: 'agent', type: 'address' },
+    { name: 'contract', type: 'string' },
+    { name: 'public', type: 'bool' },
+    { name: 'time', type: 'uint64' },
+    { name: 'nonce', type: 'string' },
+  ],
   Batch: [{ name: 'items', type: 'bytes32[]' }],
 } as const satisfies Record<string, readonly Field[]>;
 
@@ -90,12 +97,18 @@ export interface Consent {
   agent: Address; app: string; appKey: Hex; codeHash: Hex; read: boolean; functions: string[]; nonce: string;
 }
 export interface Device { agent: Address; app: string; appKey: Hex; nonce: string }
+/** Lets anyone read the agent's copy of a contract (public_read), or stops it. */
+export interface Publish {
+  agent: Address; contract: string; public: boolean;
+  /** Unix milliseconds: the node takes only a newer choice than it has. */
+  time: number; nonce: string;
+}
 export interface Batch { items: Hex[] }
 
 /** The message of each type. */
 export interface Messages {
   Transaction: Transaction; Registration: Registration; Query: Query; Grant: Grant;
-  Consent: Consent; Device: Device; Batch: Batch;
+  Consent: Consent; Device: Device; Publish: Publish; Batch: Batch;
 }
 
 /** One message to sign, with its type. */

@@ -65,6 +65,23 @@ function show(c) {
     }
   });
 
+  // A partner may let anyone read its copy; a guest keeps none.
+  $('#public-card').classList.toggle('hidden', guest);
+  let isPublic = c.public === true;
+  const showPublic = () => {
+    $('#public-state').textContent = isPublic ? 'Anyone may read this contract.' : 'Only you, and the apps you allowed, read this contract.';
+    $('#public-link').textContent = `${location.origin}/ibc/app/${ibc.agent}/${c.id}/<function>?action=public_read&values={…}`;
+    $('#public-link-row').classList.toggle('hidden', !isPublic);
+    $('#public-toggle').textContent = isPublic ? 'Make it private' : 'Make it public';
+  };
+  showPublic();
+  $('#public-toggle').addEventListener('click', () => busy($('#public-toggle'), $('#public-status'), async () => {
+    status($('#public-status'), 'Approve with your passkey…');
+    isPublic = await ibc.setPublic(c.id, !isPublic);
+    showPublic();
+    status($('#public-status'), '');
+  }));
+
   let abi = [];
   try {
     abi = typeof c.abi === 'string' ? parseAbi(c.abi) : (c.abi ?? []);
