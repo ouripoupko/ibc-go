@@ -161,7 +161,9 @@ with it:
    reason}`.
 
 If this browser has no identity on the node, the page first offers to sign in with the passkey, or
-to create an identity (a passkey, and the registration: two approvals). The page shows the app's
+to create an identity (a passkey, and the registration: two approvals). If the browser has an identity the node no longer
+knows (its data was reset, or the node's own site was disconnected), the page offers to register
+again (one approval), and then shows the request. The node's main page does the same. The page shows the app's
 site (its origin, which the browser vouches for), what it asks, and the code behind a link. If the request comes from a new browser of an app the user approved before, the
 approval also connects that browser (a `Device` message in the same signature). `IbcApp`, in the client package [`@ouripoupko/ibc`](../js), does all of this for an app: it tries silently first, and
 opens the page when the node says the user must approve.

@@ -14,7 +14,8 @@
 // The app's site (its origin) is what the user sees and what the node records.
 // A user with no identity on this node yet can create one here, or sign in.
 import {
-  $, el, status, errorText, loadIdentity, connect, rootSigner, signIn, createIdentity, parseAbi, isRead, pretty, short,
+  $, el, status, errorText, loadIdentity, connect, rootSigner, signIn, createIdentity, isKnown, reregister, parseAbi, isRead,
+  pretty, short,
 } from './app.mjs';
 import { API_VERSION, fromHex, keccak256, nonce, now, signBatch, toHex } from './js/index.js';
 
@@ -76,7 +77,8 @@ async function show(identity) {
   const host = new URL(origin).host;
   $('#who').textContent = `Agent ${identity.agent}`;
   try {
-    const ibc = await connect(identity);
+    let ibc = await connect(identity);
+    if (!(await isKnown(ibc))) ibc = await renew(identity);
     const handler = {
       connect: showConnect, deploy: showDeploy, permit: showPermit, call: showCall, read: showRead, join: showJoin,
     }[request.type];
@@ -98,6 +100,29 @@ async function show(identity) {
   } catch (err) {
     status($('#status'), errorText(err), 'bad');
   }
+}
+
+/**
+ * The node does not know this browser's identity (any more): the user
+ * registers again, with one approval, and the request continues.
+ */
+function renew(identity) {
+  $('#renew-box').classList.remove('hidden');
+  return new Promise((resolve) => {
+    $('#renew').addEventListener('click', async () => {
+      $('#renew').disabled = true;
+      try {
+        status($('#status'), 'Approve with your passkey…');
+        const ibc = await reregister(identity);
+        $('#renew-box').classList.add('hidden');
+        status($('#status'), '');
+        resolve(ibc);
+      } catch (err) {
+        status($('#status'), errorText(err), 'bad');
+        $('#renew').disabled = false;
+      }
+    });
+  });
 }
 
 function details(rows) {

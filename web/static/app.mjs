@@ -4,7 +4,7 @@
 //
 // Everything shown comes from the node or from contracts, so it is always
 // inserted as text (textContent), never as HTML.
-import { Ibc, IbcError } from './js/index.js';
+import { Ibc, IbcError, needsApproval } from './js/index.js';
 import {
   addressOf, choosePasskey, createPasskey, fromHex, newP256Key, nonce, passkeySigner, signBatch, sign, toHex,
 } from './js/index.js';
@@ -97,8 +97,25 @@ export async function createIdentity(name) {
 }
 
 /**
- * Registers a kept identity again (when the node no longer knows it): its
- * registration and this page's key, in one approval.
+ * Whether the node knows this browser's identity: the agent is registered,
+ * and this page's key is one the agent approved. A node whose data was reset
+ * knows neither; one where the node's own site was disconnected does not know
+ * the page's key. reregister() fixes both.
+ */
+export async function isKnown(ibc) {
+  if (!(await ibc.exists())) return false;
+  try {
+    await ibc.apps();
+    return true;
+  } catch (err) {
+    if (needsApproval(err)) return false;
+    throw err;
+  }
+}
+
+/**
+ * Registers a kept identity again (when the node no longer knows it, or this
+ * page's key): its registration and this page's key, in one approval.
  */
 export async function reregister(identity) {
   const ibc = await Ibc.connect(location.origin, { agent: identity.agent, root: rootSigner(identity), appKey: identity.pageKey });

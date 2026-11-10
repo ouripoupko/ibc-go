@@ -132,7 +132,14 @@ async function appClick(appPage, button, { approve = null } = {}) {
     if (approve.from) await syncPasskey(approve.from, popup, approve.credential);
     // A browser where the user is not signed in to the node yet: sign in first.
     await popup.waitForFunction(() => !document.querySelector('#buttons').classList.contains('hidden')
-      || !document.querySelector('#sign-in-box').classList.contains('hidden'), { timeout: 90000 });
+      || !document.querySelector('#sign-in-box').classList.contains('hidden')
+      || !document.querySelector('#renew-box').classList.contains('hidden'), { timeout: 90000 });
+    // The node does not know this browser's identity any more: register again first.
+    if (await popup.$eval('#renew-box', (b) => !b.classList.contains('hidden'))) {
+      await popup.click('#renew');
+      await popup.waitForSelector('#buttons:not(.hidden)', { timeout: 90000 });
+      approve.renewed = true;
+    }
     if (await popup.$eval('#sign-in-box', (b) => !b.classList.contains('hidden'))) {
       if (approve.create) {
         await popup.type('#new-name', approve.create);
@@ -314,6 +321,29 @@ try {
   check('connect: a new user creates an identity on the node, and the app learns it',
     /^0x[0-9a-fA-F]{40}$/.test(carol) && a.signedIn && registered === true && /wants to know who you are/.test(a.seen.title),
     `${line} · ${a.seen.title} · registered ${registered}`);
+
+  // Alice's node forgets her page's key (as when the node's own site is disconnected, or its
+  // data reset). The node's page offers to register again, and so does the approval page.
+  const forgetPage = () => pa.evaluate(async () => {
+    const m = await import('./app.mjs');
+    const ibc = await m.connect(await m.loadIdentity());
+    await ibc.revokeApp(location.origin);
+  });
+  await pa.bringToFront();
+  await forgetPage();
+  await pa.goto(`${A}/`);
+  await pa.waitForSelector('#register-card:not(.hidden)', { timeout: 30000 });
+  check('the node page offers to register again', true);
+  await pa.click('#register');
+  await pa.waitForSelector('#agent-area:not(.hidden)', { timeout: 30000 });
+  await pa.waitForFunction(() => /0x/.test(document.querySelector('#contracts')?.textContent ?? ''), { timeout: 30000 });
+  check('registered again: the page reads again', true);
+  await forgetPage();
+  await pApp.bringToFront();
+  a = { ...approveAs };
+  line = await appClick(pApp, 'connect', { approve: a });
+  check('the approval page registers again, then the request continues',
+    a.renewed === true && line === `connect "${alice.agent}"`, `${line} · renewed ${a.renewed}`);
 
   check('message boxes closed', await pa.$eval('body', () => !document.querySelector('dialog.signing')?.open));
   console.log('passkey requests:', boxes.length);

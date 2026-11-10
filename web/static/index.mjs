@@ -2,7 +2,7 @@
 // apps you connected.
 import {
   $, el, status, busy, errorText, connect, paramInputs, readFile, decodeInvite, short,
-  loadIdentity, createIdentity, signIn, reregister, passkeysAvailable,
+  loadIdentity, createIdentity, signIn, reregister, passkeysAvailable, isKnown,
 } from './app.mjs';
 
 let ibc;
@@ -65,7 +65,7 @@ async function begin(button, fn) {
 
 async function enter() {
   $('#who').textContent = `Agent ${ibc.agent} · node ${location.host}`;
-  if (await ibc.exists()) await showAgent();
+  if (await isKnown(ibc)) await showAgent();
   else $('#register-card').classList.remove('hidden');
 }
 
