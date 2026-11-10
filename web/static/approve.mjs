@@ -4,6 +4,7 @@
 // Protocol (see docs/keys.md): this page posts { type: 'ibc-ready' } to its
 // opener; the app answers with a request, which always carries its key
 // (appKey, a P-256 public key, hex):
+//   { type: 'connect', appKey }            who the user is: connects the app, with no permissions
 //   { type: 'deploy', source, contract, name, constructor, protocol, appKey }
 //   { type: 'permit', contract, appKey }   permissions on an existing contract
 //   { type: 'call', contract, method, values, appKey }
@@ -11,8 +12,9 @@
 //   { type: 'join', contract, memberNode, memberAgent, guest, appKey }
 // and this page replies { type: 'ibc-done', result } or { type: 'ibc-denied', reason }.
 // The app's site (its origin) is what the user sees and what the node records.
+// A user with no identity on this node yet can create one here, or sign in.
 import {
-  $, el, status, errorText, loadIdentity, connect, rootSigner, signIn, parseAbi, isRead, pretty, short,
+  $, el, status, errorText, loadIdentity, connect, rootSigner, signIn, createIdentity, parseAbi, isRead, pretty, short,
 } from './app.mjs';
 import { fromHex, keccak256, nonce, now, signBatch, toHex } from './keys.mjs';
 
@@ -35,9 +37,10 @@ const deny = (reason) => {
 const codeHashOf = (code) => toHex(keccak256(fromHex(code)));
 
 function valid(r) {
-  const known = ['deploy', 'permit', 'call', 'read', 'join'];
-  return r && known.includes(r.type) && /^0x04[0-9a-fA-F]{128}$/.test(r.appKey ?? '')
-    && (r.type === 'deploy' ? typeof r.source === 'string' : typeof r.contract === 'string');
+  const known = ['connect', 'deploy', 'permit', 'call', 'read', 'join'];
+  if (!r || !known.includes(r.type) || !/^0x04[0-9a-fA-F]{128}$/.test(r.appKey ?? '')) return false;
+  if (r.type === 'connect') return true;
+  return r.type === 'deploy' ? typeof r.source === 'string' : typeof r.contract === 'string';
 }
 
 async function onMessage(e) {
@@ -47,17 +50,23 @@ async function onMessage(e) {
   $('#deny').addEventListener('click', () => deny('the user denied'));
   let identity = await loadIdentity();
   if (!identity) {
+    // This browser has no identity on this node: sign in with the passkey, or create one.
     $('#title').textContent = `${new URL(origin).host} asks for your approval`;
     $('#sign-in-box').classList.remove('hidden');
-    $('#sign-in').addEventListener('click', async () => {
+    const begin = (fn) => async () => {
+      $('#sign-in').disabled = $('#create-identity').disabled = true;
       try {
-        ({ identity } = await signIn());
+        ({ identity } = await fn());
         $('#sign-in-box').classList.add('hidden');
+        status($('#status'), '');
         await show(identity);
       } catch (err) {
         status($('#status'), errorText(err), 'bad');
+        $('#sign-in').disabled = $('#create-identity').disabled = false;
       }
-    });
+    };
+    $('#sign-in').addEventListener('click', begin(signIn));
+    $('#create-identity').addEventListener('click', begin(() => createIdentity($('#new-name').value.trim() || 'me')));
     return;
   }
   await show(identity);
@@ -68,7 +77,9 @@ async function show(identity) {
   $('#who').textContent = `Agent ${identity.agent}`;
   try {
     const ibc = await connect(identity);
-    const handler = { deploy: showDeploy, permit: showPermit, call: showCall, read: showRead, join: showJoin }[request.type];
+    const handler = {
+      connect: showConnect, deploy: showDeploy, permit: showPermit, call: showCall, read: showRead, join: showJoin,
+    }[request.type];
     const approveFn = await handler(ibc, identity, host);
     $('#buttons').classList.remove('hidden');
     $('#approve').addEventListener('click', async () => {
@@ -165,6 +176,18 @@ function permissionMessages(ibc, identity, codeHash, choice) {
     });
   }
   return items;
+}
+
+async function showConnect(ibc, identity, host) {
+  $('#title').textContent = `${host} wants to know who you are`;
+  $('#what').textContent = 'It learns your agent id. It asks you here before it does anything in your name.';
+  const app = await siteOf(ibc);
+  return async () => {
+    if (app.known) return {}; // this browser of the app is connected already
+    const items = [{ type: 'Device', message: { agent: identity.agent, app: origin, appKey: request.appKey, nonce: nonce() } }];
+    await registerSigned(ibc, items, await signBatch(rootSigner(identity), items));
+    return {};
+  };
 }
 
 async function showDeploy(ibc, identity, host) {

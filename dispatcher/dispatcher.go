@@ -441,12 +441,16 @@ func (d *Dispatcher) registerApp(record execution.Record, body []byte) (any, err
 		return nil, fmt.Errorf("register_app: %w", err)
 	}
 	if req.Device != nil {
-		// Another browser of an app the agent approved: same permissions.
+		// A browser of an app: another browser of an app the agent approved
+		// (same permissions), or a new app the agent connects (none yet).
 		if err := req.Device.Verify(); err != nil {
 			return nil, fmt.Errorf("register_app: %w", err)
 		}
 		if req.Device.Device.Agent.Hex() != record.Agent {
 			return nil, fmt.Errorf("device of %s sent as %s", req.Device.Device.Agent.Hex(), record.Agent)
+		}
+		if registered, err := d.navigator.AgentExists(record.Agent); err != nil || !registered {
+			return nil, fmt.Errorf("agent %s is not registered here", record.Agent)
 		}
 		return true, d.apps.device(req.Device.Device)
 	}

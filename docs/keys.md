@@ -66,10 +66,15 @@ An app on any site acts for the user through the user's node, never with the use
 - **The app's key.** The app makes a key in the browser, which cannot be extracted, and keeps it.
   The node learns it when the user first approves the app. It identifies the app to the node; it
   signs nothing that reaches partners.
+- **Connecting.** An app learns who the user is by sending the user to the node's approval page
+  with a `connect` request. The page knows the user from this browser, or the user signs in with
+  the passkey, or creates an identity there. The root signs a `Device` message ("connect
+  wishes.example.com"), and the node records the app with this browser's key and no permissions.
+  The app learns the agent id. The app's first other request does the same if it skipped this.
 - **Apps are known by their site.** The node keeps permissions per app site (its origin, which the
   browser vouches for), and each browser's key as one of the app's **devices**. When the user uses
   the app on another computer, its first request that needs the node connects that browser: the
-  root signs a `Device` message ("connect this browser of wishes.example.com") in the same approval,
+  root signs a `Device` message ("connect wishes.example.com") in the same approval,
   and the app's permissions apply to it. Nothing to choose again.
 - **Permissions, per contract code.** The first time an app uses a contract code, the user decides,
   on the node's page:
@@ -144,6 +149,7 @@ with it:
 
    | `type` | Fields | The user approves |
    |---|---|---|
+   | `connect` | none | Connecting the app: it learns the agent id, with no permissions |
    | `deploy` | `source`, `contract` (name, optional), `name`, `constructor`, `protocol` | The deploy, compiled by the node; and the app's permissions for this code, the first time |
    | `permit` | `contract` | The app's permissions for an existing contract's code |
    | `call` | `contract`, `method`, `values` | A transaction, signed by the root |
@@ -153,8 +159,9 @@ with it:
 3. The page answers `{type: "ibc-done", result}` (with the agent's id) or `{type: "ibc-denied",
    reason}`.
 
-The page shows the app's site (its origin, which the browser vouches for), what it asks, and the
-code behind a link. If the request comes from a new browser of an app the user approved before, the
+If this browser has no identity on the node, the page first offers to sign in with the passkey, or
+to create an identity (a passkey, and the registration: two approvals). The page shows the app's
+site (its origin, which the browser vouches for), what it asks, and the code behind a link. If the request comes from a new browser of an app the user approved before, the
 approval also connects that browser (a `Device` message in the same signature). `IbcApp` in `ibc.mjs` does all of this for an app: it tries silently first, and
 opens the page when the node says the user must approve.
 

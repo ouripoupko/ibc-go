@@ -692,8 +692,27 @@ func TestApps(t *testing.T) {
 	}
 	otherSite, _ := identity.SignDevice(identity.Device{Agent: alice.addr, App: "https://unknown.example",
 		AppKey: identity.PublicKey(app2), Nonce: "n"}, alice.root)
-	refused("a device of an app alice never approved", call(t, a.URL, "PUT", alice.id, "register_app", "", "",
-		map[string]any{"device": otherSite}), "has not approved")
+	refused("one browser key for two sites", call(t, a.URL, "PUT", alice.id, "register_app", "", "",
+		map[string]any{"device": otherSite}), "belongs to")
+
+	// Connecting a new app: it learns who alice is, and may do nothing without asking.
+	app3, _ := identity.NewP256Key()
+	connect, _ := identity.SignDevice(identity.Device{Agent: alice.addr, App: "https://new.example",
+		AppKey: identity.PublicKey(app3), Nonce: identity.NewNonce()}, alice.root)
+	if got := call(t, a.URL, "PUT", alice.id, "register_app", "", "", map[string]any{"device": connect}); got != true {
+		t.Fatalf("connect a new app = %v", got)
+	}
+	refused("a connected app's read", call(t, a.URL, "POST", alice.id, "contract_read", cid, "getValue",
+		alice.queryWith(t, identity.P256Signer{Key: app3}, "contract_read", alice.id, cid,
+			map[string]any{"method": "getValue", "values": map[string]any{"who": alice.id}})), "needs your approval")
+	listAuth, _ := json.Marshal(alice.queryWith(t, identity.P256Signer{Key: app3}, "get_contracts", alice.id, "", nil))
+	if got := getAuth(t, a.URL, alice.id, "get_contracts", "", string(listAuth)); fmt.Sprint(got) != "[]" {
+		t.Fatalf("a connected app's contracts = %v", got)
+	}
+	if got := call(t, a.URL, "PUT", alice.id, "revoke_app", "", "", alice.queryWith(t, alice.root, "revoke_app",
+		alice.id, "", map[string]any{"app": "https://new.example"})); got != true {
+		t.Fatalf("revoke the new app = %v", got)
+	}
 
 	// Alice sees her apps, and disconnects one, with all its browsers, with her root key.
 	apps := getAuth(t, a.URL, alice.id, "get_apps", "", alice.auth(t, "get_apps", alice.id, "", nil)).([]any)

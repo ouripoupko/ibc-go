@@ -280,7 +280,7 @@ function explain(type, m, batch) {
   switch (`${type}:${m.kind ?? m.action ?? ''}`) {
     case 'Registration:': return words('register on', location.host);
     case 'Consent:': return words('allow', new URL(m.app).host);
-    case 'Device:': return words('connect this browser of', new URL(m.app).host);
+    case 'Device:': return words('connect', new URL(m.app).host);
     case 'Grant:': return words('let your node call', m.functions.join(' '));
     case 'Query:contract_read': return words('read', body.method, values(body.values));
     case 'Query:revoke_app': return words('disconnect app');

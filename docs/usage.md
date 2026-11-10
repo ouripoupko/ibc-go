@@ -103,6 +103,11 @@ stays on your devices).
 
 An app on another site never holds your keys. It has a key of its own, and works through your node:
 
+0. **Connecting.** To know who you are, the app opens your node's **approval page** ("… wants to know
+   who you are"). If that browser does not know you yet, you sign in there with your passkey, or, if
+   you are new, create your identity there. You approve, and the app learns your agent id, nothing
+   more: it may do nothing without asking you yet. An app may skip this step; its first request then
+   connects it.
 1. **The first time it uses a contract code** (when it creates a contract, for example), it opens your
    node's **approval page**. You see what it asks (and the code, if you want), and choose what it may
    do without asking you:
@@ -306,8 +311,10 @@ approve something.
 import { IbcApp } from 'https://node.example/ibc.mjs';
 
 const app = await IbcApp.open('https://node.example');   // the user's node
+// app.agent is the user's agent id once the user approved the app here; null before.
 
 // On a click (browsers open the node's page only from a click):
+const agent = await app.connect();   // the user signs in (or creates an identity) on their node
 const source = await (await fetch('/Chat.sol')).text();
 const chat = await app.deploy({ source, constructor: { initialTopic: 'lunch' } });
 // The user approves on their node: the deploy, and what the app may do without asking.

@@ -147,7 +147,9 @@ func (a *apps) consent(c identity.Consent, grant *identity.Certificate) error {
 	return a.write(siteID(agent, c.App), r)
 }
 
-// device connects another browser of an app the agent approved before.
+// device connects a browser of an app: another browser of an app the agent
+// approved before, which gets the app's permissions; or the first browser of
+// a new app (a connect: the app learns who the user is), with no permissions.
 func (a *apps) device(d identity.Device) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -157,7 +159,7 @@ func (a *apps) device(d identity.Device) error {
 		return err
 	}
 	if r == nil {
-		return fmt.Errorf("agent %s has not approved %s yet", agent, d.App)
+		r = &appRecord{Agent: agent, App: d.App, Keys: []string{}, Permissions: map[string]permission{}}
 	}
 	if err := a.addKeyLocked(r, hexutil.Encode(d.AppKey)); err != nil {
 		return err

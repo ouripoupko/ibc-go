@@ -412,6 +412,17 @@ export class IbcApp {
   }
 
   /**
+   * Asks the user who they are: the node's page signs the user in (or creates
+   * their identity), and connects this app, with no permissions. Resolves
+   * with the user's agent id. Other requests connect the app too; this one
+   * only asks for that.
+   */
+  async connect() {
+    await this.#approve({ type: 'connect' });
+    return this.agent;
+  }
+
+  /**
    * Deploys a contract from Solidity source: the user's node compiles it, and
    * the user approves on the node's page, choosing the app's permissions the
    * first time this code is used. Resolves with the contract's id.

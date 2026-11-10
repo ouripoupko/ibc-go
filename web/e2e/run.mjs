@@ -127,12 +127,17 @@ async function appClick(appPage, button, { approve = null } = {}) {
     const popup = await popupPage;
     await watch(popup, 520);
     await addAuthenticator(popup);
-    await syncPasskey(approve.from, popup, approve.credential);
+    if (approve.from) await syncPasskey(approve.from, popup, approve.credential);
     // A browser where the user is not signed in to the node yet: sign in first.
     await popup.waitForFunction(() => !document.querySelector('#buttons').classList.contains('hidden')
       || !document.querySelector('#sign-in-box').classList.contains('hidden'), { timeout: 90000 });
     if (await popup.$eval('#sign-in-box', (b) => !b.classList.contains('hidden'))) {
-      await popup.click('#sign-in');
+      if (approve.create) {
+        await popup.type('#new-name', approve.create);
+        await popup.click('#create-identity');
+      } else {
+        await popup.click('#sign-in');
+      }
       await popup.waitForSelector('#buttons:not(.hidden)', { timeout: 90000 });
       approve.signedIn = true;
     }
@@ -293,6 +298,20 @@ try {
   const popup = await popupPage;
   check('a disconnected app must ask the user again', Boolean(popup));
   await popup.close();
+
+  // Carol, new to ibc, opens the app in her own browser. The app asks who she is: on her node's
+  // page she creates her identity, and approves the app, which learns her agent id.
+  const carolBrowser = await browser.createBrowserContext();
+  const pApp3 = await pageFor(carolBrowser);
+  await pApp3.goto(`http://localhost:${APP_PORT}/app.html?node=${encodeURIComponent(A)}`);
+  await pApp3.waitForFunction(() => window.appReady === true);
+  a = { create: 'carol' };
+  line = await appClick(pApp3, 'connect', { approve: a });
+  const carol = JSON.parse(line.slice('connect '.length));
+  const registered = await (await fetch(`${A}/ibc/app/${carol}?action=is_exist_agent`)).json();
+  check('connect: a new user creates an identity on the node, and the app learns it',
+    /^0x[0-9a-fA-F]{40}$/.test(carol) && a.signedIn && registered === true && /wants to know who you are/.test(a.seen.title),
+    `${line} · ${a.seen.title} · registered ${registered}`);
 
   check('message boxes closed', await pa.$eval('body', () => !document.querySelector('dialog.signing')?.open));
   console.log('passkey requests:', boxes.length);

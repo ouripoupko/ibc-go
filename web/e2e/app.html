@@ -8,6 +8,7 @@
   <!-- An app on another site (the browser test serves it on its own port). It holds no
        key of the user's: it has a key of its own, and asks the user's node, which asks
        the user on its approval page when needed. -->
+  <button id="connect">Connect</button>
   <button id="deploy">Deploy a chat</button>
   <button id="post">Post</button>
   <button id="topic">Read the topic</button>
@@ -28,6 +29,7 @@
         log(`${name} error ${err.message}`);
       }
     });
+    run('connect', () => app.connect());
     run('deploy', async () => {
       const source = await (await fetch('/Chat.sol')).text();
       chat = await app.deploy({ source, constructor: { initialTopic: 'lunch' } });

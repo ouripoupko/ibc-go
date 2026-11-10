@@ -348,8 +348,8 @@ these are the calls behind it.
 
 ### `register_app`
 
-Records what the agent lets an app do, for contracts of one code; or connects another browser of an
-app the agent approved before. The node keeps apps by their site (origin), with the keys of their
+Records what the agent lets an app do, for contracts of one code; or connects a browser of an app:
+a new app (its `connect`), or another browser of an app the agent approved before. The node keeps apps by their site (origin), with the keys of their
 browsers.
 
 ```
@@ -369,14 +369,16 @@ PUT /ibc/app/<agent>?action=register_app
 - A consent replaces the app's permission for that code. A `codeHash` of zero means every contract,
   and may only allow reading: the node's own page uses it.
 - A consent also connects its `appKey` as one of the app's browsers.
-- To connect another browser without changing permissions, send a device instead:
+- To connect a browser without changing permissions, send a device instead:
   `{"device": {"device": {"agent", "app", "appKey", "nonce"}, "signature": <the root key's envelope>}}`.
-  The app must have been approved before. A key belongs to one app only.
+  For an app the agent approved before, the browser gets the app's permissions. For a new app, the
+  node records the app with no permissions: it may sign the agent's queries, and is asked for
+  everything (`… needs your approval on your node's page`). A key belongs to one app only.
 
 **Reply:** `true`. **Errors:** `register_app: signature does not match the agent`; `register_app:
 the grant does not match the consent, or names another node`; `a consent for every contract only
-lets the app read`; `agent 0x… is not registered here`; `agent 0x… has not approved
-https://… yet`.
+lets the app read`; `agent 0x… is not registered here`; `this key belongs to https://…, not
+https://…`.
 
 ### `get_apps`
 
