@@ -1,6 +1,7 @@
 # The built program
 /ibc
 /ibc.exe
+/ibc-linux
 
 # A node's database (the default -data directory)
 /data/

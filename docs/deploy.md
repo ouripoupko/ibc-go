@@ -155,8 +155,25 @@ needs a compiler. Pick one:
   solc --version
   ```
 
-- **Arm servers** (no official Arm build): solc-js through Node.js. Install Node.js (`apt install -y
-  nodejs npm`), and set `IBC_SOLC` to `npx -y -p solc@0.8.38 solcjs` in the service below.
+- **Arm servers** (no official Arm build): solc-js, the same compiler built for Node.js. Install it
+  once, for the whole server:
+
+  ```sh
+  ssh root@SERVER_IP
+  apt install -y nodejs npm
+  npm install -g solc@0.8.38
+  which solcjs                # /usr/local/bin/solcjs
+  solcjs --version
+  ```
+
+  and in the service below, use that path instead of solc's:
+
+  ```ini
+  Environment=IBC_SOLC=/usr/local/bin/solcjs
+  ```
+
+  (Not `npx`: it downloads the compiler at the first compile into the user's home folder, which the
+  service may not write to.)
 
 Without a compiler the node still runs, but cannot accept contracts from source.
 
@@ -345,6 +362,8 @@ your node.
 | Problem | Likely cause |
 |---|---|
 | Caddy cannot get a certificate (`journalctl -u caddy`) | The DNS record does not point at the server yet, or ports 80 and 443 are closed in the firewall |
+| `curl` from outside hangs (`Connection timed out`), while it answers on the server | The firewall drops ports 80 and 443. Hetzner's default firewall allows only 22 and ICMP: add inbound TCP 80 and 443 (step 2), and check it is applied to the server |
+| `TLS alert, internal error` | Caddy has no certificate yet. If the ports were closed when it first tried, it waits before trying again: `systemctl restart caddy`, then look for "certificate obtained successfully" in `journalctl -u caddy` |
 | `502 Bad Gateway` | ibc is not running: `systemctl status ibc`, `journalctl -u ibc` |
 | The page says passkeys need a secure page | The page is open at `http://`, not `https://` |
 | "This passkey is not an ibc identity on this node" when signing in | The passkey was made on another node's address |
