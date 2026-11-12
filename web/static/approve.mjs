@@ -17,10 +17,10 @@
 // The app's site (its origin) is what the user sees and what the node records.
 // A user with no identity on this node yet can create one here, or sign in.
 import {
-  $, el, status, errorText, loadIdentity, connect, rootSigner, signIn, createIdentity, isKnown, reregister, parseAbi, isRead,
-  pretty, short,
+  $, el, status, errorText, loadIdentity, connect, rootSigner, signIn, createIdentity, isKnown, reregister,
+  pretty, short, codeHashOf, writeFunctions, permissionItems, registerPermission,
 } from './app.mjs';
-import { API_VERSION, digestOf, fromHex, keccak256, nonce, now, signBatch, toHex } from './js/index.js';
+import { API_VERSION, digestOf, nonce, now, signBatch, toHex } from './js/index.js';
 
 const opener = window.opener;
 let origin;
@@ -38,7 +38,6 @@ const deny = (reason) => {
   reply({ type: 'ibc-denied', reason });
   window.close();
 };
-const codeHashOf = (code) => toHex(keccak256(fromHex(code)));
 
 function valid(r) {
   const known = ['connect', 'deploy', 'permit', 'call', 'read', 'join'];
@@ -128,6 +127,26 @@ function renew(identity) {
   });
 }
 
+/**
+ * A second approval in the same window, after the request's first one (the
+ * app's permissions for a contract joined just now). Resolves true if the user
+ * approves, false if they skip it.
+ */
+function askAgain(message) {
+  // Fresh buttons, without the first approval's handlers.
+  const approve = $('#approve').cloneNode(true);
+  const skip = $('#deny').cloneNode(true);
+  $('#approve').replaceWith(approve);
+  $('#deny').replaceWith(skip);
+  skip.textContent = 'Skip';
+  approve.disabled = skip.disabled = false;
+  status($('#status'), message, 'ok');
+  return new Promise((resolve) => {
+    approve.addEventListener('click', () => { approve.disabled = skip.disabled = true; resolve(true); });
+    skip.addEventListener('click', () => { approve.disabled = skip.disabled = true; resolve(false); });
+  });
+}
+
 function details(rows) {
   $('#details').replaceChildren(...rows.filter(([, v]) => v !== undefined && v !== '').flatMap(([k, v]) => [
     el('dt', {}, k), el('dd', {}, v),
@@ -169,9 +188,7 @@ function deviceItems(identity, { site, known }) {
 async function registerSigned(ibc, items, envs) {
   const at = (type) => items.findIndex((i) => i.type === type);
   if (at('Consent') >= 0) {
-    const g = at('Grant');
-    await ibc.registerApp({ consent: items[at('Consent')].message, signature: envs[at('Consent')] },
-      g >= 0 ? { grant: items[g].message, signature: envs[g] } : null);
+    await registerPermission(ibc, items, envs);
   } else if (at('Device') >= 0) {
     await ibc.registerDevice({ device: items[at('Device')].message, signature: envs[at('Device')] });
   }
@@ -196,8 +213,7 @@ const registerPublish = (ibc, item, signature) => ibc.setPublic(item.message.con
 
 /** Shows the permissions form for the contract's functions; returns a reader of the choices. */
 function permissionsForm(abi, current = null) {
-  const writes = parseAbi(typeof abi === 'string' ? abi : JSON.stringify(abi))
-    .filter((f) => f.type === 'function' && f.name && !isRead(f));
+  const writes = writeFunctions(abi);
   const boxes = writes.map((f) => el('input', { type: 'checkbox', value: f.name, checked: current?.functions?.includes(f.name) }));
   if (current) $('#perm-read').checked = current.read;
   $('#perm-writes').replaceChildren(...writes.map((f, i) => el('label', { class: 'check' }, boxes[i], f.name)));
@@ -208,19 +224,7 @@ function permissionsForm(abi, current = null) {
 
 /** The messages that record the app's permissions: the consent, and the grant if it names functions. */
 function permissionMessages(ibc, identity, codeHash, choice) {
-  const items = [{
-    type: 'Consent',
-    message: {
-      agent: identity.agent, app: origin, appKey: request.appKey, codeHash, read: choice.read, functions: choice.functions, nonce: nonce(),
-    },
-  }];
-  if (choice.functions.length) {
-    items.push({
-      type: 'Grant',
-      message: { agent: identity.agent, nodeKey: ibc.nodeKey, codeHash, functions: choice.functions, nonce: nonce() },
-    });
-  }
-  return items;
+  return permissionItems(ibc, { app: origin, appKey: request.appKey, codeHash, ...choice });
 }
 
 async function showConnect(ibc, identity, host) {
@@ -359,6 +363,32 @@ async function showJoin(ibc, identity, host) {
     // Once joined, this node holds the user's copy: the publish applies to it.
     const at = items.findIndex((i) => i.type === 'Publish');
     if (at >= 0 && event.reply === true) await registerPublish(ibc, items[at], envs[at]);
-    return { joined: event.reply, public: at >= 0 && event.reply === true };
+    const result = { joined: event.reply, public: at >= 0 && event.reply === true };
+    if (event.reply === true) result.codeHash = await joinedPermissions(ibc, identity, host);
+    return result;
   };
+}
+
+/**
+ * After a join: the contract's code is known now. The first time the app uses
+ * this code, the user chooses what it may do without asking, as for a deploy:
+ * a second approval, which the user may skip. Returns the code hash.
+ */
+async function joinedPermissions(ibc, identity, host) {
+  const c = await ibc.contract(request.contract);
+  if (!c?.code) return undefined;
+  const codeHash = codeHashOf(c.code);
+  const site = (await ibc.apps()).find((a) => a.app === origin);
+  if (site?.permissions?.[codeHash]) return codeHash; // chosen before, for this code
+  $('#public-box').classList.add('hidden');
+  $('#title').textContent = `Joined ${c.name || short(c.id)}`;
+  $('#what').textContent = `Choose what ${host} may do in it without asking you. It asks you for everything else.`;
+  showCode(c.source);
+  const choose = permissionsForm(c.abi);
+  if (await askAgain('Joined. Now choose the app\'s permissions, and approve (or skip).')) {
+    status($('#status'), 'Approve with your passkey…');
+    const items = permissionMessages(ibc, identity, codeHash, choose());
+    await registerSigned(ibc, items, await signBatch(rootSigner(identity), items));
+  }
+  return codeHash;
 }

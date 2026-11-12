@@ -83,7 +83,10 @@ An app on any site acts for the user through the user's node, never with the use
 
   The root key signs this choice (a **consent**, kept by the node) and, if functions are ticked, the
   **grant** partners need. The node keeps both, per app and per code, so further contracts of the
-  same code need no new permissions.
+  same code need no new permissions. A joined contract works the same: the user chooses after the
+  join, in the same window (the code is known only then), with a second approval they may skip. The
+  user can change an app's permissions later on a contract's page on the node (a new consent, and a
+  new grant if functions are ticked).
 - **Silent reads:** the app signs its request with its key; the node answers if allowed.
 - **Silent calls:** the app asks the node; if allowed, the node signs the call with its own key, under
   the grant, and sends it to consensus.
@@ -166,7 +169,7 @@ with it:
    | `permit` | `contract`, `public` | The app's permissions for an existing contract's code |
    | `call` | `contract`, `method`, `values` | A transaction, signed by the root |
    | `read` | `contract`, `method`, `values` | A read, signed by the root |
-   | `join` | `contract`, `memberNode`, `memberAgent`, `guest`, `public` | Joining a contract |
+   | `join` | `contract`, `memberNode`, `memberAgent`, `guest`, `public` | Joining a contract; then, the first time the app uses its code, the app's permissions (a second approval) |
 
    `public` (optional, `true` or `false`) is what the app proposes for "Anyone may read this
    contract": the box on the page starts ticked or not, and the user decides. Without it, the box

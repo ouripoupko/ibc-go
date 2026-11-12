@@ -40,7 +40,7 @@ app.onEvent((event) => console.log(event));                 // events of the app
 `read` and `write` try silently first, and open the approval page when the node says the user must
 approve. Also: `app.permit(contract)` asks for permissions on an existing contract, and
 `app.join(contract, memberNode, memberAgent, { guest })` asks the user to join one, as a partner or
-as a guest.
+as a guest; once joined, the same window asks the user for the app's permissions, as for a deploy.
 
 ## Public contracts
 

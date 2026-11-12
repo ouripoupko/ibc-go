@@ -6,7 +6,7 @@
 // inserted as text (textContent), never as HTML.
 import { Ibc, IbcError, needsApproval } from './js/index.js';
 import {
-  addressOf, choosePasskey, createPasskey, fromHex, newP256Key, nonce, passkeySigner, signBatch, sign, toHex,
+  addressOf, choosePasskey, createPasskey, fromHex, keccak256, newP256Key, nonce, passkeySigner, signBatch, sign, toHex,
 } from './js/index.js';
 
 export { IbcError };
@@ -62,6 +62,38 @@ export async function connect(identity) {
   const ibc = await Ibc.connect(location.origin, { agent: identity.agent, root: rootSigner(identity), appKey: identity.pageKey });
   showKeys(ibc);
   return ibc;
+}
+
+/** The code hash of a contract's creation code: what app permissions are for. */
+export const codeHashOf = (code) => toHex(keccak256(fromHex(code)));
+
+/** The ABI's functions that change state: those an app may have the node call silently. */
+export function writeFunctions(abi) {
+  return (typeof abi === 'string' ? parseAbi(abi) : (abi ?? []))
+    .filter((f) => f.type === 'function' && f.name && !isRead(f));
+}
+
+/**
+ * The messages that record what an app may do without asking, for contracts
+ * of one code: the consent, and the grant for this node if it names functions.
+ */
+export function permissionItems(ibc, { app, appKey, codeHash, read, functions }) {
+  const items = [{
+    type: 'Consent',
+    message: { agent: ibc.agent, app, appKey, codeHash, read, functions, nonce: nonce() },
+  }];
+  if (functions.length) {
+    items.push({ type: 'Grant', message: { agent: ibc.agent, nodeKey: ibc.nodeKey, codeHash, functions, nonce: nonce() } });
+  }
+  return items;
+}
+
+/** Records a consent (and grant) the root signed: items and their envelopes, from permissionItems. */
+export function registerPermission(ibc, items, envs) {
+  const at = (type) => items.findIndex((i) => i.type === type);
+  const g = at('Grant');
+  return ibc.registerApp({ consent: items[at('Consent')].message, signature: envs[at('Consent')] },
+    g >= 0 ? { grant: items[g].message, signature: envs[g] } : null);
 }
 
 /** The consent for this page's key: read every contract, call nothing silently. */

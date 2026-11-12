@@ -15,6 +15,7 @@
   <button id="setTopic">Set the topic</button>
   <button id="deployPublic">Deploy a public chat</button>
   <button id="publicTopic">Read the topic as anyone</button>
+  <button id="join">Join the chat</button>
   <pre id="out"></pre>
   <script type="module">
     import { Ibc, IbcApp } from './js/index.js'; // the client package, @ouripoupko/ibc
@@ -46,6 +47,8 @@
       return chat;
     });
     // Anyone, with no key: an unsigned read of the user's public copy.
+    // Joins the chat in the address, through the member there (?member=<agent>&memberNode=<url>).
+    run('join', () => app.join(chat, params.get('memberNode'), params.get('member')));
     run('publicTopic', () => Ibc.publicRead(app.node, app.agent, chat, 'topic'));
     window.appReady = true;
   </script>

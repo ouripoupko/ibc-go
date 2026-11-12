@@ -47,14 +47,15 @@ async function addAuthenticator(page) {
 }
 
 /** Copies a passkey from one page's authenticator to another's: a passkey synced to another device. */
-async function syncPasskey(from, to, credentialIdHex) {
+async function syncPasskey(from, to, credentialIdHex = null) {
   const src = authenticators.get(from);
   const dst = authenticators.get(to);
   const { credentials } = await src.cdp.send('WebAuthn.getCredentials', { authenticatorId: src.id });
-  const want = Buffer.from(credentialIdHex.replace(/^0x/, ''), 'hex').toString('base64');
-  const cred = credentials.find((c) => c.credentialId === want);
-  if (!cred) throw new Error('passkey not found');
-  await dst.cdp.send('WebAuthn.addCredential', { authenticatorId: dst.id, credential: cred });
+  // One passkey by its id, or all of them.
+  const want = credentialIdHex && Buffer.from(credentialIdHex.replace(/^0x/, ''), 'hex').toString('base64');
+  const creds = want ? credentials.filter((c) => c.credentialId === want) : credentials;
+  if (!creds.length) throw new Error('passkey not found');
+  for (const credential of creds) await dst.cdp.send('WebAuthn.addCredential', { authenticatorId: dst.id, credential });
 }
 
 // The boxes the pages show while a passkey is asked: each passkey request.
@@ -122,6 +123,7 @@ const newPopup = () => browser.waitForTarget((t) => t.url().includes('/approve.h
 
 /** Clicks a button in the test app; if the app opens the node's approval page, approves there. */
 async function appClick(appPage, button, { approve = null } = {}) {
+  await appPage.bringToFront(); // a background page does not poll
   const before = (await text(appPage, '#out')).split('\n').length;
   const popupPage = approve ? newPopup() : null;
   await appPage.click(`#${button}`);
@@ -149,6 +151,8 @@ async function appClick(appPage, button, { approve = null } = {}) {
       }
       await popup.waitForSelector('#buttons:not(.hidden)', { timeout: 90000 });
       approve.signedIn = true;
+      // Keep a passkey made in the popup on the app's page, as the user's phone would.
+      if (approve.create) await syncPasskey(popup, appPage);
     }
     approve.seen = {
       title: await text(popup, '#title'), what: await text(popup, '#what'),
@@ -158,6 +162,14 @@ async function appClick(appPage, button, { approve = null } = {}) {
     for (const fn of approve.check ?? []) await popup.click(`#perm-writes input[value="${fn}"]`);
     if (SHOTS && approve.shot) await popup.screenshot({ path: `${SHOTS}${approve.shot}.png`, fullPage: true });
     await popup.click('#approve');
+    // A second step in the same window (the app's permissions, after a join).
+    if (approve.again) {
+      await waitText(popup, '#status', /Now choose/, 90000);
+      approve.seenAgain = { title: await text(popup, '#title'),
+        permissions: await popup.$eval('#permissions', (p) => !p.classList.contains('hidden')) };
+      for (const fn of approve.again) await popup.click(`#perm-writes input[value="${fn}"]`);
+      await popup.click('#approve');
+    }
   }
   await appPage.waitForFunction((n) => document.querySelector('#out').textContent.split('\n').length > n, { timeout: 90000 }, before);
   return (await text(appPage, '#out')).split('\n')[before - 1];
@@ -314,6 +326,36 @@ try {
   r = await runFn(pb, '#reads', 'count', []);
   check('count -> 3', r.text === '3', r.text);
 
+  // On the chat's page on her node, Alice changes what the app may do without asking: no more
+  // silent posts; then she allows them again.
+  await pa.bringToFront();
+  await pa.goto(`${A}/contract.html?id=${chat}`);
+  await pa.waitForSelector('#apps-card:not(.hidden)', { timeout: 30000 });
+  const perm = (fn) => `.app-perm[data-app="http://localhost:${APP_PORT}"] input[value="${fn}"]`;
+  check('the contract page shows the app\'s permissions', await pa.$eval(perm('post'), (b) => b.checked)
+    && !(await pa.$eval(perm('setTopic'), (b) => b.checked)));
+  const savePerm = async () => {
+    await pa.$eval('#apps-status', (e) => { e.textContent = ''; });
+    await pa.click(`.app-perm[data-app="http://localhost:${APP_PORT}"] button`);
+    await waitText(pa, '#apps-status', /Saved|rror/);
+  };
+  n = boxes.length;
+  await pa.click(perm('post'));
+  await savePerm();
+  check('unticked post, one approval', since(n).join() === 'Sign request: allow localhost:2799', since(n).join(' | '));
+  let postPopup = newPopup();
+  await pApp.bringToFront();
+  await pApp.click('#post');
+  check('now the app\'s post asks the user', Boolean(await postPopup));
+  await (await postPopup).close();
+  await pApp.bringToFront(); // a background page does not poll
+  await waitText(pApp, '#out', /post error/);
+  await pa.bringToFront();
+  await pa.click(perm('post'));
+  await savePerm();
+  line = await appClick(pApp, 'post');
+  check('ticked again: the app posts silently', /^post \d+$/.test(line), line);
+
   // Alice disconnects the app on her node: its silent post now needs her again.
   await pa.bringToFront();
   await pa.goto(`${A}/`);
@@ -343,6 +385,19 @@ try {
   check('connect: a new user creates an identity on the node, and the app learns it',
     /^0x[0-9a-fA-F]{40}$/.test(carol) && a.signedIn && registered === true && /wants to know who you are/.test(a.seen.title),
     `${line} · ${a.seen.title} · registered ${registered}`);
+
+  // Through the app, Carol joins Alice's chat. Once joined, the same window asks what the app may
+  // do in it without asking, as for a deploy; then the app posts silently.
+  await pApp3.goto(`http://localhost:${APP_PORT}/app.html?node=${encodeURIComponent(A)}&chat=${chat}`
+    + `&member=${alice.agent}&memberNode=${encodeURIComponent(A)}`);
+  await pApp3.waitForFunction(() => window.appReady === true);
+  a = { from: pApp3, again: ['post'] };
+  line = await appClick(pApp3, 'join', { approve: a });
+  check('carol joins through the app, then chooses its permissions', line === 'join true' && !a.seen.permissions
+    && a.seenAgain?.permissions && /Joined/.test(a.seenAgain.title), `${line} · ${a.seenAgain?.title}`);
+  n = boxes.length;
+  line = await appClick(pApp3, 'post');
+  check('carol\'s app posts silently in the joined chat', /^post \d+$/.test(line) && since(n).length === 0, `${line} ${since(n)}`);
 
   // Alice's node forgets her page's key (as when the node's own site is disconnected, or its
   // data reset). The node's page offers to register again, and so does the approval page.

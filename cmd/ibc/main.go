@@ -7,6 +7,7 @@
 //	ibc sign tx -key ROOT_KEY -kind KIND [-contract ID] -body JSON
 //	ibc sign registration -key ROOT_KEY -node URL -node-key ADDRESS
 //	ibc sign query -key FILE -action ACTION [-target AGENT] [-contract ID] [-body JSON]
+//	ibc sign publish -key ROOT_KEY -contract ID [-public=false]
 package main
 
 import (

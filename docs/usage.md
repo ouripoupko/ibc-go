@@ -109,14 +109,16 @@ An app on another site never holds your keys. It has a key of its own, and works
    you are new, create your identity there. You approve, and the app learns your agent id, nothing
    more: it may do nothing without asking you yet. An app may skip this step; its first request then
    connects it.
-1. **The first time it uses a contract code** (when it creates a contract, for example), it opens your
-   node's **approval page**. You see what it asks (and the code, if you want), and choose what it may
+1. **The first time it uses a contract code** (when it creates or joins a contract, for example), it
+   opens your node's **approval page**. You see what it asks (and the code, if you want), and choose what it may
    do without asking you:
    - **read these contracts:** on by default;
    - **call these functions:** off by default; tick the ones you trust it with, such as `post` in a
      chat. Your node then signs those calls for you.
 
-   You approve with your passkey, once.
+   You approve with your passkey, once. When the app asks you to join a contract, the code is known
+   only once you have joined: the same window then asks for these permissions, with a second
+   approval (or skip it).
 2. **From then on**, it reads and makes the calls you ticked without asking you. Creating another
    contract of the same code needs only your approval of the deploy itself.
 3. **For anything else**, a transfer for example, it opens the approval page again, and you sign that
@@ -125,8 +127,9 @@ An app on another site never holds your keys. It has a key of its own, and works
    (sign in there if that browser does not know you yet). Approving it also connects that browser,
    with the permissions you already gave the app: nothing to choose again.
 
-Your node keeps each app by its website. Disconnect an app on your node's page, and it can do nothing
-more, on any computer.
+Your node keeps each app by its website. You can change what an app may do at any time, on a
+contract's page on your node (its **Apps** card: one approval; it applies to every contract of the
+same code). Disconnect an app on your node's page, and it can do nothing more, on any computer.
 
 ## Write a contract
 
