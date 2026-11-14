@@ -92,6 +92,9 @@ function addRow(c) {
     el('td', { class: 'id mono', title: c.id }, short(c.id)),
     el('td', { class: 'optional' }, c.role === 'guest' ? 'guest' : (c.protocol || 'cordial')),
     el('td', { class: 'optional' }, c.role === 'guest' ? '' : (c.block_number ?? 0)));
+  if (c.source_check === 'unchecked') {
+    row.firstChild.append(el('div', { class: 'status bad', title: c.source_check_reason ?? '' }, 'source not checked'));
+  }
   $('#contracts tbody').append(row);
   $('#contracts').classList.remove('hidden');
   if (/no contracts/.test($('#list-status').textContent)) status($('#list-status'), '');
@@ -163,21 +166,35 @@ function prefillInvite(code) {
   }
 }
 
+$('#j-source-file').addEventListener('change', async (e) => {
+  const text = await readFile(e.target);
+  if (text !== null) $('#j-source').value = text;
+});
+
 $('#join').addEventListener('submit', (event) => {
   event.preventDefault();
   busy($('#j-submit'), $('#join-status'), async () => {
     const contract = $('#j-contract').value.trim();
-    status($('#join-status'), 'Approve the join with your passkey, then wait for the members to decide…');
+    status($('#join-status'), 'Approve the join with your passkey…');
     const guest = $('#j-guest').checked;
-    const joined = await ibc.join(contract, $('#j-node').value.trim(), $('#j-agent').value.trim(), { guest });
-    if (joined !== true) {
-      status($('#join-status'), 'The contract refused the join.', 'bad');
-      return;
-    }
-    const done = $('#join-status');
-    done.replaceChildren('Joined: ', el('a', { href: `contract.html?id=${encodeURIComponent(contract)}` }, 'open the contract'));
-    done.className = 'status ok';
-    addRow({ id: contract, name: '(new: refresh for details)', protocol: '', role: guest ? 'guest' : 'partner', block_number: '' });
+    const id = await ibc.join(contract, $('#j-node').value.trim(), $('#j-agent').value.trim(),
+      { guest, source: $('#j-source').value });
+    status($('#join-status'), 'Asked. The members decide, then your node checks the contract…');
+    // The outcome arrives on the event stream.
+    const stop = ibc.onEvent((ev) => {
+      if (ev.request !== id || ev.action !== 'join_contract') return;
+      stop();
+      const done = $('#join-status');
+      if (ev.reply !== true) {
+        status(done, ev.reason ? `Not joined: ${ev.reason}` : 'The contract refused the join.', 'bad');
+        return;
+      }
+      done.replaceChildren(ev.source_check === 'unchecked' ? `Joined, but the source was not checked (${ev.reason}): ` : 'Joined: ',
+        el('a', { href: `contract.html?id=${encodeURIComponent(contract)}` }, 'open the contract'));
+      done.className = ev.source_check === 'unchecked' ? 'status bad' : 'status ok';
+      addRow({ id: contract, name: '(new: refresh for details)', protocol: '', role: guest ? 'guest' : 'partner',
+        block_number: '', source_check: ev.source_check, source_check_reason: ev.reason });
+    });
   });
 });
 

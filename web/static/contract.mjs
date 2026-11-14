@@ -1,7 +1,7 @@
 // The contract page: details, an invite, and a form for each ABI function.
 import {
   $, el, status, busy, errorText, connect, parseAbi, functionForm, isRead, encodeInvite, pretty, short,
-  loadIdentity, codeHashOf, writeFunctions, permissionItems, registerPermission,
+  loadIdentity, sourceHashOf, writeFunctions, permissionItems, registerPermission,
 } from './app.mjs';
 import { signBatch } from './js/index.js';
 
@@ -48,7 +48,13 @@ function show(c) {
     ['EVM address', c.evm_address],
     ['Source file', c.contract],
     ['Deployment error', c.deploy_error],
+    ['Source', c.source_check === 'verified' ? 'checked: it compiles to the deployed code' : undefined],
   ];
+  // Joined, but the node could not check the source against the code.
+  if (c.source_check === 'unchecked') {
+    $('#source-warning').textContent = `The code of this contract was not checked against its source: ${c.source_check_reason || 'no reason given'}. What the source says may not be what the contract does.`;
+    $('#source-warning').classList.remove('hidden');
+  }
   $('#details').replaceChildren(...rows.filter(([, v]) => v !== undefined && v !== '').flatMap(([k, v]) => [
     el('dt', {}, k), el('dd', { class: /id|root|address|Created/.test(k) ? 'mono' : '' }, v),
   ]));
@@ -57,6 +63,15 @@ function show(c) {
   $('#invite-card').classList.toggle('hidden', guest);
   const invite = encodeInvite({ contract: c.id, node: location.origin, agent: ibc.agent });
   $('#invite').textContent = invite;
+  $('#copy-source').addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(c.source ?? '');
+      $('#copy-source').textContent = 'Copied';
+    } catch {
+      $('#code').classList.remove('hidden');
+      getSelection().selectAllChildren($('#code'));
+    }
+  });
   $('#copy-invite').addEventListener('click', async () => {
     try {
       await navigator.clipboard.writeText(invite);
@@ -127,12 +142,12 @@ function show(c) {
 
 /** The apps the user connected, and what each may do with this contract's code without asking. */
 async function showApps(c) {
-  if (!c.code) return;
-  const codeHash = codeHashOf(c.code);
+  if (!c.source) return;
+  const sourceHash = sourceHashOf(c.source);
   const writes = writeFunctions(c.abi);
   const apps = (await ibc.apps()).filter((a) => !a.permissions[`0x${'0'.repeat(64)}`]); // not this page's own keys
   $('#app-perms').replaceChildren(...apps.map((a) => {
-    const now = a.permissions[codeHash] ?? { read: false, functions: [] };
+    const now = a.permissions[sourceHash] ?? { read: false, functions: [] };
     const read = el('input', { type: 'checkbox', checked: now.read });
     const boxes = writes.map((f) => el('input', { type: 'checkbox', value: f.name, checked: now.functions.includes(f.name) }));
     const save = el('button', { class: 'secondary' }, 'Save');
@@ -145,7 +160,7 @@ async function showApps(c) {
     save.addEventListener('click', () => busy(save, $('#apps-status'), async () => {
       status($('#apps-status'), 'Approve with your passkey…');
       const items = permissionItems(ibc, {
-        app: a.app, appKey: a.keys[0], codeHash, read: read.checked, functions: boxes.filter((b) => b.checked).map((b) => b.value),
+        app: a.app, appKey: a.keys[0], sourceHash, read: read.checked, functions: boxes.filter((b) => b.checked).map((b) => b.value),
       });
       await registerPermission(ibc, items, await signBatch(ibc.root, items));
       status($('#apps-status'), `Saved for ${new URL(a.app).host}.`, 'ok');

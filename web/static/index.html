@@ -96,6 +96,11 @@
           <input type="url" id="j-node" required autocomplete="off" placeholder="https://…">
           <label for="j-agent">Member's agent id</label>
           <input type="text" id="j-agent" required autocomplete="off" placeholder="0x…">
+          <label for="j-source">The contract's source (.sol)</label>
+          <p class="hint">Read what you join: the members refuse the join if this is not the contract's
+            source, and your node checks that it compiles to the contract's code.</p>
+          <input type="file" id="j-source-file" accept=".sol,text/plain">
+          <textarea id="j-source" required spellcheck="false" placeholder="pragma solidity …"></textarea>
           <label class="check"><input type="checkbox" id="j-guest"> Join as a guest: your node keeps no copy
             and takes no part in consensus; it sends your transactions and reads to the member's node</label>
           <button type="submit" id="j-submit">Ask to join</button>

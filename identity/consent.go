@@ -8,18 +8,18 @@ import (
 	"github.com/ethereum/go-ethereum/signer/core/apitypes"
 )
 
-// Consent is what the agent allows an app, for one contract code, on the
+// Consent is what the agent allows an app, for one contract source, on the
 // agent's own node: to read silently, and to have the node sign some of its
 // functions silently. The root key signs it on the node's page; it stays on
 // the node (partners never see it: they see the grant).
 type Consent struct {
-	Agent     ethcommon.Address `json:"agent"`
-	App       string            `json:"app"`       // the app's origin, e.g. https://wishes.example.com
-	AppKey    hexutil.Bytes     `json:"appKey"`    // the app's key in the browser, P-256, uncompressed
-	CodeHash  ethcommon.Hash    `json:"codeHash"`  // the contract code; zero: every contract (the node's own page)
-	Read      bool              `json:"read"`      // may read without asking
-	Functions []string          `json:"functions"` // may have the node call these without asking
-	Nonce     string            `json:"nonce"`
+	Agent      ethcommon.Address `json:"agent"`
+	App        string            `json:"app"`        // the app's origin, e.g. https://wishes.example.com
+	AppKey     hexutil.Bytes     `json:"appKey"`     // the app's key in the browser, P-256, uncompressed
+	SourceHash ethcommon.Hash    `json:"sourceHash"` // the contract's source (SourceHash); zero: every contract (the node's own page)
+	Read       bool              `json:"read"`       // may read without asking
+	Functions  []string          `json:"functions"`  // may have the node call these without asking
+	Nonce      string            `json:"nonce"`
 }
 
 // SignedConsent is a consent with the root key's signature.
@@ -37,7 +37,7 @@ func (c Consent) TypedData() apitypes.TypedData {
 				{Name: "agent", Type: "address"},
 				{Name: "app", Type: "string"},
 				{Name: "appKey", Type: "bytes"},
-				{Name: "codeHash", Type: "bytes32"},
+				{Name: "sourceHash", Type: "bytes32"},
 				{Name: "read", Type: "bool"},
 				{Name: "functions", Type: "string[]"},
 				{Name: "nonce", Type: "string"},
@@ -46,13 +46,13 @@ func (c Consent) TypedData() apitypes.TypedData {
 		PrimaryType: "Consent",
 		Domain:      domain(),
 		Message: apitypes.TypedDataMessage{
-			"agent":     c.Agent.Hex(),
-			"app":       c.App,
-			"appKey":    hexutil.Encode(c.AppKey),
-			"codeHash":  c.CodeHash.Hex(),
-			"read":      c.Read,
-			"functions": stringList(c.Functions),
-			"nonce":     c.Nonce,
+			"agent":      c.Agent.Hex(),
+			"app":        c.App,
+			"appKey":     hexutil.Encode(c.AppKey),
+			"sourceHash": c.SourceHash.Hex(),
+			"read":       c.Read,
+			"functions":  stringList(c.Functions),
+			"nonce":      c.Nonce,
 		},
 	}
 }

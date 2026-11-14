@@ -21,6 +21,32 @@ const (
 	KeyPublicTime = "public_time" // the time of the agent's last choice, unix milliseconds (decimal text)
 )
 
+// The deploy's source, and the joining node's check of it.
+const (
+	KeySource = "source"
+	// KeySourceCheck is this node's check of the deploy's source against
+	// its code (SourceVerified, SourceUnchecked), made when the agent joined;
+	// KeySourceCheckReason says why a check could not be made.
+	KeySourceCheck       = "source_check"
+	KeySourceCheckReason = "source_check_reason"
+)
+
+// The results of checking a deploy's source against its code.
+const (
+	SourceVerified  = "verified"  // the source compiles to the code
+	SourceUnchecked = "unchecked" // the node could not compile it (KeySourceCheckReason says why)
+	SourceMismatch  = "mismatch"  // the source does not compile to the code: the node did not join
+)
+
+// SetSourceCheck records the node's check of the contract's source.
+func (n *Navigator) SetSourceCheck(agent, contract, check, reason string) error {
+	fields := map[string]any{KeySourceCheck: check}
+	if reason != "" {
+		fields[KeySourceCheckReason] = reason
+	}
+	return n.contracts(agent).Document(contract).Update(fields)
+}
+
 // ErrStale means a publish is not newer than the agent's last choice.
 var ErrStale = errors.New("an older choice than the one this node has")
 

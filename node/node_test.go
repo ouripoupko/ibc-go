@@ -22,8 +22,18 @@ import (
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/crypto"
 
+	"github.com/ouripoupko/ibc-go/compiler"
+	"github.com/ouripoupko/ibc-go/consensus"
 	"github.com/ouripoupko/ibc-go/identity"
 )
+
+// checkSource stands in for compiling a joined contract's source.
+func checkSource(check, reason string) consensus.CheckSource {
+	return func(context.Context, string, json.RawMessage, string) (string, string) { return check, reason }
+}
+
+// testCompiler is the compiler a test deploy names.
+var testCompiler = map[string]any{"version": "0.8.38+commit.1835d247.Linux.g++", "settings": compiler.Settings}
 
 // testNode is a node behind a real HTTP server.
 type testNode struct {
@@ -35,6 +45,9 @@ func startNode(t *testing.T, cfg Config) *testNode {
 	t.Helper()
 	if cfg.DB == nil && cfg.DataDir == "" {
 		cfg.DB = rawdb.NewMemoryDatabase()
+	}
+	if cfg.CheckSource == nil {
+		cfg.CheckSource = checkSource(compiler.Verified, "")
 	}
 	n, err := New(cfg)
 	if err != nil {
@@ -211,14 +224,14 @@ func newUser(t *testing.T) *user {
 func (u *user) connectApp(t *testing.T, n *testNode, appKey *ecdsa.PrivateKey, codeHash ethcommon.Hash, read bool, functions ...string) any {
 	t.Helper()
 	consent, err := identity.SignConsent(identity.Consent{Agent: u.addr, App: "https://app.example",
-		AppKey: identity.PublicKey(appKey), CodeHash: codeHash, Read: read, Functions: functions, Nonce: identity.NewNonce()}, u.root)
+		AppKey: identity.PublicKey(appKey), SourceHash: codeHash, Read: read, Functions: functions, Nonce: identity.NewNonce()}, u.root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	body := map[string]any{"consent": consent}
 	if len(functions) > 0 {
 		grant, err := identity.CertifyGrant(identity.Grant{Agent: u.addr, NodeKey: ethcommon.HexToAddress(n.NodeKey()),
-			CodeHash: codeHash, Functions: functions, Nonce: identity.NewNonce()}, u.root)
+			SourceHash: codeHash, Functions: functions, Nonce: identity.NewNonce()}, u.root)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -313,6 +326,16 @@ func (u *user) sign(t *testing.T, kind, contract string, body any) identity.Sign
 	return stx
 }
 
+// readSource is a test contract's Solidity source.
+func readSource(t *testing.T, name string) string {
+	t.Helper()
+	src, err := os.ReadFile("../testdata/" + name + ".sol")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(src)
+}
+
 func readTestdata(t *testing.T, name string) (code, abi string) {
 	t.Helper()
 	bin, err := os.ReadFile("../testdata/" + name + ".bin")
@@ -333,7 +356,7 @@ func (u *user) deploy(t *testing.T, n *testNode, events *stream, name, protocol 
 	stx := u.sign(t, identity.KindDeploy, "", map[string]any{
 		"name": "my-" + name, "contract": name + ".sol", "protocol": protocol, "default_app": "https://app.example",
 		"profile": "", "code": code, "abi": json.RawMessage(abi), "constructor": ctor,
-		"node": n.URL, "nodeKey": n.NodeKey(),
+		"node": n.URL, "nodeKey": n.NodeKey(), "source": readSource(t, name), "compiler": testCompiler,
 	})
 	id := call(t, n.URL, "PUT", u.id, "deploy_contract", "", "", stx)
 	contractID, ok := id.(string)
@@ -372,10 +395,12 @@ func (u *user) read(t *testing.T, n *testNode, contract, method string, values m
 	return u.readAs(t, n, u.id, contract, method, values)
 }
 
-// join asks member (on memberNode) to let u join, from u's node n.
-func (u *user) join(t *testing.T, n, memberNode *testNode, member *user, contract string) any {
+// join asks member (on memberNode) to let u join, from u's node n: a
+// contract of the test contract name.
+func (u *user) join(t *testing.T, n, memberNode *testNode, member *user, contract, name string) any {
 	t.Helper()
-	stx := u.sign(t, identity.KindJoin, contract, map[string]any{"node": n.URL, "nodeKey": n.NodeKey(), "profile": ""})
+	stx := u.sign(t, identity.KindJoin, contract, map[string]any{"node": n.URL, "nodeKey": n.NodeKey(), "profile": "",
+		"sourceHash": identity.SourceHash(readSource(t, name)).Hex()})
 	body := map[string]any{"tx": stx.Tx, "signature": stx.Signature,
 		"partner": map[string]any{"address": memberNode.URL, "agent": member.id}}
 	return call(t, n.URL, "PUT", u.id, "join_contract", "", "", body)
@@ -436,7 +461,8 @@ func TestClientAPI(t *testing.T) {
 	// An unregistered agent cannot deploy.
 	code, abi := readTestdata(t, "Registry")
 	deploy := mallory.sign(t, identity.KindDeploy, "", map[string]any{"code": code, "abi": json.RawMessage(abi),
-		"constructor": map[string]any{"initialName": "x", "start": 0}, "node": a.URL, "nodeKey": a.NodeKey()})
+		"constructor": map[string]any{"initialName": "x", "start": 0}, "node": a.URL, "nodeKey": a.NodeKey(),
+		"source": readSource(t, "Registry"), "compiler": testCompiler})
 	if got := call(t, a.URL, "PUT", mallory.id, "deploy_contract", "", "", deploy); !strings.Contains(fmt.Sprint(got), "unknown agent") {
 		t.Fatalf("deploy by an unregistered agent: %v", got)
 	}
@@ -478,7 +504,7 @@ func TestPartnersShareAContract(t *testing.T) {
 	alice.write(t, nodes[0], events[0], cid, "setValue", map[string]any{"value": 1})
 
 	// bob joins through alice; carol joins through bob.
-	if id, ok := bob.join(t, nodes[1], nodes[0], alice, cid).(string); !ok || len(id) != 66 {
+	if id, ok := bob.join(t, nodes[1], nodes[0], alice, cid, "Registry").(string); !ok || len(id) != 66 {
 		t.Fatalf("bob's join_contract replied %v", id)
 	}
 	if ev := events[1].waitAction(t, "join_contract"); ev["reply"] != true {
@@ -488,7 +514,7 @@ func TestPartnersShareAContract(t *testing.T) {
 	if ev := bob.write(t, nodes[1], events[1], cid, "setValue", map[string]any{"value": 2}); ev["reply"] != json.Number("2") {
 		t.Fatalf("bob's first write = %v", ev)
 	}
-	if id, ok := carol.join(t, nodes[2], nodes[1], bob, cid).(string); !ok || len(id) != 66 {
+	if id, ok := carol.join(t, nodes[2], nodes[1], bob, cid, "Registry").(string); !ok || len(id) != 66 {
 		t.Fatalf("carol's join_contract replied %v", id)
 	}
 	if ev := events[2].waitAction(t, "join_contract"); ev["reply"] != true {
@@ -609,7 +635,7 @@ func TestApps(t *testing.T) {
 	alice.register(t, a, ea)
 	bob.register(t, b, eb)
 	cid := alice.deploy(t, a, ea, "Registry", "", map[string]any{"initialName": "apps", "start": 0})
-	bob.join(t, b, a, alice, cid)
+	bob.join(t, b, a, alice, cid, "Registry")
 	if ev := eb.waitAction(t, "join_contract"); ev["reply"] != true {
 		t.Fatalf("bob's join = %v", ev)
 	}
@@ -619,8 +645,7 @@ func TestApps(t *testing.T) {
 			t.Fatalf("%s: got %v, want an error with %q", what, got, want)
 		}
 	}
-	code, _ := readTestdata(t, "Registry")
-	codeHash, _ := identity.CodeHash(code)
+	codeHash := identity.SourceHash(readSource(t, "Registry"))
 	app, _ := identity.NewP256Key()
 	appQuery := func(action string, body any) identity.SignedQuery {
 		return alice.queryWith(t, identity.P256Signer{Key: app}, action, alice.id, cid, body)
@@ -659,13 +684,13 @@ func TestApps(t *testing.T) {
 
 	// A node signing under a grant for other code: partners refuse it in
 	// execution (the call is recorded, and changes nothing).
-	otherCode := crypto.Keccak256Hash([]byte("other code"))
+	otherCode := identity.SourceHash("another source")
 	wrong, _ := identity.CertifyGrant(identity.Grant{Agent: alice.addr, NodeKey: identity.Address(a.nodeKey),
-		CodeHash: otherCode, Functions: []string{"setValue"}, Nonce: "n"}, alice.root)
+		SourceHash: otherCode, Functions: []string{"setValue"}, Nonce: "n"}, alice.root)
 	stx, _ := identity.SignTx(identity.Transaction{Contract: cid, Kind: identity.KindCall, Agent: alice.addr, Nonce: "w",
 		Body: `{"method":"setValue","values":{"value":99}}`}, identity.Secp256k1Signer{Key: a.nodeKey, Cert: wrong})
 	wid := call(t, a.URL, "POST", alice.id, "contract_write", cid, "setValue", stx)
-	if ev := ea.waitFor(t, wid); ev["reply"] != "the node's grant does not apply: it is for other code" {
+	if ev := ea.waitFor(t, wid); ev["reply"] != "the node's grant does not apply: it is for another source" {
 		t.Fatalf("call under a grant for other code = %v", ev)
 	}
 
@@ -729,9 +754,9 @@ func TestApps(t *testing.T) {
 	// A grant must name this node; the root key alone registers.
 	other, _ := identity.NewP256Key()
 	consent, _ := identity.SignConsent(identity.Consent{Agent: alice.addr, App: "https://x", AppKey: identity.PublicKey(other),
-		CodeHash: codeHash, Functions: []string{"setValue"}, Nonce: "n"}, alice.root)
+		SourceHash: codeHash, Functions: []string{"setValue"}, Nonce: "n"}, alice.root)
 	grant, _ := identity.CertifyGrant(identity.Grant{Agent: alice.addr, NodeKey: ethcommon.HexToAddress(b.NodeKey()),
-		CodeHash: codeHash, Functions: []string{"setValue"}, Nonce: "n"}, alice.root)
+		SourceHash: codeHash, Functions: []string{"setValue"}, Nonce: "n"}, alice.root)
 	refused("a grant for another node", call(t, a.URL, "PUT", alice.id, "register_app", "", "",
 		map[string]any{"consent": consent, "grant": grant}), "names another node")
 	byApp, _ := identity.SignConsent(consent.Consent, identity.P256Signer{Key: other})
@@ -759,7 +784,7 @@ func TestJoinRefusedByContractPolicy(t *testing.T) {
 	owner.register(t, a, ea)
 	stranger.register(t, b, eb)
 	cid := owner.deploy(t, a, ea, "Club", "", nil)
-	stranger.join(t, b, a, owner, cid)
+	stranger.join(t, b, a, owner, cid, "Club")
 	if ev := eb.waitAction(t, "join_contract"); ev["reply"] != false {
 		t.Fatalf("join event = %v", ev)
 	}

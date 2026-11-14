@@ -9,7 +9,11 @@
 //   { type: 'permit', contract, public, appKey }   permissions on an existing contract
 //   { type: 'call', contract, method, values, appKey }
 //   { type: 'read', contract, method, values, appKey }
-//   { type: 'join', contract, memberNode, memberAgent, guest, public, appKey }
+//   { type: 'join', contract, source, memberNode, memberAgent, guest, public, appKey }
+// A join carries the contract's source: the user reads it here, and signs the
+// join (which names the source's hash), the app's permissions and the
+// public choice at once. The page answers as soon as the join is sent; its
+// outcome reaches the app as a join_contract event.
 // public (a boolean) proposes whether anyone may read the user's copy of the
 // contract (public_read); the user decides here. Unless proposed, it is off
 // (deploy, join) or unchanged (permit).
@@ -18,7 +22,7 @@
 // A user with no identity on this node yet can create one here, or sign in.
 import {
   $, el, status, errorText, loadIdentity, connect, rootSigner, signIn, createIdentity, isKnown, reregister,
-  pretty, short, codeHashOf, writeFunctions, permissionItems, registerPermission,
+  pretty, short, sourceHashOf, writeFunctions, permissionItems, registerPermission,
 } from './app.mjs';
 import { API_VERSION, digestOf, nonce, now, signBatch, toHex } from './js/index.js';
 
@@ -43,6 +47,7 @@ function valid(r) {
   const known = ['connect', 'deploy', 'permit', 'call', 'read', 'join'];
   if (!r || r.apiVersion !== API_VERSION || !known.includes(r.type) || !/^0x04[0-9a-fA-F]{128}$/.test(r.appKey ?? '')) return false;
   if (r.type === 'connect') return true;
+  if (r.type === 'join' && typeof r.source !== 'string') return false;
   return r.type === 'deploy' ? typeof r.source === 'string' : typeof r.contract === 'string';
 }
 
@@ -127,26 +132,6 @@ function renew(identity) {
   });
 }
 
-/**
- * A second approval in the same window, after the request's first one (the
- * app's permissions for a contract joined just now). Resolves true if the user
- * approves, false if they skip it.
- */
-function askAgain(message) {
-  // Fresh buttons, without the first approval's handlers.
-  const approve = $('#approve').cloneNode(true);
-  const skip = $('#deny').cloneNode(true);
-  $('#approve').replaceWith(approve);
-  $('#deny').replaceWith(skip);
-  skip.textContent = 'Skip';
-  approve.disabled = skip.disabled = false;
-  status($('#status'), message, 'ok');
-  return new Promise((resolve) => {
-    approve.addEventListener('click', () => { approve.disabled = skip.disabled = true; resolve(true); });
-    skip.addEventListener('click', () => { approve.disabled = skip.disabled = true; resolve(false); });
-  });
-}
-
 function details(rows) {
   $('#details').replaceChildren(...rows.filter(([, v]) => v !== undefined && v !== '').flatMap(([k, v]) => [
     el('dt', {}, k), el('dd', {}, v),
@@ -223,8 +208,8 @@ function permissionsForm(abi, current = null) {
 }
 
 /** The messages that record the app's permissions: the consent, and the grant if it names functions. */
-function permissionMessages(ibc, identity, codeHash, choice) {
-  return permissionItems(ibc, { app: origin, appKey: request.appKey, codeHash, ...choice });
+function permissionMessages(ibc, identity, sourceHash, choice) {
+  return permissionItems(ibc, { app: origin, appKey: request.appKey, sourceHash, ...choice });
 }
 
 async function showConnect(ibc, identity, host) {
@@ -251,10 +236,10 @@ async function showDeploy(ibc, identity, host) {
   details([['Contract', name], ['Arguments', Object.entries(ctor).map(([k, v]) => `${k}: ${pretty(v)}`).join(', ')]]);
   showCode(request.source);
   const app = await siteOf(ibc);
-  const choose = app.site?.permissions?.[compiled.codeHash] ? null : permissionsForm(compiled.abi);
+  const choose = app.site?.permissions?.[compiled.sourceHash] ? null : permissionsForm(compiled.abi);
   const isPublic = publicForm();
   return async () => {
-    const items = choose ? permissionMessages(ibc, identity, compiled.codeHash, choose()) : deviceItems(identity, app);
+    const items = choose ? permissionMessages(ibc, identity, compiled.sourceHash, choose()) : deviceItems(identity, app);
     const tx = {
       contract: '', kind: 'deploy', agent: identity.agent, nonce: nonce(),
       body: JSON.stringify(ibc.deployBody({
@@ -268,23 +253,23 @@ async function showDeploy(ibc, identity, host) {
     await registerSigned(ibc, items, envs);
     const contract = await ibc.deploy(null, { tx, signature: envs[envs.length - 1] });
     if (publish.length) await registerPublish(ibc, publish[0], envs[items.length]);
-    return { contract, codeHash: compiled.codeHash, public: publish.length > 0 };
+    return { contract, sourceHash: compiled.sourceHash, public: publish.length > 0 };
   };
 }
 
 async function showPermit(ibc, identity, host) {
   const c = await ibc.contract(request.contract);
   if (!c?.id) throw new Error('You have no such contract on this node.');
-  const codeHash = codeHashOf(c.code);
+  const sourceHash = sourceHashOf(c.source ?? '');
   $('#title').textContent = `${host} wants to use ${c.name || short(c.id)}`;
   $('#what').textContent = 'Choose what it may do without asking you. It asks you for everything else.';
   details([['Contract', c.name], ['Id', short(c.id)]]);
   showCode(c.source);
   const app = await siteOf(ibc);
-  const choose = permissionsForm(c.abi, app.site?.permissions?.[codeHash]);
+  const choose = permissionsForm(c.abi, app.site?.permissions?.[sourceHash]);
   const isPublic = c.role === 'guest' ? null : publicForm(c.public === true);
   return async () => {
-    const items = permissionMessages(ibc, identity, codeHash, choose());
+    const items = permissionMessages(ibc, identity, sourceHash, choose());
     const publish = isPublic && isPublic() !== (c.public === true) ? [publishItem(ibc, c.id, isPublic())] : [];
     const envs = await signBatch(rootSigner(identity), [...items, ...publish]);
     await registerSigned(ibc, items, envs);
@@ -344,51 +329,35 @@ async function showJoin(ibc, identity, host) {
   $('#what').textContent = guest
     ? 'You become a guest: your node sends your transactions and reads to the member\'s node, which you trust with them, and keeps no copy.'
     : 'You become a member: your node takes part in it, and receives its history.';
-  details([['Contract', short(request.contract)], ['Through', `${request.memberNode} (${short(request.memberAgent)})`]]);
+  // The node compiles the source, for its functions; once joined, it checks
+  // that the source is the deployed contract's.
+  status($('#status'), 'Compiling the code on your node…');
+  const compiled = await ibc.compile(request.source);
+  status($('#status'), '');
+  details([['Contract', `${compiled.contract} (${short(request.contract)})`],
+    ['Through', `${request.memberNode} (${short(request.memberAgent)})`]]);
+  showCode(request.source);
+  const sourceHash = sourceHashOf(request.source);
   const app = await siteOf(ibc);
+  const choose = app.site?.permissions?.[sourceHash] ? null : permissionsForm(compiled.abi);
   const isPublic = guest ? () => false : publicForm(); // a guest keeps no copy to show
   return async () => {
     const tx = {
       contract: request.contract, kind: 'join', agent: identity.agent, nonce: nonce(),
-      body: JSON.stringify({ node: ibc.url, nodeKey: ibc.nodeKey, profile: '',
+      body: JSON.stringify({ node: ibc.url, nodeKey: ibc.nodeKey, profile: '', sourceHash,
         ...(guest ? { guest: true, host: request.memberAgent } : {}) }),
     };
-    const items = [...deviceItems(identity, app), ...(isPublic() ? [publishItem(ibc, request.contract, true)] : []),
-      { type: 'Transaction', message: tx }];
-    const envs = await signBatch(rootSigner(identity), items);
+    const items = choose ? permissionMessages(ibc, identity, sourceHash, choose()) : deviceItems(identity, app);
+    const publish = isPublic() ? [publishItem(ibc, request.contract, true)] : [];
+    const envs = await signBatch(rootSigner(identity), [...items, ...publish, { type: 'Transaction', message: tx }]);
     await registerSigned(ibc, items, envs);
-    const event = await ibc.submit('PUT', 'join_contract', {
-      body: { tx, signature: envs[envs.length - 1], partner: { address: request.memberNode, agent: request.memberAgent } },
+    // The node keeps the publish until it holds the user's copy.
+    const id = await ibc.request('PUT', 'join_contract', {
+      body: {
+        tx, signature: envs[envs.length - 1], partner: { address: request.memberNode, agent: request.memberAgent },
+        ...(publish.length ? { publish: { publish: publish[0].message, signature: envs[items.length] } } : {}),
+      },
     });
-    // Once joined, this node holds the user's copy: the publish applies to it.
-    const at = items.findIndex((i) => i.type === 'Publish');
-    if (at >= 0 && event.reply === true) await registerPublish(ibc, items[at], envs[at]);
-    const result = { joined: event.reply, public: at >= 0 && event.reply === true };
-    if (event.reply === true) result.codeHash = await joinedPermissions(ibc, identity, host);
-    return result;
+    return { request: id, sourceHash };
   };
-}
-
-/**
- * After a join: the contract's code is known now. The first time the app uses
- * this code, the user chooses what it may do without asking, as for a deploy:
- * a second approval, which the user may skip. Returns the code hash.
- */
-async function joinedPermissions(ibc, identity, host) {
-  const c = await ibc.contract(request.contract);
-  if (!c?.code) return undefined;
-  const codeHash = codeHashOf(c.code);
-  const site = (await ibc.apps()).find((a) => a.app === origin);
-  if (site?.permissions?.[codeHash]) return codeHash; // chosen before, for this code
-  $('#public-box').classList.add('hidden');
-  $('#title').textContent = `Joined ${c.name || short(c.id)}`;
-  $('#what').textContent = `Choose what ${host} may do in it without asking you. It asks you for everything else.`;
-  showCode(c.source);
-  const choose = permissionsForm(c.abi);
-  if (await askAgain('Joined. Now choose the app\'s permissions, and approve (or skip).')) {
-    status($('#status'), 'Approve with your passkey…');
-    const items = permissionMessages(ibc, identity, codeHash, choose());
-    await registerSigned(ibc, items, await signBatch(rootSigner(identity), items));
-  }
-  return codeHash;
 }

@@ -19,7 +19,7 @@ import (
 // AppsCollection is where a node keeps the apps its agents connected.
 const AppsCollection = "apps_by_site"
 
-// permission is what an agent lets an app do with contracts of one code.
+// permission is what an agent lets an app do with contracts of one source.
 type permission struct {
 	Read      bool                  `json:"read"`      // read without asking
 	Functions []string              `json:"functions"` // have the node sign these calls without asking
@@ -30,8 +30,8 @@ type permission struct {
 func (p permission) any() bool { return p.Read || len(p.Functions) > 0 }
 
 // appRecord is an app an agent connected: its site (origin), the keys of the
-// browsers it runs in (its devices), and its permissions by contract code
-// hash. The zero code hash means every contract: the node's own web page.
+// browsers it runs in (its devices), and its permissions by contract source
+// hash. The zero hash means every contract: the node's own web page.
 type appRecord struct {
 	Agent       string                `json:"agent"`
 	App         string                `json:"app"`
@@ -48,12 +48,12 @@ func (r *appRecord) owner() bool {
 	return ok
 }
 
-// permission returns what the app may do with contracts of codeHash.
-func (r *appRecord) permission(codeHash ethcommon.Hash) permission {
+// permission returns what the app may do with contracts of sourceHash.
+func (r *appRecord) permission(sourceHash ethcommon.Hash) permission {
 	if p, ok := r.Permissions[everyContract]; ok {
 		return p
 	}
-	return r.Permissions[codeHash.Hex()]
+	return r.Permissions[sourceHash.Hex()]
 }
 
 // apps keeps appRecords: a document per (agent, site), and an index from
@@ -127,7 +127,7 @@ func (a *apps) addKeyLocked(r *appRecord, key string) error {
 }
 
 // consent records a consent the agent's root signed, with its grant if it
-// names functions: it replaces the app's permission for that code, and
+// names functions: it replaces the app's permission for that source, and
 // connects the consent's key as a device of the app.
 func (a *apps) consent(c identity.Consent, grant *identity.Certificate) error {
 	a.mu.Lock()
@@ -143,7 +143,7 @@ func (a *apps) consent(c identity.Consent, grant *identity.Certificate) error {
 	if err := a.addKeyLocked(r, hexutil.Encode(c.AppKey)); err != nil {
 		return err
 	}
-	r.Permissions[c.CodeHash.Hex()] = permission{Read: c.Read, Functions: slices.Clone(c.Functions), Grant: grant}
+	r.Permissions[c.SourceHash.Hex()] = permission{Read: c.Read, Functions: slices.Clone(c.Functions), Grant: grant}
 	return a.write(siteID(agent, c.App), r)
 }
 

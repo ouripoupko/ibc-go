@@ -10,11 +10,12 @@
 #   ibc.sh whoami                                your agent id (the key's address)
 #   ibc.sh register                              register yourself on the node
 #   ibc.sh exists                                are you registered?
-#   ibc.sh deploy NAME [CONSTRUCTOR_JSON]        deploy build/NAME.bin; prints the contract id
+#   ibc.sh deploy NAME [CONSTRUCTOR_JSON]        deploy contracts/NAME.sol, compiled by the node; prints the contract id
 #   ibc.sh write CONTRACT METHOD [VALUES_JSON]   a transaction; waits for and prints its result
 #   ibc.sh read CONTRACT METHOD [VALUES_JSON]    a read of a view function; prints its result
-#   ibc.sh join CONTRACT MEMBER_URL MEMBER_ID    ask a member to let you join; waits for the answer
-#   ibc.sh guest CONTRACT MEMBER_URL MEMBER_ID   join as a guest: no copy here; calls and reads go to the member
+#   ibc.sh join CONTRACT MEMBER_URL MEMBER_ID SOURCE    ask a member to let you join a contract of the
+#                                                source file SOURCE (the contract's .sol); waits for the outcome
+#   ibc.sh guest CONTRACT MEMBER_URL MEMBER_ID SOURCE   join as a guest: no copy here; calls and reads go to the member
 #   ibc.sh leave CONTRACT [MEMBER_ID]            leave a contract (or ask to remove a member)
 #   ibc.sh public CONTRACT                       let anyone read your copy, unsigned
 #   ibc.sh private CONTRACT                      stop it
@@ -33,7 +34,7 @@ set -euo pipefail
 IBC_URL=${IBC_URL:-http://localhost:2611}
 IBC_URL=${IBC_URL%/}
 IBC_BIN=${IBC_BIN:-ibc}
-BUILD=${IBC_BUILD:-$(cd "$(dirname "$0")/.." && pwd)/build}
+CONTRACTS=${IBC_CONTRACTS:-$(cd "$(dirname "$0")/.." && pwd)/contracts}
 TIMEOUT=${IBC_TIMEOUT:-60}
 
 die() { echo "ibc.sh: $*" >&2; exit 1; }
@@ -113,7 +114,7 @@ submit_and_wait() {
 }
 
 cmd=${1:-}
-[ -n "$cmd" ] || { sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
+[ -n "$cmd" ] || { sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
 shift
 
 case "$cmd" in
@@ -140,12 +141,15 @@ deploy)
     need_key
     name=${1:?usage: ibc.sh deploy NAME [CONSTRUCTOR_JSON]}
     ctor=${2:-{\}}
-    [ -f "$BUILD/$name.bin" ] || die "no $BUILD/$name.bin (run examples/scripts/compile.sh)"
+    [ -f "$CONTRACTS/$name.sol" ] || die "no $CONTRACTS/$name.sol"
+    # The node compiles the source; the deploy carries both, so joiners can compile it again.
+    compiled=$(request POST "" compile "$(jq -cn --rawfile src "$CONTRACTS/$name.sol" '{source: $src, contract: ""}')")
+    fail_on_message "$compiled"
     body=$(jq -cn --arg name "$name" --arg node "$IBC_URL" --arg nodeKey "$(node_key)" \
-        --arg code "$(tr -d '[:space:]' <"$BUILD/$name.bin")" \
-        --slurpfile abi "$BUILD/$name.abi" --argjson ctor "$ctor" \
+        --rawfile src "$CONTRACTS/$name.sol" --argjson c "$compiled" --argjson ctor "$ctor" \
         '{name: $name, contract: ($name + ".sol"), default_app: "", profile: "",
-          code: $code, abi: $abi[0], constructor: $ctor, node: $node, nodeKey: $nodeKey}')
+          code: $c.code, abi: $c.abi, constructor: $ctor, node: $node, nodeKey: $nodeKey,
+          source: $src, compiler: $c.compiler}')
     event=$(submit_and_wait "" PUT "$AGENT" deploy_contract "$(sign deploy "" "$body")")
     [ "$(jq -r .reply <<<"$event")" = "true" ] || die "deploy failed: $(jq -r .reply <<<"$event")"
     jq -r .contract <<<"$event"
@@ -171,18 +175,25 @@ read)
     ;;
 join | guest)
     need_key
-    contract=${1:?usage: ibc.sh $cmd CONTRACT MEMBER_URL MEMBER_ID}
-    member_url=${2:?usage: ibc.sh $cmd CONTRACT MEMBER_URL MEMBER_ID}
-    member=${3:?usage: ibc.sh $cmd CONTRACT MEMBER_URL MEMBER_ID}
-    join_body=$(jq -cn --arg node "$IBC_URL" --arg nodeKey "$(node_key)" '{node: $node, nodeKey: $nodeKey, profile: ""}')
+    usage="usage: ibc.sh $cmd CONTRACT MEMBER_URL MEMBER_ID SOURCE"
+    contract=${1:?$usage}
+    member_url=${2:?$usage}
+    member=${3:?$usage}
+    source=${4:?$usage}
+    [ -f "$source" ] || die "no source file $source"
+    join_body=$(jq -cn --arg node "$IBC_URL" --arg nodeKey "$(node_key)" --arg hash "$("$IBC_BIN" source-hash "$source")" \
+        '{node: $node, nodeKey: $nodeKey, profile: "", sourceHash: $hash}')
     if [ "$cmd" = guest ]; then
         join_body=$(jq -c --arg host "$member" '. + {guest: true, host: $host}' <<<"$join_body")
     fi
     tx=$(sign join "$contract" "$join_body")
     body=$(jq -c --arg url "$member_url" --arg agent "$member" '. + {partner: {address: $url, agent: $agent}}' <<<"$tx")
     event=$(submit_and_wait "" PUT "$AGENT" join_contract "$body")
-    [ "$(jq -r .reply <<<"$event")" = "true" ] || die "join refused"
-    echo "joined $contract"
+    [ "$(jq -r .reply <<<"$event")" = "true" ] || die "not joined: $(jq -r '.reason // "refused"' <<<"$event")"
+    case $(jq -r '.source_check // ""' <<<"$event") in
+    verified) echo "joined $contract (its source compiles to its code)" ;;
+    *) echo "joined $contract, but its source was not checked: $(jq -r '.reason // ""' <<<"$event")" ;;
+    esac
     ;;
 leave)
     need_key

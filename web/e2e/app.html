@@ -48,7 +48,18 @@
     });
     // Anyone, with no key: an unsigned read of the user's public copy.
     // Joins the chat in the address, through the member there (?member=<agent>&memberNode=<url>).
-    run('join', () => app.join(chat, params.get('memberNode'), params.get('member')));
+    // The outcome arrives later, as an event: listen before asking.
+    run('join', async () => {
+      const source = await (await fetch('/Chat.sol')).text();
+      const seen = [];
+      const stop = app.onEvent((ev) => { if (ev.action === 'join_contract') seen.push(ev); });
+      const id = await app.join(chat, params.get('memberNode'), params.get('member'), { source });
+      for (;;) {
+        const ev = seen.find((e) => e.request === id);
+        if (ev) { stop(); return `${ev.reply} ${ev.source_check}`; }
+        await new Promise((r) => { setTimeout(r, 100); });
+      }
+    });
     run('publicTopic', () => Ibc.publicRead(app.node, app.agent, chat, 'topic'));
     window.appReady = true;
   </script>

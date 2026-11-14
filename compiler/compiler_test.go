@@ -36,7 +36,7 @@ func TestCompile(t *testing.T) {
 		t.Fatalf("compile = %+v", r)
 	}
 	again, _ := s.Compile(context.Background(), string(src), "Counter")
-	if again.CodeHash != r.CodeHash {
+	if again.Code != r.Code || r.SourceHash == "" {
 		t.Fatal("the same source compiled to different code")
 	}
 	if _, err := s.Compile(context.Background(), "contract Broken {", ""); err == nil || !strings.Contains(err.Error(), "does not compile") {

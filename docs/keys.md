@@ -7,7 +7,7 @@ How an agent is identified, who signs what, and how apps act for a user. The API
 - [2. Addresses](#2-addresses)
 - [3. What partners check](#3-what-partners-check)
 - [4. Apps, permissions and grants](#4-apps-permissions-and-grants)
-- [5. Deploying: the node compiles](#5-deploying-the-node-compiles)
+- [5. Deploying and joining: users sign the source](#5-deploying-and-joining-users-sign-the-source)
 - [6. The signature envelope](#6-the-signature-envelope)
 - [7. Passkeys in the web interface](#7-passkeys-in-the-web-interface)
 - [8. The approval page](#8-the-approval-page)
@@ -43,11 +43,11 @@ A transaction reaches partners in one of two forms, and they accept nothing else
   |---|---|
   | `agent` | The agent |
   | `nodeKey` | The node that may sign |
-  | `codeHash` | The contract code it is for: the keccak256 of the creation bytecode |
+  | `sourceHash` | The contracts it is for: the keccak256 of their Solidity source |
   | `functions` | The functions the node may call silently |
 
   Every partner checks the grant's signature (`identity.Verify`), that the node signed, that the
-  function is listed, and, in execution, that the contract's code is the grant's and that the node
+  function is listed, and, in execution, that the contract's source is the grant's and that the node
   is still the agent's node in this contract. A grant therefore stops working when the agent moves to
   another node.
 
@@ -56,7 +56,7 @@ contract. A guest's node is recorded when the guest joins, so a guest's grant wo
 its node signs, and the hosts' nodes only pass the transaction on.
 
 Partners cannot tell whether the user watched each silent call; they can tell that the user allowed
-these functions, for this code, to this node. A node, even a corrupt one, can sign nothing else in
+these functions, for this source, to this node. A node, even a corrupt one, can sign nothing else in
 the user's name.
 
 ## 4. Apps, permissions and grants
@@ -76,17 +76,18 @@ An app on any site acts for the user through the user's node, never with the use
   the app on another computer, its first request that needs the node connects that browser: the
   root signs a `Device` message ("connect wishes.example.com") in the same approval,
   and the app's permissions apply to it. Nothing to choose again.
-- **Permissions, per contract code.** The first time an app uses a contract code, the user decides,
-  on the node's page:
+- **Permissions, per contract source.** The first time an app uses a contract source, the user
+  decides, on the node's page:
   - **read without asking:** yes by default;
   - **functions the node may call without asking:** none by default; the user ticks each one.
 
   The root key signs this choice (a **consent**, kept by the node) and, if functions are ticked, the
-  **grant** partners need. The node keeps both, per app and per code, so further contracts of the
-  same code need no new permissions. A joined contract works the same: the user chooses after the
-  join, in the same window (the code is known only then), with a second approval they may skip. The
-  user can change an app's permissions later on a contract's page on the node (a new consent, and a
-  new grant if functions are ticked).
+  **grant** partners need. Both name the contract's **source hash**, the keccak256 of its Solidity
+  source: the user grants for what they read. The node keeps both, per app and per source, so
+  further contracts of the same source need no new permissions. Joining works the same: the app
+  sends the contract's source with the join, and the user chooses in the same approval as the join.
+  The user can change an app's permissions later on a contract's page on the node (a new consent,
+  and a new grant if functions are ticked).
 - **Silent reads:** the app signs its request with its key; the node answers if allowed.
 - **Silent calls:** the app asks the node; if allowed, the node signs the call with its own key, under
   the grant, and sends it to consensus.
@@ -109,13 +110,20 @@ the contract decides what an unknown reader sees, and can refuse with
 partner decides for their own copy; one partner can publish what all partners share, as any partner
 could already show it.
 
-## 5. Deploying: the node compiles
+## 5. Deploying and joining: users sign the source
 
-Apps send Solidity **source**, not bytecode. The user's node compiles it (with a fixed compiler and
-settings), shows it to the user on request, and packages the deploy transaction: bytecode, ABI,
-source, and the compiler's version and settings. The user signs that with the root key. Partners
-receive the bytecode; anyone can compile the source again and compare. An app cannot slip in code
-the user was not shown.
+Apps send Solidity **source**, not bytecode. The user's node compiles it (with the compiler version
+this release of ibc pins, and fixed settings), shows it to the user on request, and packages the
+deploy transaction: bytecode, ABI, source, and the compiler's version and settings. The user signs
+that with the root key. An app cannot slip in code the user was not shown.
+
+A user who **joins** reads the source too, and signs the join, which names the source's hash, with
+the app's permissions and the public choice, in one approval. The members refuse a join for another
+source. Once the members accept it, the joiner's node compiles the deploy's source with the deploy's
+compiler, downloading that version if it does not have it, and compares it with the deployed code:
+if they differ, it does not join. If it cannot get that compiler, it joins and warns the user: the
+contract is marked "source not checked" on the node's page, and its summary has
+`source_check: "unchecked"` with the reason ([API](api.md#join_contract)).
 
 ## 6. The signature envelope
 
@@ -165,11 +173,11 @@ with it:
    | `type` | Fields | The user approves |
    |---|---|---|
    | `connect` | none | Connecting the app: it learns the agent id, with no permissions |
-   | `deploy` | `source`, `contract` (name, optional), `name`, `constructor`, `protocol`, `public` | The deploy, compiled by the node; and the app's permissions for this code, the first time |
-   | `permit` | `contract`, `public` | The app's permissions for an existing contract's code |
+   | `deploy` | `source`, `contract` (name, optional), `name`, `constructor`, `protocol`, `public` | The deploy, compiled by the node; and the app's permissions for this source, the first time |
+   | `permit` | `contract`, `public` | The app's permissions for an existing contract's source |
    | `call` | `contract`, `method`, `values` | A transaction, signed by the root |
    | `read` | `contract`, `method`, `values` | A read, signed by the root |
-   | `join` | `contract`, `memberNode`, `memberAgent`, `guest`, `public` | Joining a contract; then, the first time the app uses its code, the app's permissions (a second approval) |
+   | `join` | `contract`, `source`, `memberNode`, `memberAgent`, `guest`, `public` | Joining a contract, of the source shown; and the app's permissions for this source, the first time. The page answers `{request}` (the join's id) once the join is sent, and closes: the outcome reaches the app as a `join_contract` event for that id |
 
    `public` (optional, `true` or `false`) is what the app proposes for "Anyone may read this
    contract": the box on the page starts ticked or not, and the user decides. Without it, the box

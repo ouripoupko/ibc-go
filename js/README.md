@@ -15,7 +15,7 @@ the user's node:
 - **The user approves on their node.** When the app needs the user, it opens the node's approval
   page in a popup, where the user signs in (or creates an identity) and approves with their passkey.
 - **The user decides what the app may do without asking:** read, and have the node call some
-  functions, per contract code. Everything else, the app asks each time.
+  functions, per contract source. Everything else, the app asks each time.
 
 ## An app: `IbcApp`
 
@@ -39,8 +39,29 @@ app.onEvent((event) => console.log(event));                 // events of the app
 
 `read` and `write` try silently first, and open the approval page when the node says the user must
 approve. Also: `app.permit(contract)` asks for permissions on an existing contract, and
-`app.join(contract, memberNode, memberAgent, { guest })` asks the user to join one, as a partner or
-as a guest; once joined, the same window asks the user for the app's permissions, as for a deploy.
+`app.join(contract, memberNode, memberAgent, { source, guest })` asks the user to join one, as a
+partner or as a guest.
+
+## Joining
+
+The app sends the contract's source with the join. The user reads it on their node, and approves
+the join, the app's permissions and the public choice at once. The join names the source's hash:
+the members refuse it if it is not the contract's. The approval window closes as soon as the join is
+sent, and `join` resolves with its id; the outcome arrives later, as an event:
+
+```js
+const source = await (await fetch('/Chat.sol')).text();     // byte for byte the deployed source
+const id = await app.join(chat, memberNode, memberAgent, { source });
+app.onEvent((event) => {
+  if (event.action !== 'join_contract' || event.request !== id) return;
+  // event.reply: true once the user's node holds the contract.
+  // event.source_check: 'verified' (the source compiles to the deployed code), 'unchecked' (the
+  // node could not compile it: event.reason says why), or 'mismatch' (it did not join).
+});
+```
+
+Open the event stream (`onEvent`) before the join, or read the contract again after: events sent
+while the stream is closed are lost. `Ibc.join` (for tools) works the same, with `{ source }`.
 
 ## Public contracts
 
@@ -50,7 +71,7 @@ proposes it, and the user decides on the approval page:
 
 ```js
 const board = await app.deploy({ source, public: true });   // the box starts ticked
-await app.join(contract, memberNode, memberAgent, { public: true });
+await app.join(contract, memberNode, memberAgent, { source, public: true });
 await app.permit(contract, { public: false });              // propose making it private again
 
 // Anyone, with no key, in any page or in Node.js:

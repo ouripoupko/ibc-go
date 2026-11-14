@@ -162,14 +162,6 @@ async function appClick(appPage, button, { approve = null } = {}) {
     for (const fn of approve.check ?? []) await popup.click(`#perm-writes input[value="${fn}"]`);
     if (SHOTS && approve.shot) await popup.screenshot({ path: `${SHOTS}${approve.shot}.png`, fullPage: true });
     await popup.click('#approve');
-    // A second step in the same window (the app's permissions, after a join).
-    if (approve.again) {
-      await waitText(popup, '#status', /Now choose/, 90000);
-      approve.seenAgain = { title: await text(popup, '#title'),
-        permissions: await popup.$eval('#permissions', (p) => !p.classList.contains('hidden')) };
-      for (const fn of approve.again) await popup.click(`#perm-writes input[value="${fn}"]`);
-      await popup.click('#approve');
-    }
   }
   await appPage.waitForFunction((n) => document.querySelector('#out').textContent.split('\n').length > n, { timeout: 90000 }, before);
   return (await text(appPage, '#out')).split('\n')[before - 1];
@@ -230,9 +222,12 @@ try {
   const pb = await pageFor(ctx, 390);
   await createIdentity(pb, `${B}/#join=${invite}`, 'bob');
   check('invite prefilled from the link', await pb.$eval('#j-contract', (e) => e.value) === counter);
+  // Bob reads what he joins: the source, which Alice sent with the invite.
+  const setSource = (page, source) => page.$eval('#j-source', (e, v) => { e.value = v; }, source);
+  await setSource(pb, await readFile(new URL('Counter.sol', CONTRACTS), 'utf8'));
   await pb.click('#j-submit');
-  await waitText(pb, '#join-status', /Joined|refused/, 60000);
-  check('bob joined', /Joined/.test(await text(pb, '#join-status')), await text(pb, '#join-status'));
+  await waitText(pb, '#join-status', /Joined|refused|Not joined/, 90000);
+  check('bob joined, the source checked', /^Joined: open/.test(await text(pb, '#join-status')), await text(pb, '#join-status'));
   await pb.click('#join-status a');
   await pb.waitForSelector('#contract-area:not(.hidden)');
   r = await runFn(pb, '#reads', 'count', []);
@@ -310,9 +305,10 @@ try {
   await pb.goto(`${B}/#join=${chatInvite}`);
   await pb.waitForFunction((c) => document.querySelector('#j-contract').value === c, { timeout: 30000 }, chat);
   await pb.click('#j-guest');
+  await setSource(pb, await readFile(new URL('Chat.sol', CONTRACTS), 'utf8'));
   n = boxes.length;
   await pb.click('#j-submit');
-  await waitText(pb, '#join-status', /Joined|refused/, 60000);
+  await waitText(pb, '#join-status', /Joined|refused|Not joined/, 90000);
   check('bob joined the chat as a guest, one approval', /Joined/.test(await text(pb, '#join-status'))
     && since(n).length === 1 && /join as a guest/.test(since(n)[0]), `${await text(pb, '#join-status')} ${since(n)}`);
   await pb.click('#join-status a');
@@ -386,15 +382,16 @@ try {
     /^0x[0-9a-fA-F]{40}$/.test(carol) && a.signedIn && registered === true && /wants to know who you are/.test(a.seen.title),
     `${line} · ${a.seen.title} · registered ${registered}`);
 
-  // Through the app, Carol joins Alice's chat. Once joined, the same window asks what the app may
-  // do in it without asking, as for a deploy; then the app posts silently.
+  // Through the app, Carol joins Alice's chat. She reads its source on her node, and approves at
+  // once the join and what the app may do in it without asking, as for a deploy. The window
+  // closes; the outcome reaches the app as an event. Then the app posts silently.
   await pApp3.goto(`http://localhost:${APP_PORT}/app.html?node=${encodeURIComponent(A)}&chat=${chat}`
     + `&member=${alice.agent}&memberNode=${encodeURIComponent(A)}`);
   await pApp3.waitForFunction(() => window.appReady === true);
-  a = { from: pApp3, again: ['post'] };
+  a = { from: pApp3, check: ['post'] };
   line = await appClick(pApp3, 'join', { approve: a });
-  check('carol joins through the app, then chooses its permissions', line === 'join true' && !a.seen.permissions
-    && a.seenAgain?.permissions && /Joined/.test(a.seenAgain.title), `${line} · ${a.seenAgain?.title}`);
+  check('carol joins through the app, with its permissions, in one approval', line === 'join "true verified"'
+    && a.seen.permissions && /asks you to join/.test(a.seen.title), `${line} · ${a.seen.title}`);
   n = boxes.length;
   line = await appClick(pApp3, 'post');
   check('carol\'s app posts silently in the joined chat', /^post \d+$/.test(line) && since(n).length === 0, `${line} ${since(n)}`);

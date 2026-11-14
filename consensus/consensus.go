@@ -34,7 +34,10 @@ type Protocol interface {
 	// SubmitTx accepts a transaction signed by agent, and returns its id.
 	SubmitTx(agent string, stx identity.SignedTx) (string, error)
 	// RelayJoin sends agent's join transaction to a member's node.
-	RelayJoin(ctx context.Context, agent string, stx identity.SignedTx, memberNode, memberAgent string) (string, error)
+	// It waits for the members' welcome; publish, if not nil, then makes
+	// the agent's copy public.
+	RelayJoin(ctx context.Context, agent string, stx identity.SignedTx, memberNode, memberAgent string,
+		publish *identity.SignedPublish) (string, error)
 	// Receive handles a message from another node; the result is the reply.
 	Receive(ctx context.Context, agent, contract string, body []byte) (any, error)
 	// Read runs a read of a contract agent is a guest of, on a host.
@@ -60,6 +63,13 @@ type Execution interface {
 	DeployRecord(agent, contract string) (json.RawMessage, error)
 	// Read runs a read-only call as caller.
 	Read(agent, caller string, record execution.Record) (common.Result, error)
+	// ChangePoint is the ledger index and state root after member's last
+	// join or move to another node.
+	ChangePoint(agent, contract, member string) (index uint64, stateRoot string, ok bool, err error)
+	// SetSourceCheck records the node's check of a joined contract's source.
+	SetSourceCheck(agent, contract, check, reason string) error
+	// SetPublic records the agent's choice to let anyone read its copy.
+	SetPublic(agent, contract string, public bool, time uint64) error
 
 	// A guest's node keeps the contracts its agents are guests of.
 	Guest(agent, contract string) (execution.GuestEntry, bool, error)

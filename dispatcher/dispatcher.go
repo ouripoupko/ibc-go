@@ -66,7 +66,7 @@ type Dispatcher struct {
 	key       *ecdsa.PrivateKey // the node's key: signs calls silently, under grants
 	nodeKey   ethcommon.Address
 	storage   func() (int64, bool)
-	compiler  *compiler.Solc
+	compiler  *compiler.Toolchain
 	apps      *apps
 	done      <-chan struct{}
 	mux       *http.ServeMux
@@ -84,7 +84,7 @@ type Options struct {
 	// Apps keeps the apps agents connected (AppsCollection).
 	Apps common.Collection
 	// Compiler compiles Solidity source; nil: the node cannot compile.
-	Compiler *compiler.Solc
+	Compiler *compiler.Toolchain
 }
 
 // New returns a Dispatcher. Event streams end when done is closed.
@@ -215,8 +215,7 @@ func (d *Dispatcher) handle(ctx context.Context, record execution.Record, body [
 		// An app sees the contracts it may read.
 		mine := []map[string]any{}
 		for _, summary := range list {
-			code, _ := summary[common.KeyCode].(string)
-			if hash, err := identity.CodeHash(code); err == nil && c.app.permission(hash).Read {
+			if source, _ := summary[execution.KeySource].(string); source != "" && c.app.permission(identity.SourceHash(source)).Read {
 				mine = append(mine, summary)
 			}
 		}
@@ -320,6 +319,8 @@ func (d *Dispatcher) handle(ctx context.Context, record execution.Record, body [
 				Address string `json:"address"`
 				Agent   string `json:"agent"`
 			} `json:"partner"`
+			// The agent's signed choice to make its copy public, once joined.
+			Publish *identity.SignedPublish `json:"publish"`
 		}
 		if err := json.Unmarshal(body, &req); err != nil {
 			return nil, fmt.Errorf("join_contract: %w", err)
@@ -330,7 +331,15 @@ func (d *Dispatcher) handle(ctx context.Context, record execution.Record, body [
 		if have, err := d.navigator.ContractExists(record.Agent, req.Tx.Contract); err != nil || have {
 			return nil, err // null: this agent already has the contract
 		}
-		return d.consensus.RelayJoin(ctx, record.Agent, req.SignedTx, req.Partner.Address, req.Partner.Agent)
+		if p := req.Publish; p != nil {
+			if err := p.Verify(); err != nil {
+				return nil, fmt.Errorf("join_contract publish: %w", err)
+			}
+			if p.Publish.Agent.Hex() != record.Agent || !strings.EqualFold(p.Publish.Contract, req.Tx.Contract) {
+				return nil, errors.New("join_contract: the publish is for another agent or contract")
+			}
+		}
+		return d.consensus.RelayJoin(ctx, record.Agent, req.SignedTx, req.Partner.Address, req.Partner.Agent, req.Publish)
 
 	case route{http.MethodPut, execution.ActionConsent}:
 		return d.consensus.Receive(ctx, record.Agent, record.Contract, body)
@@ -428,7 +437,7 @@ func (d *Dispatcher) silentWrite(record execution.Record, sq *identity.SignedQue
 	if c.app == nil {
 		return nil, errors.New("the root key signs its own transactions: send a signed transaction")
 	}
-	hash, err := d.codeHash(c.agent, record.Contract)
+	hash, err := d.sourceHash(c.agent, record.Contract)
 	if err != nil {
 		return nil, err
 	}
@@ -489,7 +498,7 @@ func (d *Dispatcher) registerApp(record execution.Record, body []byte) (any, err
 	if registered, err := d.navigator.AgentExists(record.Agent); err != nil || !registered {
 		return nil, fmt.Errorf("agent %s is not registered here", record.Agent)
 	}
-	if c.CodeHash == (ethcommon.Hash{}) && len(c.Functions) > 0 {
+	if c.SourceHash == (ethcommon.Hash{}) && len(c.Functions) > 0 {
 		return nil, errors.New("a consent for every contract only lets the app read")
 	}
 	if len(c.Functions) > 0 {
@@ -500,7 +509,7 @@ func (d *Dispatcher) registerApp(record execution.Record, body []byte) (any, err
 		if err := identity.VerifyGrant(g); err != nil {
 			return nil, fmt.Errorf("register_app: %w", err)
 		}
-		if g.Grant.Agent != c.Agent || g.Grant.NodeKey != d.nodeKey || g.Grant.CodeHash != c.CodeHash ||
+		if g.Grant.Agent != c.Agent || g.Grant.NodeKey != d.nodeKey || g.Grant.SourceHash != c.SourceHash ||
 			!sameFunctions(g.Grant.Functions, c.Functions) {
 			return nil, errors.New("register_app: the grant does not match the consent, or names another node")
 		}
@@ -596,12 +605,16 @@ func (d *Dispatcher) handleStream(w http.ResponseWriter, r *http.Request) {
 		if !c.owner() {
 			// An app hears only about the contracts it has a permission for.
 			agent := c.agent
-			scopes[i].Allow = func(contract string) bool {
+			scopes[i].Allow = func(reply execution.Reply) bool {
 				app, err := d.apps.get(agent, c.key)
 				if err != nil || app == nil {
 					return false
 				}
-				hash, err := d.codeHash(agent, contract)
+				hash, err := d.sourceHash(agent, *reply.Contract)
+				if err != nil && reply.SourceHash != "" {
+					// A join that left the node no contract: by the source it named.
+					hash, err = ethcommon.HexToHash(reply.SourceHash), nil
+				}
 				return err == nil && app.permission(hash).any()
 			}
 		}

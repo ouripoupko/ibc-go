@@ -22,7 +22,23 @@ export interface IbcEvent {
     reply: unknown;
     state_root?: Hex;
     agent?: Address;
+    /**
+     * For join_contract, on the joiner's node: its check of the contract's
+     * source against the deployed code ('verified', 'unchecked' or
+     * 'mismatch'), and why it could not check, or why it did not join.
+     */
+    source_check?: SourceCheck;
+    reason?: string;
+    /** For join_contract: the source hash the join named. */
+    source_hash?: Hex;
 }
+/**
+ * A node's check of a contract's source, when its agent joined: the source
+ * compiles to the deployed code ('verified'); the node could not compile it
+ * ('unchecked', with the reason); or it does not, and the node did not join
+ * ('mismatch').
+ */
+export type SourceCheck = 'verified' | 'unchecked' | 'mismatch';
 /**
  * The state of the event stream:
  *   - connecting: opening it;
@@ -60,6 +76,9 @@ export interface ContractSummary {
     state_root?: Hex;
     block_number?: number;
     deploy_error?: string;
+    /** For a contract the agent joined: the node's check of its source (see SourceCheck). */
+    source_check?: SourceCheck;
+    source_check_reason?: string;
     [field: string]: unknown;
 }
 /** An app the agent connected, as the node keeps it. */
@@ -67,6 +86,7 @@ export interface AppRecord {
     agent: Address;
     app: string;
     keys: Hex[];
+    /** What the app may do without asking, by contract source hash (sourceHashOf). */
     permissions: Record<Hex, {
         read: boolean;
         functions: string[];
@@ -78,7 +98,8 @@ export interface Compiled {
     contract: string;
     code: Hex;
     abi: unknown[];
-    codeHash: Hex;
+    /** sourceHashOf(the source). */
+    sourceHash: Hex;
     compiler: {
         version: string;
         settings: unknown;
@@ -89,15 +110,18 @@ export interface Compiled {
  * inherits a `constructor`, so only an own property counts; see ctorOf.)
  */
 export type ConstructorArgs = object;
-/** A contract to deploy: compiled code and its ABI, or what the node compiled. */
+/**
+ * A contract to deploy: what the node compiled (compile()), with its source.
+ * Joiners compile the source again with the same compiler, and compare.
+ */
 export interface DeployInput {
     name: string;
     code: Hex;
     abi: unknown;
     constructor?: ConstructorArgs;
     protocol?: string;
-    source?: string;
-    compiler?: unknown;
+    source: string;
+    compiler: unknown;
     [field: string]: unknown;
 }
 /** A transaction and the root's signature. */
@@ -252,15 +276,20 @@ export declare class Ibc {
     /** Disconnects an app (by its site), with all its browsers. The root signs. */
     revokeApp(app: string): Promise<boolean>;
     /**
-     * Asks a member of a contract to let this agent join. Resolves with true once
-     * this node holds the contract, or false if the contract refused. A guest
-     * takes no part in consensus: this node sends its transactions and reads to
-     * the member's node, its host.
+     * Asks a member of a contract to let this agent join, and resolves with the
+     * join's id once the member has it. source is the contract's Solidity
+     * source, as the agent read it: the members refuse the join if it is not
+     * the contract's. The outcome arrives later on the event stream (onEvent):
+     * a join_contract event for this id, with reply true or false and the
+     * node's check of the source (source_check, reason). A guest takes no part
+     * in consensus: this node sends its transactions and reads to the member's
+     * node, its host.
      */
-    join(contract: string, memberUrl: string, memberAgent: Address, { guest, profile }?: {
+    join(contract: string, memberUrl: string, memberAgent: Address, { source, guest, profile }: {
+        source: string;
         guest?: boolean;
         profile?: string;
-    }): Promise<unknown>;
+    }): Promise<string>;
     /** Leaves a contract, or asks to remove another member. Resolves with the decision. */
     leave(contract: string, member?: Address): Promise<unknown>;
     /** Closes the event stream. */
@@ -294,6 +323,7 @@ export type ApprovalRequest = {
 } | {
     type: 'join';
     contract: string;
+    source: string;
     memberNode: string;
     memberAgent: Address;
     guest?: boolean;
@@ -303,10 +333,11 @@ export type ApprovalRequest = {
 export interface ApprovalResult {
     agent: Address;
     contract?: string;
-    codeHash?: Hex;
+    sourceHash?: Hex;
     reply?: unknown;
     value?: unknown;
-    joined?: unknown;
+    /** For a join: its id. The outcome arrives later, as a join_contract event for it. */
+    request?: string;
     /** Whether the user made the contract public (deploy, join, permit). */
     public?: boolean;
     [field: string]: unknown;
@@ -370,13 +401,19 @@ export declare class IbcApp {
     }): Promise<ApprovalResult>;
     /**
      * Asks the user to join a contract, through a member's node; as a guest
-     * with { guest: true }. public: true proposes to let anyone read the user's
-     * copy (not for a guest, who keeps none).
+     * with { guest: true }. source is the contract's Solidity source, which the
+     * user reads on the approval page and signs for, with the app's permissions
+     * and, with public: true, a proposal to let anyone read the user's copy (not
+     * for a guest, who keeps none): one approval. Resolves with the join's id
+     * once it is sent; the outcome arrives later, as a join_contract event for
+     * that id (onEvent), with reply true or false, and the user's node's check
+     * of the source (source_check, reason).
      */
-    join(contract: string, memberNode: string, memberAgent: Address, { guest, public: isPublic }?: {
+    join(contract: string, memberNode: string, memberAgent: Address, { source, guest, public: isPublic }: {
+        source: string;
         guest?: boolean;
         public?: boolean;
-    }): Promise<unknown>;
+    }): Promise<string>;
     /** Reads silently if the user allowed it, and otherwise asks the user. */
     read(contract: string, method: string, values?: Record<string, unknown>): Promise<unknown>;
     /** Writes silently if the user allowed this function, and otherwise asks the user. */

@@ -13,6 +13,7 @@ import (
 	ethcommon "github.com/ethereum/go-ethereum/common"
 
 	"github.com/ouripoupko/ibc-go/common"
+	"github.com/ouripoupko/ibc-go/compiler"
 	"github.com/ouripoupko/ibc-go/consensus/cordial"
 	"github.com/ouripoupko/ibc-go/execution"
 	"github.com/ouripoupko/ibc-go/identity"
@@ -33,10 +34,16 @@ var guestTimeout = 30 * time.Second
 // not a guest of.
 var ErrNotGuest = errors.New("not a guest of this contract")
 
-// pendingJoin is a guest's join sent to a host, waiting for its welcome.
+// pendingJoin is a join sent to a member, waiting for the members' welcome:
+// its id, the member it went to (a guest's Host), and the agent's signed
+// choice to make its copy public, which applies once it holds one.
 type pendingJoin struct {
-	TxID string            `json:"txId"`
-	Host ethcommon.Address `json:"host"`
+	TxID   string            `json:"txId"`
+	Host   ethcommon.Address `json:"host,omitempty"`
+	Member ethcommon.Address `json:"member"`
+	// SourceHash is the source hash the join names.
+	SourceHash ethcommon.Hash          `json:"sourceHash"`
+	Publish    *identity.SignedPublish `json:"publish,omitempty"`
 }
 
 func (r *Router) pendingKey(agent ethcommon.Address, contract string) []byte {
@@ -258,16 +265,40 @@ func (r *Router) guestWelcome(agent ethcommon.Address, contract string, msg wire
 	if id, err := rec.Tx.Verify(); err != nil || id.Hex() != contract {
 		return errors.New("guest_welcome: the deploy is not this contract's")
 	}
-	if err := r.cfg.Execution.StoreGuest(agent.Hex(), contract, rec.Message.Fields,
-		execution.GuestEntry{Host: p.Host, Hosts: hostsOf(msg.Config)}); err != nil {
-		return err
+	key := minerKey{agent, contract}
+	r.mu.Lock()
+	if r.syncing[key] {
+		r.mu.Unlock()
+		return nil // another host's welcome, while the first is checked
 	}
-	if err := r.deletePending(agent, contract); err != nil {
-		return err
-	}
-	slog.Info("joined contract as a guest", "contract", contract, "agent", agent.Hex())
-	r.cfg.Publisher.Publish(agent.Hex(), execution.Reply{Request: p.TxID, Contract: &contract,
-		Action: "join_contract", Reply: true})
+	r.syncing[key] = true
+	r.mu.Unlock()
+	// Compiling the source may take a while: answer the host now.
+	go func() {
+		defer func() {
+			r.mu.Lock()
+			delete(r.syncing, key)
+			r.mu.Unlock()
+		}()
+		check, reason := r.checkSource(rec)
+		if check == compiler.Mismatch {
+			r.retreat(agent, contract, p, p.TxID, check, reason)
+			return
+		}
+		if err := r.cfg.Execution.StoreGuest(agent.Hex(), contract, rec.Message.Fields,
+			execution.GuestEntry{Host: p.Host, Hosts: hostsOf(msg.Config)}); err != nil {
+			slog.Error("guest welcome", "contract", contract, "err", err)
+			r.retreat(agent, contract, p, p.TxID, "", err.Error())
+			return
+		}
+		if err := r.cfg.Execution.SetSourceCheck(agent.Hex(), contract, check, reason); err != nil {
+			slog.Error("guest welcome: source check", "contract", contract, "err", err)
+		}
+		_ = r.deletePending(agent, contract)
+		slog.Info("joined contract as a guest", "contract", contract, "agent", agent.Hex(), "source", check)
+		r.cfg.Publisher.Publish(agent.Hex(), execution.Reply{Request: p.TxID, Contract: &contract,
+			Action: "join_contract", Reply: true, SourceCheck: check, Reason: reason, SourceHash: p.SourceHash.Hex()})
+	}()
 	return nil
 }
 

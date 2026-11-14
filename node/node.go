@@ -44,9 +44,13 @@ type Config struct {
 	Sender common.Sender
 	// Params are the consensus rules; zero for the defaults.
 	Params cordial.Params
-	// Solc is the Solidity compiler command, for compiling apps' source
-	// (for example ["solc"]); empty: the node cannot compile.
+	// Solc is a Solidity compiler command (for example ["solc"]). The node
+	// compiles with compiler.PinnedVersion: with Solc if it is that version,
+	// or else with solc-js, which it downloads into DataDir and runs with
+	// Node.js; it checks joined contracts the same way, with their version.
 	Solc []string
+	// CheckSource replaces the check of joined contracts' sources (tests).
+	CheckSource consensus.CheckSource
 }
 
 // Node is a running ibc node.
@@ -93,11 +97,22 @@ func New(cfg Config) (*Node, error) {
 	if sender == nil {
 		sender = &common.HTTPSender{}
 	}
+	tools := &compiler.Toolchain{}
+	if len(cfg.Solc) > 0 {
+		tools.Native = &compiler.Solc{Command: cfg.Solc}
+	}
+	if cfg.DataDir != "" && cfg.DB == nil {
+		tools.Dir = filepath.Join(cfg.DataDir, "solc")
+	}
+	check := cfg.CheckSource
+	if check == nil {
+		check = tools.Check
+	}
 	out := &output{broker: n.broker}
 	n.navigator = execution.NewNavigator(execution.Config{DB: n.db, Output: out})
 	n.consensus = consensus.NewRouter(consensus.RouterConfig{
 		NodeKey: n.nodeKey, DB: n.db, Sender: sender, Execution: n.navigator,
-		Publisher: n.broker, Params: cfg.Params,
+		Publisher: n.broker, Params: cfg.Params, CheckSource: check,
 	})
 	out.setConsensus(n.consensus)
 	if err := n.navigator.Recover(); err != nil {
@@ -110,12 +125,19 @@ func New(cfg Config) (*Node, error) {
 	if cfg.DB == nil {
 		data.dir = cfg.DataDir
 	}
-	var solc *compiler.Solc
-	if len(cfg.Solc) > 0 {
-		solc = &compiler.Solc{Command: cfg.Solc}
+	if tools.Native != nil || tools.Dir != "" {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer cancel()
+			if which, err := tools.Describe(ctx); err != nil {
+				slog.Warn("no Solidity compiler: the node cannot compile, nor check joined contracts", "err", err)
+			} else {
+				slog.Info("Solidity compiler", "compiler", which)
+			}
+		}()
 	}
 	api := dispatcher.New(n.navigator, n.consensus, n.broker, dispatcher.Options{
-		NodeKey: n.nodeKey, Storage: data.Size, Compiler: solc,
+		NodeKey: n.nodeKey, Storage: data.Size, Compiler: tools,
 		Apps: common.NewKVStore(n.db).Collection(dispatcher.AppsCollection),
 	}, n.done)
 	mux := http.NewServeMux()

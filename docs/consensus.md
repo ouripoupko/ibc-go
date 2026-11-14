@@ -251,8 +251,10 @@ configuration 0, with the creator alone. `join`, `leave` and `rotate_key` transa
    miners put no other transactions in their blocks; incoming ones wait in the mempool. The idle
    rule keeps them making (empty) blocks until the change is output.
 3. **Decide.** When τ outputs the change, execution applies it at its place in the order:
-   - `join` calls the contract's `approve_partner(address)` as the joining agent; a contract
-     without that function accepts every join (as the Python default did);
+   - a `join` names the hash of the contract's source as the joining agent read it
+     (`sourceHash`); if that is not the hash of the source in the contract's deploy, it is
+     refused. Otherwise `join` calls the contract's `approve_partner(address)` as the joining
+     agent; a contract without that function accepts every join (as the Python default did);
    - `leave` of oneself is always accepted; removing another member calls the contract's
      `approve_removal(address)` as the requesting member, and a contract without that function
      refuses;
@@ -265,10 +267,25 @@ configuration 0, with the creator alone. `join`, `leave` and `rotate_key` transa
    left out; the freeze keeps correct miners' blocks there empty, and any transaction left out is
    returned to its node's mempool. A rejected change unfreezes configuration *k* with no switch.
 5. **New nodes** (a newcomer's, or a member's new node after `rotate_key`) receive a welcome from
-   the members, with the anchor and the new configuration. They download the ledger, check every
-   transaction's signature, execute it, and join the first round. Each member's first block of the
-   new configuration carries its state root. A member's old node, after a rotation, stops taking
-   part.
+   each member, with the new configuration and where the change left the contract: its ledger
+   index, the state root after it, and the hash of the record ids up to it. A member's old node,
+   after a rotation, stops taking part.
+6. **The new node joins on what the members agree on, not on one member's word.** It waits for f+1
+   welcomes (of the members before the change) that agree, so at least one is from a correct
+   member. It then fetches the ledger, first from the member the agent joined through, and keeps
+   the first history that checks: its first record is the deploy whose id is the contract id,
+   every record is signed by its agent, its record ids hash to the welcomes' hash, and it replays
+   to their state root. If a member gives a fake history, the node takes a correct member's
+   instead: a corrupt member cannot leave the joiner out by lying, and so cannot fill the
+   configuration with members who never take part.
+7. **The source check.** The new node then compiles the deploy's source with the compiler the
+   deploy names (`compiler`: version and settings), and compares the result with the deployed
+   code. If they differ (`mismatch`), the contract is not what its source says, and the node does
+   not join: it keeps nothing, and the agent hears why. Its absence then costs the contract's
+   members some liveness, but only members who did not check, since a correct member's node
+   checks the same way. If it cannot compile (`unchecked`: it could not get that compiler version),
+   it joins, and records the warning with the agent's copy. This check is local to the node, not
+   part of consensus: nodes without the same compiler would decide differently.
 
 ### Why it is safe
 
@@ -328,8 +345,10 @@ The hosts cannot forge the guest's transactions, since every partner checks thei
    its node and node key, and its host. The members' nodes send the guest's node a **welcome**: the
    contract's members (the hosts) and the contract's deploy record. The guest's node checks that the
    deploy is signed by the creator and that its id is the contract's id, so it knows the contract's
-   code, ABI and source for certain. It then adds the contract to the agent's list of contracts,
-   with the role `guest`.
+   code, ABI and source for certain, and compiles the source against the code as a partner's node
+   does (§10). It then adds the contract to the agent's list of contracts, with the role `guest`;
+   on a mismatch, it does not. As for a partner, the guest's join names its source hash, and is
+   refused if that is not the contract's.
 
 ### Using the contract
 
@@ -411,6 +430,7 @@ all three variants with equivocating miners.
 | D8 | Blocks carry the creator's state root |
 | D9 | A member may always leave; removing another needs the contract's `approve_removal` |
 | D10 | Guests: a contract may take guests (`approve_guest`), who use it through a host and are not miners (§11) |
+| D11 | Joins name the contract's source hash; a new node joins on f+1 members' agreed point, from any member whose history checks, and only if the source compiles to the code (§10) |
 | — | Each contract chooses its protocol; one blocklace per contract |
 | — | No limit on partners, no optimizations for large contracts |
 

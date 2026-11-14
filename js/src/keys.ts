@@ -54,7 +54,7 @@ export const TYPES = {
   Grant: [
     { name: 'agent', type: 'address' },
     { name: 'nodeKey', type: 'address' },
-    { name: 'codeHash', type: 'bytes32' },
+    { name: 'sourceHash', type: 'bytes32' },
     { name: 'functions', type: 'string[]' },
     { name: 'nonce', type: 'string' },
   ],
@@ -62,7 +62,7 @@ export const TYPES = {
     { name: 'agent', type: 'address' },
     { name: 'app', type: 'string' },
     { name: 'appKey', type: 'bytes' },
-    { name: 'codeHash', type: 'bytes32' },
+    { name: 'sourceHash', type: 'bytes32' },
     { name: 'read', type: 'bool' },
     { name: 'functions', type: 'string[]' },
     { name: 'nonce', type: 'string' },
@@ -92,9 +92,9 @@ export interface Registration { agent: Address; node: string; nodeKey: Address; 
 export interface Query {
   agent: Address; action: string; target: string; contract: string; body: string; time: number; nonce: string;
 }
-export interface Grant { agent: Address; nodeKey: Address; codeHash: Hex; functions: string[]; nonce: string }
+export interface Grant { agent: Address; nodeKey: Address; sourceHash: Hex; functions: string[]; nonce: string }
 export interface Consent {
-  agent: Address; app: string; appKey: Hex; codeHash: Hex; read: boolean; functions: string[]; nonce: string;
+  agent: Address; app: string; appKey: Hex; sourceHash: Hex; read: boolean; functions: string[]; nonce: string;
 }
 export interface Device { agent: Address; app: string; appKey: Hex; nonce: string }
 /** Lets anyone read the agent's copy of a contract (public_read), or stops it. */
@@ -171,6 +171,12 @@ function concat(...parts: Uint8Array[]): Uint8Array {
 }
 
 export const keccak256 = (bytes: Uint8Array): Uint8Array => keccak_256(bytes);
+
+/**
+ * A contract source's hash, as joins, grants and consents name it: the
+ * keccak256 of the Solidity source text, byte for byte (as UTF-8).
+ */
+export const sourceHashOf = (source: string): Hex => toHex(keccak256(new TextEncoder().encode(source)));
 
 /** A random nonce, as hex without 0x. */
 export function nonce(): string {
@@ -345,10 +351,10 @@ export async function signBatch(signer: Signer, items: Item[]): Promise<Envelope
   return items.map(() => ({ ...env, batch: digests }));
 }
 
-/** A grant, certified by the root: lets the agent's node sign these functions of this code silently. */
-export async function certifyGrant(root: Signer, { agent, nodeKey, codeHash, functions }:
+/** A grant, certified by the root: lets the agent's node sign these functions of this source's contracts silently. */
+export async function certifyGrant(root: Signer, { agent, nodeKey, sourceHash, functions }:
   Omit<Grant, 'nonce'>): Promise<{ grant: Grant; signature: Envelope }> {
-  const grant: Grant = { agent, nodeKey, codeHash, functions, nonce: nonce() };
+  const grant: Grant = { agent, nodeKey, sourceHash, functions, nonce: nonce() };
   const { envelope: signature } = await sign(root, 'Grant', grant);
   return { grant, signature };
 }

@@ -8,6 +8,7 @@
 //	ibc sign registration -key ROOT_KEY -node URL -node-key ADDRESS
 //	ibc sign query -key FILE -action ACTION [-target AGENT] [-contract ID] [-body JSON]
 //	ibc sign publish -key ROOT_KEY -contract ID [-public=false]
+//	ibc source-hash FILE                    the hash of a contract's source, as a join names it
 package main
 
 import (
@@ -38,6 +39,8 @@ func main() {
 			err = keyCommand(os.Args[2:])
 		case "sign":
 			err = signCommand(os.Args[2:])
+		case "source-hash":
+			err = sourceHashCommand(os.Args[2:])
 		default:
 			err = runCommand(os.Args[1:])
 		}
@@ -54,7 +57,7 @@ func runCommand(args []string) error {
 	fs := flag.NewFlagSet("ibc", flag.ExitOnError)
 	addr := fs.String("addr", envOr("IBC_ADDR", ":2611"), "address to serve the API on (env IBC_ADDR)")
 	dataDir := fs.String("data", envOr("IBC_DATA", "data"), "directory of the node's database and key (env IBC_DATA)")
-	solc := fs.String("solc", envOr("IBC_SOLC", "solc"), "the Solidity compiler command, solc or solcjs, used to compile apps' source (env IBC_SOLC)")
+	solc := fs.String("solc", envOr("IBC_SOLC", "solc"), "a Solidity compiler command, solc or solcjs, used if it is the pinned version; otherwise the node downloads solc-js into its data directory and runs it with Node.js (env IBC_SOLC)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -198,6 +201,19 @@ func signCommand(args []string) error {
 		return fmt.Errorf("unknown sign command %q", args[0])
 	}
 	return json.NewEncoder(os.Stdout).Encode(out)
+}
+
+// sourceHashCommand prints the hash of a Solidity source file, byte for byte.
+func sourceHashCommand(args []string) error {
+	if len(args) != 1 {
+		return errors.New("usage: ibc source-hash FILE")
+	}
+	src, err := os.ReadFile(args[0])
+	if err != nil {
+		return err
+	}
+	fmt.Println(identity.SourceHash(string(src)).Hex())
+	return nil
 }
 
 func envOr(key, fallback string) string {

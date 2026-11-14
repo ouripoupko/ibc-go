@@ -6,23 +6,23 @@
 //   node demo.mjs [node-url]
 //
 // The default node is http://localhost:2611. Run the node first (see the
-// README). Each run makes a new agent.
+// README); it compiles the contracts. Each run makes a new agent.
 import { readFile } from 'node:fs/promises';
 import { Ibc, addressOf, newP256Key, p256Signer } from '@ouripoupko/ibc';
 
 const url = process.argv[2] ?? 'http://localhost:2611';
-const build = new URL('../build/', import.meta.url);
+const contracts = new URL('../contracts/', import.meta.url);
 
 const rootKey = await newP256Key();
 const agent = addressOf(rootKey.publicKey);
 const root = p256Signer(rootKey);
 
+// The node compiles each contract's source; the deploy carries the source and
+// the compiler, so that a partner who joins can compile it again and compare.
 async function load(name) {
-  return {
-    name,
-    code: await readFile(new URL(`${name}.bin`, build), 'utf8'),
-    abi: await readFile(new URL(`${name}.abi`, build), 'utf8'),
-  };
+  const source = await readFile(new URL(`${name}.sol`, contracts), 'utf8');
+  const { code, abi, compiler } = await ibc.compile(source);
+  return { name, code, abi, source, compiler };
 }
 
 const ibc = await Ibc.connect(url, { agent, root });

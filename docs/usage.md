@@ -75,8 +75,12 @@ phone, your computer, or a security key. The node never sees it.
 - **Deploy.** Choose the contract's Solidity source (`.sol`), or paste it, and click **Compile**: your
   node compiles it. Fill in the constructor's arguments and click **Deploy**.
 - **Join.** Paste an invite from a member, or enter the contract id, the member's node URL and the
-  member's agent id. Tick **Join as a guest** to join as a [guest](#joining-as-a-guest). The
-  contract's own rules decide.
+  member's agent id, and the contract's **source** (the member sends it with the invite: **Copy the
+  source** on the contract's page). You read what you join: the members refuse the join if the
+  source is not the contract's, and your node checks that it compiles to the contract's code. Tick
+  **Join as a guest** to join as a [guest](#joining-as-a-guest). The contract's own rules decide.
+  The page tells you when the join is done; a contract whose source your node could not check is
+  marked **source not checked**.
 - **A contract's page.** Click a contract to see its details, its code (behind **Show the code**),
   and a form for each function in its ABI. *Read* runs a `view` function and shows the result at
   once; *Send* sends a transaction and shows its result once all members have applied it. Reverts
@@ -116,11 +120,10 @@ An app on another site never holds your keys. It has a key of its own, and works
    - **call these functions:** off by default; tick the ones you trust it with, such as `post` in a
      chat. Your node then signs those calls for you.
 
-   You approve with your passkey, once. When the app asks you to join a contract, the code is known
-   only once you have joined: the same window then asks for these permissions, with a second
-   approval (or skip it).
-2. **From then on**, it reads and makes the calls you ticked without asking you. Creating another
-   contract of the same code needs only your approval of the deploy itself.
+   You approve with your passkey, once. When the app asks you to join a contract, it sends the
+   contract's source: you read it, and approve the join and these permissions together.
+2. **From then on**, it reads and makes the calls you ticked without asking you. Creating or joining
+   another contract of the same source needs only your approval of the deploy or the join itself.
 3. **For anything else**, a transfer for example, it opens the approval page again, and you sign that
    transaction with your passkey.
 4. **On another computer**, the app's first request that needs your node opens the approval page
@@ -231,13 +234,16 @@ function approve_removal(address member) external view returns (bool);
 
 ## Compile it
 
-**Your node compiles.** In the web interface and through apps, you give the Solidity source; your
-node compiles it with its compiler (the `-solc` option: `solc`, or `solcjs` through Node.js), and the
-deploy transaction carries the source, the compiler's version and settings, and the bytecode. The
-API call is [`compile`](api.md#compile).
+**Your node compiles.** You always give the Solidity source, in the web interface, through apps and
+from the shell; your node compiles it with the Solidity version this release of ibc pins (0.8.38),
+and the deploy transaction carries the source, the compiler's version and settings, and the
+bytecode. A deploy must carry its source: whoever joins the contract reads it, and their node
+compiles it again with the same version and compares. The node uses the `-solc` compiler if it is
+that version, or else downloads solc-js of that version and runs it with Node.js. The API call is
+[`compile`](api.md#compile).
 
-**To compile yourself**, for the shell client and scripts: the examples come with a script that
-compiles them with solc. It needs Node.js, and downloads the
+**To compile yourself**, to look at the bytecode and ABI (the Go tests use these files), the
+examples come with a script that compiles them with solc. It needs Node.js, and downloads the
 compiler the first time:
 
 ```sh
@@ -276,7 +282,7 @@ ibc newkey                             # once: creates IBC_KEY
 ibc register
 # registered 0x86D637BcBc56F0Dba2b0B5398B4446b5e5330851 at http://localhost:2611
 
-C=$(ibc deploy Counter '{"start": 10}')       # deploys build/Counter.bin, prints the contract id
+C=$(ibc deploy Counter '{"start": 10}')       # the node compiles contracts/Counter.sol; prints the contract id
 
 ibc write "$C" increment '{"amount": 5}'
 # 15
@@ -340,8 +346,10 @@ app.onEvent((event) => console.log(event));                // events of the app'
 approve. The event stream reconnects by itself when it breaks; `app.onStatus((status, error) => …)`
 says when it is `open`, `reconnecting` or `closed`, and events sent while it was down are lost, so
 read again when it reopens (see the [package's README](../js/README.md#the-event-stream)). `app.permit(contract)` asks for permissions on an existing contract (one the user joined),
-and `app.join(contract, memberNode, memberAgent)` asks the user to join one;
-`app.join(contract, memberNode, memberAgent, { guest: true })` as a guest. `deploy`, `join` and
+and `app.join(contract, memberNode, memberAgent, { source })` asks the user to join one, of that
+source (`{ source, guest: true }` as a guest). `join` resolves with the join's id once it is sent; the
+outcome arrives later, as a `join_contract` event for that id, with `reply` and the user's node's
+check of the source (`source_check`: `verified`, `unchecked` or `mismatch`). `deploy`, `join` and
 `permit` also take `public`, to propose letting anyone read the user's copy, and anyone reads one
 with `Ibc.publicRead(node, agent, contract, method, values)`: see
 [Publishing](#publishing-public-contracts).
@@ -467,10 +475,10 @@ export IBC_URL=http://node1:2611 IBC_KEY=~/.ibc/alice.key
 C=$(ibc deploy Counter '{"start": 10}')
 ibc whoami                       # alice tells bob the contract id and her agent id
 
-# bob, on node 2
+# bob, on node 2: he reads Counter.sol, which alice sent him too
 export IBC_URL=http://node2:2611 IBC_KEY=~/.ibc/bob.key
-ibc join "$C" http://node1:2611 0x86D637BcBc56F0Dba2b0B5398B4446b5e5330851
-# joined 0x67bb…
+ibc join "$C" http://node1:2611 0x86D637BcBc56F0Dba2b0B5398B4446b5e5330851 examples/contracts/Counter.sol
+# joined 0x67bb… (its source compiles to its code)
 ibc write "$C" increment '{"amount": 7}'
 # 22
 
@@ -481,13 +489,21 @@ ibc read "$C" count
 
 What happens:
 
-1. Bob's join is a transaction signed by bob. His node passes it to alice's node, and the contract's
-   partners order it like any other transaction.
-2. When it is ordered, the contract decides with its `approve_partner` function (Counter has none,
-   so the join is approved).
-3. Bob's node receives the contract's history from alice's node, replays it, checks that it reaches
-   the same state, and from then on takes part in consensus. Bob's stream reports `join_contract`
-   with `true`; a refused join reports `false`.
+1. Bob's join is a transaction signed by bob, naming the hash of the source he read. His node passes
+   it to alice's node, and the contract's partners order it like any other transaction.
+2. When it is ordered, the partners refuse it if the source is not the contract's. Otherwise the
+   contract decides with its `approve_partner` function (Counter has none, so the join is
+   approved).
+3. The members' nodes welcome bob's node, telling it where the join left the contract. Bob's node
+   fetches the history from alice's node (or from another member, if alice's does not check),
+   checks every signature, replays it to the state the members agree on, and from then on takes
+   part in consensus.
+4. Bob's node compiles the contract's source with the compiler the deploy names, downloading that
+   version if needed, and compares it with the deployed code. If they differ, it does not join. If
+   it cannot get that compiler, it joins, and warns.
+
+   Bob's stream reports `join_contract` with `true` and `source_check`; a refused join, or one bob's
+   node gave up, reports `false` with the `reason`.
 
 While a membership change is being decided, the contract pauses other transactions; they are
 processed right after. To leave:
@@ -518,8 +534,8 @@ contract does not pause for your join.
 C=$(ibc deploy Chat '{"initialTopic": "lunch"}')
 
 # bob, on node 2
-ibc guest "$C" http://node1:2611 0x86D637BcBc56F0Dba2b0B5398B4446b5e5330851
-# joined 0x7bf7…
+ibc guest "$C" http://node1:2611 0x86D637BcBc56F0Dba2b0B5398B4446b5e5330851 examples/contracts/Chat.sol
+# joined 0x7bf7… (its source compiles to its code)
 ibc write "$C" post '{"text": "hi from bob"}'
 # 0
 ibc read "$C" count                # read on alice's node, as bob
@@ -596,10 +612,13 @@ NODE_KEY=$(curl -s "$IBC/ibc/app?action=node_info" | jq -r .nodeKey)
 ./ibc sign registration -key $KEY -node $IBC -node-key $NODE_KEY |
   curl -s -X PUT "$IBC/ibc/app/$ME?action=register_agent" -H 'Content-Type: application/json' -d @-
 
-# Deploy: a deploy transaction. The reply is the new contract's id.
-BODY=$(jq -cn --arg node $IBC --arg nodeKey $NODE_KEY \
-  --arg code "$(cat examples/build/Counter.bin)" --slurpfile abi examples/build/Counter.abi \
-  '{name: "my-counter", code: $code, abi: $abi[0], constructor: {start: 10}, node: $node, nodeKey: $nodeKey}')
+# Deploy: the node compiles the source; a deploy transaction carries the source and the compiler.
+# The reply is the new contract's id.
+COMPILED=$(jq -cn --rawfile src examples/contracts/Counter.sol '{source: $src}' |
+  curl -s -X POST "$IBC/ibc/app?action=compile" -H 'Content-Type: application/json' -d @-)
+BODY=$(jq -cn --arg node $IBC --arg nodeKey $NODE_KEY --rawfile src examples/contracts/Counter.sol --argjson c "$COMPILED" \
+  '{name: "my-counter", code: $c.code, abi: $c.abi, constructor: {start: 10}, node: $node, nodeKey: $nodeKey,
+    source: $src, compiler: $c.compiler}')
 CONTRACT=$(./ibc sign tx -key $KEY -kind deploy -body "$BODY" |
   curl -s -X PUT "$IBC/ibc/app/$ME?action=deploy_contract" -H 'Content-Type: application/json' -d @- | jq -r .)
 
@@ -634,6 +653,10 @@ keep-alives.
 | `{"message": "this node has no Solidity compiler (see -solc)"}` | Start the node with `-solc` pointing at `solc` or `solcjs` |
 | `{"message": "unknown agent \"0x…\""}` | Register first |
 | `{"message": "consensus: unknown contract 0x…"}` | You are not a partner of this contract on this node: check the id, or join it first |
+| `join_contract` with `"reason": "the members refused the join"` | The contract's `approve_partner` (or `approve_guest`) said no, or the source you joined with is not the contract's: check it is the exact file the contract was deployed from |
+| `join_contract` with `"source_check": "mismatch"` | The contract's source does not compile to its code: your node did not join it |
+| `join_contract` with `"source_check": "unchecked"` | You joined, but your node could not get the compiler the contract was compiled with (it downloads solc-js, which needs Node.js and internet access): the contract is marked "source not checked" |
+| `{"message": "deploy body needs the source and the compiler that compiled it"}` | Deploys carry their source: compile it on the node (`compile`) and send its `source` and `compiler` |
 | `{"message": "no such contract"}` | A read of a contract you do not have, or whose deployment has not finished |
 | `{"message": "no host answered: …"}` | You are a guest, and none of the contract's hosts' nodes answered |
 | `{"message": "agent 0x… has no public contract 0x…"}` | A public read of a copy its agent has not made public (or a wrong agent or contract id) |

@@ -68,7 +68,7 @@ export declare const TYPES: {
         readonly name: "nodeKey";
         readonly type: "address";
     }, {
-        readonly name: "codeHash";
+        readonly name: "sourceHash";
         readonly type: "bytes32";
     }, {
         readonly name: "functions";
@@ -87,7 +87,7 @@ export declare const TYPES: {
         readonly name: "appKey";
         readonly type: "bytes";
     }, {
-        readonly name: "codeHash";
+        readonly name: "sourceHash";
         readonly type: "bytes32";
     }, {
         readonly name: "read";
@@ -162,7 +162,7 @@ export interface Query {
 export interface Grant {
     agent: Address;
     nodeKey: Address;
-    codeHash: Hex;
+    sourceHash: Hex;
     functions: string[];
     nonce: string;
 }
@@ -170,7 +170,7 @@ export interface Consent {
     agent: Address;
     app: string;
     appKey: Hex;
-    codeHash: Hex;
+    sourceHash: Hex;
     read: boolean;
     functions: string[];
     nonce: string;
@@ -241,6 +241,11 @@ export declare const ZERO_ADDRESS: Address;
 export declare function toHex(bytes: Uint8Array): Hex;
 export declare function fromHex(hex: Hex): Uint8Array;
 export declare const keccak256: (bytes: Uint8Array) => Uint8Array;
+/**
+ * A contract source's hash, as joins, grants and consents name it: the
+ * keccak256 of the Solidity source text, byte for byte (as UTF-8).
+ */
+export declare const sourceHashOf: (source: string) => Hex;
 /** A random nonce, as hex without 0x. */
 export declare function nonce(): string;
 /** The time in unix seconds, for queries. */
@@ -290,8 +295,8 @@ export declare function sign<T extends MessageType>(signer: Signer, type: T, mes
  * order. With a passkey, the user approves once.
  */
 export declare function signBatch(signer: Signer, items: Item[]): Promise<Envelope[]>;
-/** A grant, certified by the root: lets the agent's node sign these functions of this code silently. */
-export declare function certifyGrant(root: Signer, { agent, nodeKey, codeHash, functions }: Omit<Grant, 'nonce'>): Promise<{
+/** A grant, certified by the root: lets the agent's node sign these functions of this source's contracts silently. */
+export declare function certifyGrant(root: Signer, { agent, nodeKey, sourceHash, functions }: Omit<Grant, 'nonce'>): Promise<{
     grant: Grant;
     signature: Envelope;
 }>;

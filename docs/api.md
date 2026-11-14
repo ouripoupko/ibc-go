@@ -135,7 +135,7 @@ const types = {
   Grant: [                                     // lets the agent's node sign calls silently
     { name: 'agent',      type: 'address' },
     { name: 'nodeKey',    type: 'address' },  // the node that may sign
-    { name: 'codeHash',   type: 'bytes32' },  // keccak256 of the contract's creation code
+    { name: 'sourceHash', type: 'bytes32' },  // keccak256 of the contract's Solidity source
     { name: 'functions',  type: 'string[]' }, // the functions it may call
     { name: 'nonce',      type: 'string' },
   ],
@@ -149,7 +149,7 @@ const types = {
     { name: 'agent',      type: 'address' },
     { name: 'app',        type: 'string' },   // the app's origin, e.g. https://wishes.example.com
     { name: 'appKey',     type: 'bytes' },    // the app's P-256 public key, uncompressed
-    { name: 'codeHash',   type: 'bytes32' },  // the contract code; zero: every contract (read only)
+    { name: 'sourceHash', type: 'bytes32' },  // the contract's source; zero: every contract (read only)
     { name: 'read',       type: 'bool' },     // may read without asking
     { name: 'functions',  type: 'string[]' }, // may have the node call these without asking
     { name: 'nonce',      type: 'string' },
@@ -191,9 +191,9 @@ A signature is sent as an envelope that carries everything needed to check it:
 
 A transaction is accepted if the agent's root key signed it, or if the agent's node signed it under
 a grant the root signed, for a `call` to a function the grant names. Execution then also checks the
-grant's `codeHash` against the contract's code, and its `nodeKey` against the agent's node in this
-contract; otherwise the call is recorded with the result `"the node's grant does not apply: it is for
-other code"` (or `for another node`) and changes nothing. Errors include: `signature does not match
+grant's `sourceHash` against the hash of the contract's source, and its `nodeKey` against the agent's
+node in this contract; otherwise the call is recorded with the result `"the node's grant does not
+apply: it is for another source"` (or `for another node`) and changes nothing. Errors include: `signature does not match
 the agent`; `the grant does not let the node call setTopic: it needs the root key`; `a node signs only
 calls: this transaction needs the root key`; `grant: not signed by the agent's root key`; `signature:
 not by the node the grant names`; `webauthn: the user did not approve`; `webauthn: the signature is
@@ -212,7 +212,11 @@ A signed transaction is sent as:
 ```
 
 The **transaction id** is the EIP-712 digest of the transaction, whoever signs it. A deploy's id is
-the new contract's id. The bodies, by kind:
+the new contract's id.
+
+A contract's **source hash** is the keccak256 of its Solidity source text, byte for byte (as UTF-8):
+joins, grants and consents name contracts by it (`identity.SourceHash`, `sourceHashOf` in the
+client, `ibc source-hash FILE`). The bodies, by kind:
 
 | Kind | Body |
 |---|---|
@@ -353,7 +357,7 @@ interface uses the credential form to sign in on a new device.
 ## Apps
 
 An app on another site acts for an agent through the agent's node, with a key of its own. The agent
-decides, per contract code, what the app may do without asking: read, and have the node call some
+decides, per contract source, what the app may do without asking: read, and have the node call some
 functions. The [approval page](keys.md#8-the-approval-page) does this with the agent's root key;
 these are the calls behind it.
 
@@ -367,9 +371,9 @@ browsers.
 PUT /ibc/app/<agent>?action=register_app
 {
   "consent": {"consent": {"agent": "0x86D6…", "app": "https://wishes.example.com", "appKey": "0x04…",
-                          "codeHash": "0x…", "read": true, "functions": ["post"], "nonce": "…"},
+                          "sourceHash": "0x…", "read": true, "functions": ["post"], "nonce": "…"},
               "signature": <the root key's envelope>},
-  "grant":   {"grant": {"agent": "0x86D6…", "nodeKey": "<this node's key>", "codeHash": "0x…",
+  "grant":   {"grant": {"agent": "0x86D6…", "nodeKey": "<this node's key>", "sourceHash": "0x…",
                         "functions": ["post"], "nonce": "…"},
               "signature": <the root key's envelope>}
 }
@@ -377,7 +381,7 @@ PUT /ibc/app/<agent>?action=register_app
 
 - The root key signs both. `grant` is needed when `functions` is not empty, and must name the same
   agent, code and functions, and this node's key.
-- A consent replaces the app's permission for that code. A `codeHash` of zero means every contract,
+- A consent replaces the app's permission for that source. A `sourceHash` of zero means every contract,
   and may only allow reading: the node's own page uses it.
 - A consent also connects its `appKey` as one of the app's browsers.
 - To connect a browser without changing permissions, send a device instead:
@@ -397,7 +401,7 @@ https://…`.
 GET /ibc/app/<agent>?action=get_apps&auth=<signed query>
 ```
 
-The agent's connected apps: `[{"agent", "app", "keys": ["0x04…"], "permissions": {"<codeHash>":
+The agent's connected apps: `[{"agent", "app", "keys": ["0x04…"], "permissions": {"<sourceHash>":
 {"read", "functions", "grant"}}}]`. Signed by the root key, or by the node's own page's key.
 
 ### `revoke_app`
@@ -425,10 +429,15 @@ POST /ibc/app?action=compile
 
 `contract` names the contract to compile when the source has several; it may be omitted otherwise.
 
-**Reply:** `{"contract": "Chat", "code": "6080…", "abi": [...], "codeHash": "0x…", "compiler":
-{"version": "0.8.38+commit.1835d247", "settings": {"optimizer": {"enabled": true, "runs": 200}}}}`.
-**Errors:** `this node has no Solidity compiler (see -solc)`; `the source does not compile: …`; `the
-source has 2 contracts (A, B): say which one`.
+**Reply:** `{"contract": "Chat", "code": "6080…", "abi": [...], "sourceHash": "0x…", "compiler":
+{"version": "0.8.38+commit.1835d247.Emscripten.clang", "settings": {"optimizer": {"enabled": true, "runs": 200}}}}`.
+**Errors:** `solc 0.8.38: …` (the node could not get its compiler); `the source does not compile:
+…`; `the source has 2 contracts (A, B): say which one`.
+
+The node compiles with the Solidity version this release of ibc pins (0.8.38): with the `-solc`
+compiler if it is that version, or else with the solc-js build of it, which the node downloads from
+soliditylang.org into its data directory the first time, checks against the release list's hash,
+and runs with Node.js.
 
 ### `deploy_contract`
 
@@ -444,13 +453,13 @@ The body:
 
 | Field | Required | Meaning |
 |---|---|---|
-| `code` | yes | The contract's bytecode, as hex, with or without `0x`: from [compile](#compile), or `.bin` |
+| `code` | yes | The contract's bytecode, as hex, with or without `0x`: from [compile](#compile) |
 | `abi` | yes | The contract's ABI (`.abi`), as a JSON array |
 | `constructor` | if the constructor has parameters | The constructor's arguments, as [values](#values) |
 | `node` | yes | This node's URL |
 | `nodeKey` | yes | This node's key, from `node_info` |
 | `protocol` | no | The consensus protocol: `cordial` (the default; `BFT` means the same) or `immediate`, which orders the creator's own transactions locally, with no partners, for testing |
-| `source`, `compiler` | no | The Solidity source and how the node compiled `code` from it (the `compiler` of [compile](#compile)). Kept with the contract, so members can read and check the code |
+| `source`, `compiler` | yes | The Solidity source and how the node compiled `code` from it (the `compiler` of [compile](#compile)). Joins name the source's hash, and a joiner's node compiles the source again with that compiler and compares |
 | `name`, `contract`, `default_app`, `profile` | no | Labels kept with the contract and returned by `get_contract` |
 
 **Reply:** the transaction id, which is the new contract's id. Use it as `<contract>` in every later
@@ -463,7 +472,8 @@ contract was deployed, or the error as a string, for example
 later call to it is answered with `"contract deployment failed: <reason>"`.
 
 **Errors:** `unknown agent "0x…"` (register first); `deploy names node key 0x…, this node's key is
-0x…`; `consensus: unknown protocol "…"`.
+0x…`; `consensus: unknown protocol "…"`; `deploy body needs the source and the compiler that compiled
+it`.
 
 ### `get_contracts`
 
@@ -634,25 +644,50 @@ transactions (see [consensus design](consensus.md#10-membership-changes)). A con
 ### `join_contract`
 
 Asks a partner of a contract to let the agent join. Send it to **your own** node, which passes the
-signed join to the partner's node.
+signed join to the partner's node. The join names the hash of the contract's source, as the agent
+read it.
 
 ```
 PUT /ibc/app/<agent>?action=join_contract
 {
   "tx": {"contract": "<contract>", "kind": "join", "agent": "<agent>", "nonce": "…",
-         "body": "{\"node\":\"<your node's URL>\",\"nodeKey\":\"<your node's key>\",\"profile\":\"\"}"},
+         "body": "{\"node\":\"<your node's URL>\",\"nodeKey\":\"<your node's key>\",\"profile\":\"\",\"sourceHash\":\"0x…\"}"},
   "signature": "0x…",
-  "partner": {"address": "<the partner's node URL>", "agent": "<the partner's agent id>"}
+  "partner": {"address": "<the partner's node URL>", "agent": "<the partner's agent id>"},
+  "publish": {"publish": {…}, "signature": <the root key's envelope>}
 }
 ```
 
+`publish` is optional: a signed [`Publish`](#set_public) for this contract, which the node applies
+once it holds the agent's copy.
+
 **Reply:** the transaction id, or `null` if the agent already has the contract on this node.
 
-**Event:** `join_contract` on the joining agent's stream, with `request` set to the transaction id.
-`reply` is `true` once this node holds the contract and takes part in it, or `false` if the
-contract refused. The decision is the contract's `approve_partner(address)` function, called as the
-joining agent; a contract without it accepts everyone. The partners' own streams see a `join`
-event with the decision.
+**What happens** ([consensus design](consensus.md#10-membership-changes)):
+
+1. The partners order the join. They refuse it if its `sourceHash` is not the hash of the contract's
+   source; otherwise the contract's `approve_partner(address)` function decides, called as the
+   joining agent (a contract without it accepts everyone). The partners' own streams see a `join`
+   event with the decision.
+2. Each partner's node welcomes the joining node with where the join left the contract: its ledger
+   index, the state root after it, and the hash of the record ids up to it. Once members who
+   include at least one correct one agree (f+1 of them), the joining node fetches the history from
+   the partner the join went to, or, if that history does not check, from another member. A
+   history checks if its first record is the deploy whose id is the contract id, every record is
+   signed by its agent, its record ids are the members', and it replays to their state root.
+3. The joining node compiles the deploy's source with the deploy's compiler and compares the
+   result with the deployed code. On a mismatch it does not join.
+
+**Event:** `join_contract` on the joining agent's stream, with `request` set to the transaction id:
+
+| Field | |
+|---|---|
+| `reply` | `true` once this node holds the contract and takes part in it; `false` if the partners refused, or this node did not join |
+| `source_check` | `verified` (the source compiles to the code), `unchecked` (this node could not compile it, for example could not download that compiler; it joined), or `mismatch` (it did not join) |
+| `reason` | Why the source was not checked, or why the node did not join: `the members refused the join`, `the source, compiled with solc 0.8.38+commit…, is not the deployed code`, `no member sent a history that the members' state confirms` |
+| `source_hash` | The source hash the join named |
+
+The [contract summary](#contract-summary) keeps `source_check` (and `source_check_reason`).
 
 **Errors:** `join_contract needs partner.address and partner.agent`; the partner's node's errors,
 for example `consensus: unknown contract 0x…`.
@@ -663,8 +698,11 @@ To join as a **guest**, add `"guest": true` and `"host": "<the partner's agent i
 body; the host must be the partner the join is sent to:
 
 ```
-"body": "{\"node\":\"<your node's URL>\",\"nodeKey\":\"<your node's key>\",\"profile\":\"\",\"guest\":true,\"host\":\"<the partner's agent id>\"}"
+"body": "{\"node\":\"<your node's URL>\",\"nodeKey\":\"<your node's key>\",\"profile\":\"\",\"sourceHash\":\"0x…\",\"guest\":true,\"host\":\"<the partner's agent id>\"}"
 ```
+
+The join names the source the same way, and the guest's node checks the deploy the host sends (its
+id, and its source against its code) before it keeps it. A guest has no copy, so takes no `publish`.
 
 A guest takes no part in consensus, and its node keeps no copy of the contract (see
 [consensus design](consensus.md#11-guests)). The contract decides with its `approve_guest(address)`
@@ -794,10 +832,10 @@ PUT /ibc/app/<agent>/<contract>?action=a2a_consent
 | `get_from` | `depth`: a round | `{"blocks": [...]}`: the blocks from that round on |
 | `get_ledger` | none | `{"records": [...]}`: every [record](#record) of the contract, in order. A newcomer's node replays them to build the contract's state |
 | `tx` | `tx`: a signed transaction to put in the miner's mempool (a relayed join, for example) | the transaction id |
-| `welcome` | `config`: the contract's new configuration; `sender`: the welcoming member | `null`; the node then fetches the ledger from the sender (`get_ledger`) and joins |
+| `welcome` | `config`: the contract's new configuration; `sender`: the welcoming member; `index`, `stateRoot`, `history`: the ledger index of the change, the state root after it, and the keccak256 of the record ids up to it | `null`; once f+1 members agree, the node fetches the ledger (`get_ledger`), checks it, and joins (see [`join_contract`](#join_contract)) |
 | `join_result` | `txId`, `approved: false`: a refused join | `null` |
 | `read` | `guest`, `method`, `values`: a guest's read, sent to a host by the guest's node | `{"value": …}`, or `{"error": "…"}` for the contract's error |
-| `guest_welcome` | `config`: the members (the hosts); `sender`; `record`: the contract's deploy record; `txId`: the guest's join | `null`; the guest's node adds the contract, as a guest |
+| `guest_welcome` | `config`: the members (the hosts); `sender`; `record`: the contract's deploy record; `txId`: the guest's join | `null`; the guest's node checks the deploy and its source, and adds the contract, as a guest |
 | `event` | `reply`: an [event](#event) of the contract; `config`: the current members | `null`; the guest's node passes the event to the guest's stream |
 
 ## Objects
@@ -812,6 +850,7 @@ PUT /ibc/app/<agent>/<contract>?action=a2a_consent
 | `reply` | The outcome: the function's result for `contract_write`, `true`/`false` for the others, or an error string |
 | `state_root` | The contract's state root after the transaction, as a hex hash. All zeros if the contract was never deployed |
 | `agent` | The subscribed agent the event belongs to |
+| `source_check`, `reason`, `source_hash` | `join_contract` only: see [`join_contract`](#join_contract) |
 
 The state root summarizes the contract's entire state. Partners that processed the same
 transactions have the same state root.
@@ -831,6 +870,7 @@ Returned by `get_contracts` and `get_contract`. Fields are present only when the
 | `role` | `partner`, or `guest`: the agent is a [guest](#guests), and this node has no copy of the contract (no state fields) |
 | `hosts` | For a guest: the contract's members, `[{agent, nodeKey, node}]`, to whom its node sends its transactions and reads |
 | `public` | Whether the agent lets anyone read its copy ([public contracts](#public-contracts)) |
+| `source_check`, `source_check_reason` | For a contract the agent joined: this node's check of the source against the code, `verified` or `unchecked` (with the reason), see [`join_contract`](#join_contract) |
 | `evm_address` | The contract's address in its own EVM state |
 | `state_root` | The state root after the last successful transaction |
 | `block_number` | How many transactions the contract has processed |

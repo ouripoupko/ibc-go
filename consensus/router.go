@@ -33,6 +33,9 @@ type RouterConfig struct {
 	Execution Execution
 	Publisher Publisher
 	Params    cordial.Params // zero for cordial.DefaultParams
+	// CheckSource checks a joined contract's source against its code; nil:
+	// the node does not check, and joins with compiler.Unchecked.
+	CheckSource CheckSource
 }
 
 // Router is the node's Protocol: it runs each contract's chosen protocol.
@@ -46,7 +49,10 @@ type Router struct {
 	miners  map[minerKey]*minerEntry
 	syncing map[minerKey]bool
 	early   map[minerKey][]*cordial.Block // blocks that arrived while syncing
-	closed  bool
+	// The welcomes of a node joining a contract, by member, until enough
+	// agree to sync (join.go).
+	welcomes map[minerKey]map[ethcommon.Address]welcomeNote
+	closed   bool
 }
 
 type minerKey struct {
@@ -74,6 +80,8 @@ func NewRouter(cfg RouterConfig) *Router {
 		miners:  map[minerKey]*minerEntry{},
 		syncing: map[minerKey]bool{},
 		early:   map[minerKey][]*cordial.Block{},
+
+		welcomes: map[minerKey]map[ethcommon.Address]welcomeNote{},
 	}
 }
 
@@ -260,7 +268,8 @@ func (r *Router) deploy(agent ethcommon.Address, stx identity.SignedTx, id ethco
 }
 
 // RelayJoin sends agent's join transaction to a member's node.
-func (r *Router) RelayJoin(ctx context.Context, agent string, stx identity.SignedTx, memberNode, memberAgent string) (string, error) {
+func (r *Router) RelayJoin(ctx context.Context, agent string, stx identity.SignedTx, memberNode, memberAgent string,
+	publish *identity.SignedPublish) (string, error) {
 	id, err := stx.Verify()
 	if err != nil {
 		return "", err
@@ -276,14 +285,16 @@ func (r *Router) RelayJoin(ctx context.Context, agent string, stx identity.Signe
 		return "", err
 	}
 	jb := parsed.(*identity.JoinBody)
-	if jb.Guest {
-		if jb.Host != ethcommon.HexToAddress(memberAgent) {
-			return "", errors.New("a guest's join names as its host the member it is sent to")
-		}
-		// Wait for the host's welcome.
-		if err := r.savePending(stx.Tx.Agent, stx.Tx.Contract, pendingJoin{TxID: id.Hex(), Host: jb.Host}); err != nil {
-			return "", err
-		}
+	if jb.Guest && jb.Host != ethcommon.HexToAddress(memberAgent) {
+		return "", errors.New("a guest's join names as its host the member it is sent to")
+	}
+	if publish != nil && jb.Guest {
+		return "", errors.New("a guest keeps no copy of the contract to make public")
+	}
+	// Wait for the members' welcome; then make the copy public, if the agent asked.
+	if err := r.savePending(stx.Tx.Agent, stx.Tx.Contract, pendingJoin{TxID: id.Hex(), Host: jb.Host,
+		Member: ethcommon.HexToAddress(memberAgent), SourceHash: jb.SourceHash, Publish: publish}); err != nil {
+		return "", err
 	}
 	body, err := r.cfg.Sender.Send(ctx, request(memberNode, ethcommon.HexToAddress(memberAgent), stx.Tx.Contract,
 		map[string]any{"type": "tx", "tx": stx}))
@@ -293,9 +304,7 @@ func (r *Router) RelayJoin(ctx context.Context, agent string, stx identity.Signe
 		}
 	}
 	if err != nil {
-		if jb.Guest {
-			_ = r.deletePending(stx.Tx.Agent, stx.Tx.Contract)
-		}
+		_ = r.deletePending(stx.Tx.Agent, stx.Tx.Contract)
 		return "", err
 	}
 	return id.Hex(), nil
@@ -323,6 +332,10 @@ type wireMessage struct {
 	Depth    uint64             `json:"depth,omitempty"`
 	TxID     string             `json:"txId,omitempty"`
 	Approved bool               `json:"approved,omitempty"`
+	// A welcome's point: the ledger index of the change, and the state root after it.
+	Index     uint64 `json:"index,omitempty"`
+	StateRoot string `json:"stateRoot,omitempty"`
+	History   string `json:"history,omitempty"` // the hash of the record ids up to it
 	// A guest's read, the deploy record in a guest's welcome, and a reply
 	// a host sends to a guest's node.
 	Guest  *ethcommon.Address `json:"guest,omitempty"`
@@ -376,7 +389,7 @@ func (r *Router) Receive(ctx context.Context, agent, contract string, body []byt
 		key := minerKey{addr, contract}
 		r.mu.Lock()
 		e := r.miners[key]
-		if r.syncing[key] && (e == nil || !e.miner.Active()) {
+		if (r.syncing[key] || r.welcomes[key] != nil) && (e == nil || !e.miner.Active()) {
 			// Members may send blocks of the new configuration before the
 			// sync finishes; keep them for the miner.
 			r.early[key] = append(r.early[key], blocks...)
@@ -443,11 +456,13 @@ func (r *Router) Receive(ctx context.Context, agent, contract string, body []byt
 	case "event":
 		return nil, r.guestEvent(addr, contract, from, msg)
 	case "join_result":
-		if !msg.Approved {
-			_ = r.deletePending(addr, contract)
+		p, err := r.pending(addr, contract)
+		if err != nil || p == nil || p.TxID != msg.TxID || msg.Approved {
+			return nil, err // not a join this node is waiting for; an approval comes as a welcome
 		}
+		_ = r.deletePending(addr, contract)
 		r.cfg.Publisher.Publish(agent, execution.Reply{Request: msg.TxID, Contract: &contract,
-			Action: "join_contract", Reply: msg.Approved})
+			Action: "join_contract", Reply: false, Reason: "the members refused the join", SourceHash: p.sourceHash()})
 		return nil, nil
 	}
 	return nil, fmt.Errorf("unknown a2a_consent message %q", msg.Type)
@@ -466,107 +481,6 @@ func (r *Router) memberNode(agent ethcommon.Address, contract string, key ethcom
 		}
 	}
 	return false
-}
-
-// welcome makes this node a member's node: it syncs the contract's ledger
-// from the sender and starts the agent's miner.
-func (r *Router) welcome(agent ethcommon.Address, contract string, msg wireMessage) error {
-	if msg.Config == nil || msg.Sender == nil {
-		return errors.New("welcome without a configuration")
-	}
-	cfg := msg.Config
-	mb, ok := cfg.Member(agent)
-	if !ok || mb.NodeKey != r.nodeKey {
-		return errors.New("welcome for a member this node does not serve")
-	}
-	if exists, err := r.cfg.Execution.AgentExists(agent.Hex()); err != nil || !exists {
-		return fmt.Errorf("agent %s is not registered here", agent.Hex())
-	}
-	key := minerKey{agent, contract}
-	r.mu.Lock()
-	if e, ok := r.miners[key]; (ok && e.miner.Active()) || r.syncing[key] {
-		r.mu.Unlock()
-		return nil
-	}
-	r.syncing[key] = true
-	r.mu.Unlock()
-	go func() {
-		defer func() {
-			r.mu.Lock()
-			delete(r.syncing, key)
-			r.mu.Unlock()
-		}()
-		if err := r.sync(agent, contract, cfg, *msg.Sender); err != nil {
-			slog.Error("sync from a member failed", "contract", contract, "agent", agent.Hex(), "err", err)
-		}
-		r.mu.Lock()
-		early := r.early[key]
-		delete(r.early, key)
-		e := r.miners[key]
-		r.mu.Unlock()
-		if e != nil && len(early) > 0 {
-			_ = e.miner.ReceiveBlocks(ethcommon.Address{}, early)
-		}
-	}()
-	return nil
-}
-
-// sync fetches the ledger from a member, executes it, and starts the miner.
-func (r *Router) sync(agent ethcommon.Address, contract string, cfg *cordial.Config, sender cordial.Member) error {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-	body, err := r.cfg.Sender.Send(ctx, request(sender.Node, sender.Agent, contract, map[string]any{"type": "get_ledger"}))
-	if err != nil {
-		return err
-	}
-	var reply struct {
-		Records []json.RawMessage `json:"records"`
-	}
-	if err := json.Unmarshal(body, &reply); err != nil {
-		return fmt.Errorf("ledger reply: %w", err)
-	}
-	var ids []ethcommon.Hash
-	var joinID string
-	for i, raw := range reply.Records {
-		rec, err := execution.DecodeRecord(raw)
-		if err != nil {
-			return err
-		}
-		if rec.Tx == nil {
-			return fmt.Errorf("ledger record %d has no transaction", i+1)
-		}
-		id, err := rec.Tx.Verify()
-		if err != nil || id.Hex() != rec.HashCode {
-			return fmt.Errorf("ledger record %d: bad signature", i+1)
-		}
-		rec.Index = uint64(i + 1)
-		if err := r.cfg.Execution.Submit(agent.Hex(), rec); err != nil {
-			return err
-		}
-		ids = append(ids, id)
-		if rec.Tx.Tx.Kind == identity.KindJoin && rec.Tx.Tx.Agent == agent {
-			joinID = rec.HashCode
-		}
-	}
-	key := minerKey{agent, contract}
-	r.mu.Lock()
-	old := r.miners[key]
-	r.mu.Unlock()
-	if old != nil {
-		old.outbox.Close()
-	}
-	e, err := r.newEntry(agent, contract, func(mc cordial.MinerConfig) (*cordial.Miner, error) {
-		return cordial.NewMiner(mc, cfg, ids, uint64(len(ids))+1)
-	})
-	if err != nil {
-		return err
-	}
-	slog.Info("joined contract", "contract", contract, "agent", agent.Hex(), "records", len(ids))
-	if joinID != "" {
-		r.cfg.Publisher.Publish(agent.Hex(), execution.Reply{Request: joinID, Contract: &contract,
-			Action: "join_contract", Reply: true})
-	}
-	return e.miner.Start()
 }
 
 // Decided passes execution's decision to the miner, and tells a rejected
@@ -696,8 +610,7 @@ func (n *httpNetwork) pull(from cordial.Member, contract string, msg map[string]
 }
 
 func (n *httpNetwork) Welcome(to cordial.Member, contract string, cfg *cordial.Config, sender cordial.Member) {
-	_ = n.outbox.Put(request(to.Node, to.Agent, contract,
-		map[string]any{"type": "welcome", "config": cfg, "sender": sender}))
+	go n.welcomeNew(to, contract, cfg, sender) // the miner holds its lock
 }
 
 // minerExecution is a miner's Executor: transactions become records for the navigator.

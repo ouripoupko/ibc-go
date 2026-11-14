@@ -78,30 +78,30 @@ program, `ibc`.
 
 ### 3. A Solidity compiler
 
-The node compiles contracts from their source, so it needs a Solidity compiler. Either:
+The node compiles contracts from their source, with the Solidity version this release pins
+(0.8.38); when you join a contract, it also compiles that contract's source with the version it was
+compiled with, and compares. It needs **Node.js**: it downloads solc-js of the version it needs into
+its data directory the first time, and runs it with Node.js. Nothing else to install.
 
-- **solc-js, through Node.js** (if you have Node.js): nothing to install; the node fetches it the
-  first time it compiles. Add `-solc "npx -y -p solc@0.8.38 solcjs"` when you run the node (step 4).
-- **The native `solc`** (faster): download `solc-static-linux` from the
-  [Solidity releases](https://github.com/ethereum/solidity/releases) (version 0.8.38), save it as
-  `solc` in a directory on your `PATH`, and make it executable (`chmod +x`). The node finds it
-  without any option.
+Optionally, the native `solc` is faster, and the node uses it if it is the pinned version: download
+`solc-static-linux` from the [Solidity releases](https://github.com/ethereum/solidity/releases)
+(version 0.8.38), save it as `solc` in a directory on your `PATH`, and make it executable
+(`chmod +x`). The node finds it without any option.
 
-Without a compiler the node runs, but answers `this node has no Solidity compiler` when you deploy.
+Without Node.js (and without solc), the node runs, but cannot compile, and joins contracts with the
+warning "source not checked".
 
 ### 4. Run
 
 ```sh
 ./ibc -addr 127.0.0.1:2611 -data ~/ibc-data
-# or, with solc-js:
-./ibc -addr 127.0.0.1:2611 -data ~/ibc-data -solc "npx -y -p solc@0.8.38 solcjs"
 ```
 
 The node is now serving at `http://localhost:2611`. Check it from another terminal:
 
 ```sh
 curl 'http://localhost:2611/ibc/app?action=node_info'
-# {"nodeKey":"0x57E3339B18e36035656375139A5e66B19dc7D60d"}
+# {"apiVersion":1,"nodeKey":"0x57E3339B18e36035656375139A5e66B19dc7D60d","storage":…}
 ```
 
 The reply is the address of the node's key, which the node uses to sign its consensus blocks.
@@ -124,7 +124,7 @@ stays in the data directory, and the node picks up from there when you start it 
 |---|---|---|---|
 | `-addr` | `IBC_ADDR` | `:2611` | Address and port the node listens on |
 | `-data` | `IBC_DATA` | `data` | Directory of the node's database and key |
-| `-solc` | `IBC_SOLC` | `solc` | The Solidity compiler the node runs to compile apps' source: `solc`, or solc-js, for example `"npx -y -p solc@0.8.38 solcjs"` (needs Node.js). Without one, the node cannot compile |
+| `-solc` | `IBC_SOLC` | `solc` | A Solidity compiler command (`solc`, or `solcjs`), which the node uses if it is the pinned version (0.8.38). Otherwise the node downloads solc-js into `-data` and runs it with Node.js |
 
 Some things to know about them:
 

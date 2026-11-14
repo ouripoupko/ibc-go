@@ -48,6 +48,8 @@ func TestTransactionChecks(t *testing.T) {
 		"call without contract": {Kind: KindCall, Agent: agent, Body: `{"method":"m"}`},
 		"call without method":   {Kind: KindCall, Contract: "c", Agent: agent, Body: `{}`},
 		"join without key":      {Kind: KindJoin, Contract: "c", Agent: agent, Body: `{"node":"u"}`},
+		"join without source":   {Kind: KindJoin, Contract: "c", Agent: agent, Body: `{"node":"u","nodeKey":"0x0000000000000000000000000000000000000001"}`},
+		"deploy without source": {Kind: KindDeploy, Agent: agent, Body: `{"code":"60","abi":[],"node":"u","nodeKey":"0x0000000000000000000000000000000000000001"}`},
 		"bad JSON":              {Kind: KindCall, Contract: "c", Agent: agent, Body: `{`},
 	}
 	for name, tx := range cases {
@@ -87,7 +89,7 @@ func TestRegistration(t *testing.T) {
 		t.Fatalf("tampered registration: %v", err)
 	}
 	// Only the root key registers: not the node, even under a grant.
-	cert, _ := CertifyGrant(Grant{Agent: reg.Agent, NodeKey: Address(node), CodeHash: ethcommon.HexToHash("0x01"),
+	cert, _ := CertifyGrant(Grant{Agent: reg.Agent, NodeKey: Address(node), SourceHash: ethcommon.HexToHash("0x01"),
 		Functions: []string{"m"}, Nonce: "n"}, Secp256k1Signer{Key: key})
 	byNode, _ := SignRegistration(reg, Secp256k1Signer{Key: node, Cert: cert})
 	if _, _, err := byNode.Verify(); err == nil || !strings.Contains(err.Error(), "signed by the root key") {

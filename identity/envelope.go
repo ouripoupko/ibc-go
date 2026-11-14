@@ -54,14 +54,14 @@ type Envelope struct {
 }
 
 // Grant lets the agent's node sign calls for the agent, silently: calls to
-// the given functions of contracts made from the given code. The agent's
+// the given functions of contracts made from the given source. The agent's
 // root key signs it; partners check every node-signed call against it.
 type Grant struct {
-	Agent     ethcommon.Address `json:"agent"`
-	NodeKey   ethcommon.Address `json:"nodeKey"`   // the node that may sign
-	CodeHash  ethcommon.Hash    `json:"codeHash"`  // keccak256 of the contract's creation code
-	Functions []string          `json:"functions"` // the functions it may call
-	Nonce     string            `json:"nonce"`
+	Agent      ethcommon.Address `json:"agent"`
+	NodeKey    ethcommon.Address `json:"nodeKey"`    // the node that may sign
+	SourceHash ethcommon.Hash    `json:"sourceHash"` // SourceHash of the contract's Solidity source
+	Functions  []string          `json:"functions"`  // the functions it may call
+	Nonce      string            `json:"nonce"`
 }
 
 // Certificate is a grant with the root key's signature.
@@ -170,8 +170,8 @@ func VerifyGrant(c *Certificate) error {
 }
 
 func (g Grant) check() error {
-	if g.Agent == (ethcommon.Address{}) || g.NodeKey == (ethcommon.Address{}) || g.CodeHash == (ethcommon.Hash{}) {
-		return errors.New("a grant names an agent, a node and a code hash")
+	if g.Agent == (ethcommon.Address{}) || g.NodeKey == (ethcommon.Address{}) || g.SourceHash == (ethcommon.Hash{}) {
+		return errors.New("a grant names an agent, a node and a source hash")
 	}
 	if len(g.Functions) == 0 {
 		return errors.New("a grant names at least one function")
@@ -304,7 +304,7 @@ func (g Grant) TypedData() apitypes.TypedData {
 			"Grant": {
 				{Name: "agent", Type: "address"},
 				{Name: "nodeKey", Type: "address"},
-				{Name: "codeHash", Type: "bytes32"},
+				{Name: "sourceHash", Type: "bytes32"},
 				{Name: "functions", Type: "string[]"},
 				{Name: "nonce", Type: "string"},
 			},
@@ -312,11 +312,11 @@ func (g Grant) TypedData() apitypes.TypedData {
 		PrimaryType: "Grant",
 		Domain:      domain(),
 		Message: apitypes.TypedDataMessage{
-			"agent":     g.Agent.Hex(),
-			"nodeKey":   g.NodeKey.Hex(),
-			"codeHash":  g.CodeHash.Hex(),
-			"functions": stringList(g.Functions),
-			"nonce":     g.Nonce,
+			"agent":      g.Agent.Hex(),
+			"nodeKey":    g.NodeKey.Hex(),
+			"sourceHash": g.SourceHash.Hex(),
+			"functions":  stringList(g.Functions),
+			"nonce":      g.Nonce,
 		},
 	}
 }

@@ -33,7 +33,7 @@ func newKeys(t *testing.T) keys {
 	root := WebAuthnSigner{Key: rootKey, RPID: "node.example"}
 	nodeKey, _ := crypto.GenerateKey()
 	codeHash := crypto.Keccak256Hash([]byte("chat code"))
-	cert, err := CertifyGrant(Grant{Agent: agent, NodeKey: Address(nodeKey), CodeHash: codeHash,
+	cert, err := CertifyGrant(Grant{Agent: agent, NodeKey: Address(nodeKey), SourceHash: codeHash,
 		Functions: []string{"post", "like"}, Nonce: NewNonce()}, root)
 	if err != nil {
 		t.Fatal(err)
@@ -105,7 +105,7 @@ func TestRootSignsTransactions(t *testing.T) {
 	k := newKeys(t)
 	for _, tx := range []Transaction{
 		call(k.agent, "setTopic"),
-		{Kind: KindJoin, Contract: "0xchat", Agent: k.agent, Nonce: "n", Body: `{"node":"n","nodeKey":"0x0000000000000000000000000000000000000001"}`},
+		{Kind: KindJoin, Contract: "0xchat", Agent: k.agent, Nonce: "n", Body: `{"node":"n","nodeKey":"0x0000000000000000000000000000000000000001","sourceHash":"0x0000000000000000000000000000000000000000000000000000000000000002"}`},
 		{Kind: KindLeave, Contract: "0xchat", Agent: k.agent, Nonce: "n", Body: `{"member":"` + k.agent.Hex() + `"}`},
 	} {
 		stx, err := SignTx(tx, k.root)
@@ -134,7 +134,7 @@ func TestNodeGrant(t *testing.T) {
 	if _, err := stx.Verify(); err != nil {
 		t.Fatalf("node signs post: %v", err)
 	}
-	if g := stx.Grant(); g == nil || g.CodeHash != k.codeHash {
+	if g := stx.Grant(); g == nil || g.SourceHash != k.codeHash {
 		t.Fatalf("grant = %v", g)
 	}
 
@@ -147,7 +147,7 @@ func TestNodeGrant(t *testing.T) {
 	setTopic, _ := SignTx(call(k.agent, "setTopic"), k.node)
 	fail("a function the grant does not name", setTopic, "does not let the node call setTopic")
 	join, _ := SignTx(Transaction{Kind: KindJoin, Contract: "0xchat", Agent: k.agent, Nonce: "n",
-		Body: `{"node":"n","nodeKey":"0x0000000000000000000000000000000000000001"}`}, k.node)
+		Body: `{"node":"n","nodeKey":"0x0000000000000000000000000000000000000001","sourceHash":"0x0000000000000000000000000000000000000000000000000000000000000002"}`}, k.node)
 	fail("a join", join, "a node signs only calls")
 
 	otherNode, _ := crypto.GenerateKey()
@@ -155,7 +155,7 @@ func TestNodeGrant(t *testing.T) {
 	fail("another node with this grant", byOther, "not by the node the grant names")
 
 	other := newKeys(t)
-	forged, _ := CertifyGrant(Grant{Agent: k.agent, NodeKey: Address(k.nodeKey), CodeHash: k.codeHash,
+	forged, _ := CertifyGrant(Grant{Agent: k.agent, NodeKey: Address(k.nodeKey), SourceHash: k.codeHash,
 		Functions: []string{"transfer"}, Nonce: "n"}, other.root)
 	byForged, _ := SignTx(call(k.agent, "transfer"), Secp256k1Signer{Key: k.nodeKey, Cert: forged})
 	fail("a grant signed by another agent's root", byForged, "not signed by the agent's root key")
@@ -165,7 +165,7 @@ func TestNodeGrant(t *testing.T) {
 	byChanged, _ := SignTx(call(k.agent, "transfer"), Secp256k1Signer{Key: k.nodeKey, Cert: &changed})
 	fail("a grant changed after signing", byChanged, "grant")
 
-	empty, _ := CertifyGrant(Grant{Agent: k.agent, NodeKey: Address(k.nodeKey), CodeHash: k.codeHash, Nonce: "n"}, k.root)
+	empty, _ := CertifyGrant(Grant{Agent: k.agent, NodeKey: Address(k.nodeKey), SourceHash: k.codeHash, Nonce: "n"}, k.root)
 	byEmpty, _ := SignTx(call(k.agent, "post"), Secp256k1Signer{Key: k.nodeKey, Cert: empty})
 	fail("a grant with no functions", byEmpty, "at least one function")
 
@@ -184,7 +184,7 @@ func TestNodeGrant(t *testing.T) {
 func TestConsent(t *testing.T) {
 	k := newKeys(t)
 	appKey, _ := NewP256Key()
-	c := Consent{Agent: k.agent, App: "https://wishes.example", AppKey: PublicKey(appKey), CodeHash: k.codeHash,
+	c := Consent{Agent: k.agent, App: "https://wishes.example", AppKey: PublicKey(appKey), SourceHash: k.codeHash,
 		Read: true, Functions: []string{"post"}, Nonce: "n"}
 	sc, err := SignConsent(c, k.root)
 	if err != nil {

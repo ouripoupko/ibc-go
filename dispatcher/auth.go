@@ -11,7 +11,6 @@ import (
 	ethcommon "github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 
-	"github.com/ouripoupko/ibc-go/common"
 	"github.com/ouripoupko/ibc-go/execution"
 	"github.com/ouripoupko/ibc-go/identity"
 )
@@ -109,8 +108,8 @@ func (d *Dispatcher) authorize(sq *identity.SignedQuery, action, target, contrac
 	return caller{agent: agent, app: app, key: key}, nil
 }
 
-// codeHash returns the code hash of the agent's contract.
-func (d *Dispatcher) codeHash(agent, contract string) (ethcommon.Hash, error) {
+// sourceHash returns the source hash of the agent's contract.
+func (d *Dispatcher) sourceHash(agent, contract string) (ethcommon.Hash, error) {
 	summary, ok, err := d.navigator.Contract(agent, contract)
 	if err != nil {
 		return ethcommon.Hash{}, err
@@ -118,17 +117,20 @@ func (d *Dispatcher) codeHash(agent, contract string) (ethcommon.Hash, error) {
 	if !ok {
 		return ethcommon.Hash{}, fmt.Errorf("%w %q", execution.ErrUnknownContract, contract)
 	}
-	code, _ := summary[common.KeyCode].(string)
-	return identity.CodeHash(code)
+	source, _ := summary[execution.KeySource].(string)
+	if source == "" {
+		return ethcommon.Hash{}, fmt.Errorf("contract %s has no source", contract)
+	}
+	return identity.SourceHash(source), nil
 }
 
 // canHear checks that the caller may hear the contract's events: it has a
-// permission for the contract's code (to read, or to call silently).
+// permission for the contract's source (to read, or to call silently).
 func (d *Dispatcher) canHear(c caller, contract string) error {
 	if c.owner() {
 		return nil
 	}
-	hash, err := d.codeHash(c.agent, contract)
+	hash, err := d.sourceHash(c.agent, contract)
 	if err != nil {
 		return err
 	}
@@ -143,7 +145,7 @@ func (d *Dispatcher) canRead(c caller, contract string) error {
 	if c.owner() {
 		return nil
 	}
-	hash, err := d.codeHash(c.agent, contract)
+	hash, err := d.sourceHash(c.agent, contract)
 	if err != nil {
 		return err
 	}

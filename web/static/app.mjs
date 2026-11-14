@@ -6,7 +6,7 @@
 // inserted as text (textContent), never as HTML.
 import { Ibc, IbcError, needsApproval } from './js/index.js';
 import {
-  addressOf, choosePasskey, createPasskey, fromHex, keccak256, newP256Key, nonce, passkeySigner, signBatch, sign, toHex,
+  addressOf, choosePasskey, createPasskey, fromHex, newP256Key, nonce, passkeySigner, signBatch, sign, sourceHashOf, toHex,
 } from './js/index.js';
 
 export { IbcError };
@@ -64,8 +64,8 @@ export async function connect(identity) {
   return ibc;
 }
 
-/** The code hash of a contract's creation code: what app permissions are for. */
-export const codeHashOf = (code) => toHex(keccak256(fromHex(code)));
+/** The hash of a contract's source: what joins and app permissions are for. */
+export { sourceHashOf };
 
 /** The ABI's functions that change state: those an app may have the node call silently. */
 export function writeFunctions(abi) {
@@ -75,15 +75,15 @@ export function writeFunctions(abi) {
 
 /**
  * The messages that record what an app may do without asking, for contracts
- * of one code: the consent, and the grant for this node if it names functions.
+ * of one source: the consent, and the grant for this node if it names functions.
  */
-export function permissionItems(ibc, { app, appKey, codeHash, read, functions }) {
+export function permissionItems(ibc, { app, appKey, sourceHash, read, functions }) {
   const items = [{
     type: 'Consent',
-    message: { agent: ibc.agent, app, appKey, codeHash, read, functions, nonce: nonce() },
+    message: { agent: ibc.agent, app, appKey, sourceHash, read, functions, nonce: nonce() },
   }];
   if (functions.length) {
-    items.push({ type: 'Grant', message: { agent: ibc.agent, nodeKey: ibc.nodeKey, codeHash, functions, nonce: nonce() } });
+    items.push({ type: 'Grant', message: { agent: ibc.agent, nodeKey: ibc.nodeKey, sourceHash, functions, nonce: nonce() } });
   }
   return items;
 }
@@ -99,7 +99,7 @@ export function registerPermission(ibc, items, envs) {
 /** The consent for this page's key: read every contract, call nothing silently. */
 function pageConsent(agent, pageKey) {
   return {
-    agent, app: location.origin, appKey: toHex(pageKey.publicKey), codeHash: ZERO_HASH, read: true, functions: [], nonce: nonce(),
+    agent, app: location.origin, appKey: toHex(pageKey.publicKey), sourceHash: ZERO_HASH, read: true, functions: [], nonce: nonce(),
   };
 }
 

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 
+	ethcommon "github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethdb"
 
 	"github.com/ouripoupko/ibc-go/common"
@@ -261,6 +262,13 @@ func (c *ContractExecution) apply(index uint64, record Record) (Outcome, error) 
 		if err == nil {
 			out.Decision = &approved
 			out.Value = approved
+			// Where the change left the contract: members tell a new node,
+			// which checks the history it receives against it.
+			root := out.Result.StateRoot
+			if root == (ethcommon.Hash{}) {
+				root = c.state.Root()
+			}
+			err = c.contractDoc.Update(map[string]any{KeyChangePrefix + record.HashCode: changePoint{Index: index, StateRoot: root.Hex()}})
 		}
 	default:
 		out.Result, err = c.state.Advance()
@@ -278,7 +286,7 @@ func (c *ContractExecution) apply(index uint64, record Record) (Outcome, error) 
 	return out, nil
 }
 
-// checkGrant checks a node's grant against the contract: the grant's code
+// checkGrant checks a node's grant against the contract: the grant's source
 // hash must be the contract's, and its node the agent's node in this
 // contract (so a grant stops working when the agent moves to another node).
 func (c *ContractExecution) checkGrant(agent string, g *identity.Grant) error {
@@ -286,9 +294,9 @@ func (c *ContractExecution) checkGrant(agent string, g *identity.Grant) error {
 	if err != nil {
 		return err
 	}
-	code, _ := fields[common.KeyCode].(string)
-	if hash, err := identity.CodeHash(code); err != nil || hash != g.CodeHash {
-		return fmt.Errorf("%w: it is for other code", ErrGrantDoesNotApply)
+	source, _ := fields[KeySource].(string)
+	if source == "" || identity.SourceHash(source) != g.SourceHash {
+		return fmt.Errorf("%w: it is for another source", ErrGrantDoesNotApply)
 	}
 	partner, err := c.partnersDB.Document(agent).Fields()
 	if err != nil {
@@ -301,6 +309,8 @@ func (c *ContractExecution) checkGrant(agent string, g *identity.Grant) error {
 }
 
 // decide applies a membership change (§10 of docs/consensus.md):
+//   - any join whose source hash is not the hash of the contract's source is
+//     refused: the joiner read another source than the contract's;
 //   - join: the contract's approve_partner(joiner), called as the joiner;
 //     approved if the contract has no such function;
 //   - a guest's join: the contract's approve_guest(joiner), called as the
@@ -326,6 +336,14 @@ func (c *ContractExecution) decide(record Record) (bool, common.Result, error) {
 	var res common.Result
 	switch b := body.(type) {
 	case *identity.JoinBody:
+		fields, ferr := c.contractDoc.Fields()
+		if ferr != nil {
+			return false, common.Result{}, ferr
+		}
+		if source, _ := fields[KeySource].(string); source == "" || identity.SourceHash(source) != b.SourceHash {
+			approved, res, err = c.state.Decide(agent.Hex(), "", agent, record.Timestamp, id, false)
+			break
+		}
 		if b.Guest {
 			approved, res, err = c.state.Decide(agent.Hex(), common.MethodApproveGuest, agent, record.Timestamp, id, false)
 			if err == nil && approved {

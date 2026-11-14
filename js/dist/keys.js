@@ -41,7 +41,7 @@ export const TYPES = {
     Grant: [
         { name: 'agent', type: 'address' },
         { name: 'nodeKey', type: 'address' },
-        { name: 'codeHash', type: 'bytes32' },
+        { name: 'sourceHash', type: 'bytes32' },
         { name: 'functions', type: 'string[]' },
         { name: 'nonce', type: 'string' },
     ],
@@ -49,7 +49,7 @@ export const TYPES = {
         { name: 'agent', type: 'address' },
         { name: 'app', type: 'string' },
         { name: 'appKey', type: 'bytes' },
-        { name: 'codeHash', type: 'bytes32' },
+        { name: 'sourceHash', type: 'bytes32' },
         { name: 'read', type: 'bool' },
         { name: 'functions', type: 'string[]' },
         { name: 'nonce', type: 'string' },
@@ -93,6 +93,11 @@ function concat(...parts) {
     return out;
 }
 export const keccak256 = (bytes) => keccak_256(bytes);
+/**
+ * A contract source's hash, as joins, grants and consents name it: the
+ * keccak256 of the Solidity source text, byte for byte (as UTF-8).
+ */
+export const sourceHashOf = (source) => toHex(keccak256(new TextEncoder().encode(source)));
 /** A random nonce, as hex without 0x. */
 export function nonce() {
     const bytes = new Uint8Array(16);
@@ -243,9 +248,9 @@ export async function signBatch(signer, items) {
     const env = await signer.signDigest(digestOf('Batch', { items: digests }), { type: 'Batch', messages: items });
     return items.map(() => ({ ...env, batch: digests }));
 }
-/** A grant, certified by the root: lets the agent's node sign these functions of this code silently. */
-export async function certifyGrant(root, { agent, nodeKey, codeHash, functions }) {
-    const grant = { agent, nodeKey, codeHash, functions, nonce: nonce() };
+/** A grant, certified by the root: lets the agent's node sign these functions of this source's contracts silently. */
+export async function certifyGrant(root, { agent, nodeKey, sourceHash, functions }) {
+    const grant = { agent, nodeKey, sourceHash, functions, nonce: nonce() };
     const { envelope: signature } = await sign(root, 'Grant', grant);
     return { grant, signature };
 }

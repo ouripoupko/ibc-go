@@ -5,6 +5,7 @@ package examples_test
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"encoding/json"
 	"fmt"
@@ -21,6 +22,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/crypto"
 
+	"github.com/ouripoupko/ibc-go/compiler"
 	"github.com/ouripoupko/ibc-go/identity"
 	"github.com/ouripoupko/ibc-go/node"
 )
@@ -39,7 +41,9 @@ type client struct {
 
 func newClient(t *testing.T) *client {
 	t.Helper()
-	n, err := node.New(node.Config{DB: rawdb.NewMemoryDatabase()})
+	// No compiler in the tests: a joined contract's source counts as checked.
+	n, err := node.New(node.Config{DB: rawdb.NewMemoryDatabase(),
+		CheckSource: func(context.Context, string, json.RawMessage, string) (string, string) { return compiler.Verified, "" }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +187,8 @@ func (c *client) deploy(name string, ctor map[string]any) (string, any) {
 	ev := c.await(c.request("PUT", "deploy_contract", "", "", c.sign(identity.KindDeploy, "", map[string]any{
 		"name": name, "contract": name + ".sol", "default_app": "", "profile": "",
 		"code": strings.TrimSpace(string(bin)), "abi": json.RawMessage(abiJSON), "constructor": ctor,
-		"node": c.url, "nodeKey": c.nodeKey,
+		"node": c.url, "nodeKey": c.nodeKey, "source": source(c.t, name),
+		"compiler": map[string]any{"version": "0.8.38+commit.1835d247.Emscripten.clang", "settings": compiler.Settings},
 	})))
 	return ev["contract"].(string), ev["reply"]
 }
@@ -201,14 +206,14 @@ func (c *client) connectApp(appKey *ecdsa.PrivateKey, codeHash ethcommon.Hash, r
 	c.t.Helper()
 	agent := identity.Address(c.key)
 	consent, err := identity.SignConsent(identity.Consent{Agent: agent, App: "https://app.example",
-		AppKey: identity.PublicKey(appKey), CodeHash: codeHash, Read: read, Functions: functions, Nonce: identity.NewNonce()}, c.writer)
+		AppKey: identity.PublicKey(appKey), SourceHash: codeHash, Read: read, Functions: functions, Nonce: identity.NewNonce()}, c.writer)
 	if err != nil {
 		c.t.Fatal(err)
 	}
 	body := map[string]any{"consent": consent}
 	if len(functions) > 0 {
 		grant, err := identity.CertifyGrant(identity.Grant{Agent: agent, NodeKey: ethcommon.HexToAddress(c.nodeKey),
-			CodeHash: codeHash, Functions: functions, Nonce: identity.NewNonce()}, c.writer)
+			SourceHash: codeHash, Functions: functions, Nonce: identity.NewNonce()}, c.writer)
 		if err != nil {
 			c.t.Fatal(err)
 		}
@@ -333,11 +338,7 @@ func TestChat(t *testing.T) {
 	c.register()
 	chat, reply := c.deploy("Chat", map[string]any{"initialTopic": "lunch"})
 	expect(t, "deploy", reply, `true`)
-	bin, _ := os.ReadFile("build/Chat.bin")
-	chatCode, err := identity.CodeHash(string(bin))
-	if err != nil {
-		t.Fatal(err)
-	}
+	chatCode := identity.SourceHash(source(t, "Chat"))
 	app, _ := identity.NewP256Key()
 
 	// Before the user connects the app, it can do nothing.
@@ -371,9 +372,9 @@ func TestChat(t *testing.T) {
 	bad, _ := identity.NewP256Key()
 	agent := identity.Address(c.key)
 	consent, _ := identity.SignConsent(identity.Consent{Agent: agent, App: "https://app.example", AppKey: identity.PublicKey(bad),
-		CodeHash: chatCode, Read: true, Functions: []string{"post"}, Nonce: "n"}, c.writer)
+		SourceHash: chatCode, Read: true, Functions: []string{"post"}, Nonce: "n"}, c.writer)
 	grant, _ := identity.CertifyGrant(identity.Grant{Agent: agent, NodeKey: ethcommon.HexToAddress(c.nodeKey),
-		CodeHash: chatCode, Functions: []string{"post", "setTopic"}, Nonce: "n"}, c.writer)
+		SourceHash: chatCode, Functions: []string{"post", "setTopic"}, Nonce: "n"}, c.writer)
 	got := c.request("PUT", "register_app", "", "", map[string]any{"consent": consent, "grant": grant})
 	if !strings.Contains(fmt.Sprint(got), "does not match") {
 		t.Errorf("mismatched grant: %v", got)
@@ -395,12 +396,22 @@ func (c *client) getContract(contract string) map[string]any {
 	return out
 }
 
-// joinAsGuest asks host, on its node, to let the user join as a guest; it
-// returns the reply of the join.
-func (c *client) joinAsGuest(host *client, contract string) any {
+// source is an example contract's Solidity source.
+func source(t *testing.T, name string) string {
+	t.Helper()
+	src, err := os.ReadFile("contracts/" + name + ".sol")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(src)
+}
+
+// joinAsGuest asks host, on its node, to let the user join as a guest a
+// contract of the example name; it returns the reply of the join.
+func (c *client) joinAsGuest(host *client, contract, name string) any {
 	c.t.Helper()
 	stx := c.sign(identity.KindJoin, contract, map[string]any{"node": c.url, "nodeKey": c.nodeKey,
-		"guest": true, "host": host.agent})
+		"guest": true, "host": host.agent, "sourceHash": identity.SourceHash(source(c.t, name)).Hex()})
 	id := c.request("PUT", "join_contract", "", "", map[string]any{"tx": stx.Tx, "signature": stx.Signature,
 		"partner": map[string]any{"address": host.url, "agent": host.agent}})
 	return c.await(id)["reply"]
@@ -415,7 +426,7 @@ func TestChatGuest(t *testing.T) {
 	chat, _ := alice.deploy("Chat", map[string]any{"initialTopic": "lunch"})
 	expect(t, "alice posts", alice.write(chat, "post", map[string]any{"text": "hi"}), `0`)
 
-	expect(t, "bob joins as a guest", bob.joinAsGuest(alice, chat), `true`)
+	expect(t, "bob joins as a guest", bob.joinAsGuest(alice, chat, "Chat"), `true`)
 	if s := bob.getContract(chat); s["role"] != "guest" || s["name"] != "Chat" || len(s["hosts"].([]any)) != 1 {
 		t.Errorf("bob's contract = %v", s)
 	}
@@ -438,8 +449,7 @@ func TestChatGuest(t *testing.T) {
 	expect(t, "bob hears alice's post", bob.await(id)["reply"], `2`)
 
 	// Bob's app posts silently: bob's node signs, under bob's grant.
-	bin, _ := os.ReadFile("build/Chat.bin")
-	chatCode, _ := identity.CodeHash(string(bin))
+	chatCode := identity.SourceHash(source(t, "Chat"))
 	app, _ := identity.NewP256Key()
 	expect(t, "connect bob's app", bob.connectApp(app, chatCode, true, "post"), `true`)
 	expect(t, "silent post by a guest", bob.appWrite(app, chat, "post", map[string]any{"text": "from the app"}), `3`)
@@ -447,7 +457,7 @@ func TestChatGuest(t *testing.T) {
 
 	// A contract without approve_guest takes no guests.
 	counter, _ := alice.deploy("Counter", map[string]any{"start": 1})
-	expect(t, "guest of Counter", bob.joinAsGuest(alice, counter), `false`)
+	expect(t, "guest of Counter", bob.joinAsGuest(alice, counter, "Counter"), `false`)
 	expect(t, "no Counter for bob", bob.getContract(counter), `{}`)
 
 	// Bob leaves: his node forgets the contract.
@@ -510,7 +520,7 @@ func TestChatPublic(t *testing.T) {
 	}
 
 	// A guest keeps no copy, so has none to make public.
-	expect(t, "bob joins as a guest", bob.joinAsGuest(alice, chat), `true`)
+	expect(t, "bob joins as a guest", bob.joinAsGuest(alice, chat, "Chat"), `true`)
 	expect(t, "a guest's publish", bob.setPublic(chat, true), `{"message":"a guest has no copy of the contract to make public"}`)
 
 	expect(t, "alice makes it private", alice.setPublic(chat, false), `false`)

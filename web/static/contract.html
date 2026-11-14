@@ -21,6 +21,7 @@
     </section>
 
     <div id="contract-area" class="hidden">
+      <div class="status bad hidden" id="source-warning" style="margin-bottom: 12px"></div>
       <section class="card">
         <h2 id="name"></h2>
         <dl class="details" id="details"></dl>
@@ -36,6 +37,9 @@
           <code id="invite" class="mono" style="overflow-wrap: anywhere; flex: 1"></code>
           <button class="secondary" id="copy-invite">Copy</button>
         </div>
+        <p class="hint">They also need the contract's source, to read what they join: send it with
+          the invite.</p>
+        <button class="secondary" id="copy-source">Copy the source</button>
       </section>
 
       <section class="card hidden" id="public-card">

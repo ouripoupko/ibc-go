@@ -141,41 +141,34 @@ ssh root@SERVER_IP 'install -m 755 /tmp/ibc /usr/local/bin/ibc && rm /tmp/ibc'
 
 The web interface is built into the program; there are no other files to copy.
 
-**The Solidity compiler.** Apps send contracts as source, and the node compiles them, so the server
-needs a compiler. Pick one:
+**The Solidity compiler.** Apps send contracts as source, and the node compiles them; when one of
+your agents joins a contract, the node also compiles that contract's source again, with the version
+it was compiled with, and compares it with its code. This release of ibc pins **solc 0.8.38**. The
+node gets the compilers it needs by itself: it downloads solc-js (the Solidity compiler built for
+JavaScript) of the version it needs from soliditylang.org into its data directory
+(`/var/lib/ibc/solc`), checks it against Solidity's published hash, and runs it with **Node.js**. So
+install Node.js, on x86 and Arm servers alike:
 
-- **x86 servers:** the official static `solc`, one file, from the
-  [Solidity releases](https://github.com/ethereum/solidity/releases) (`solc-static-linux`). Pick a
-  version and keep it: every node that compiles the same source should use the same one.
+```sh
+ssh root@SERVER_IP
+apt install -y nodejs
+node --version
+```
 
-  ```sh
-  ssh root@SERVER_IP
-  curl -L -o /usr/local/bin/solc https://github.com/ethereum/solidity/releases/download/v0.8.38/solc-static-linux
-  chmod 755 /usr/local/bin/solc
-  solc --version
-  ```
+The server must also reach `https://binaries.soliditylang.org`. Without Node.js the node cannot
+compile, and it joins contracts with the warning "source not checked".
 
-- **Arm servers** (no official Arm build): solc-js, the same compiler built for Node.js. Install it
-  once, for the whole server:
+On x86, the native `solc` is faster, and the node uses it for its pinned version if it is installed
+(the service below names it): the static build, one file, from the
+[Solidity releases](https://github.com/ethereum/solidity/releases):
 
-  ```sh
-  ssh root@SERVER_IP
-  apt install -y nodejs npm
-  npm install -g solc@0.8.38
-  which solcjs                # /usr/local/bin/solcjs
-  solcjs --version
-  ```
+```sh
+curl -L -o /usr/local/bin/solc https://github.com/ethereum/solidity/releases/download/v0.8.38/solc-static-linux
+chmod 755 /usr/local/bin/solc
+solc --version
+```
 
-  and in the service below, use that path instead of solc's:
-
-  ```ini
-  Environment=IBC_SOLC=/usr/local/bin/solcjs
-  ```
-
-  (Not `npx`: it downloads the compiler at the first compile into the user's home folder, which the
-  service may not write to.)
-
-Without a compiler the node still runs, but cannot accept contracts from source.
+On Arm, skip this: there is no official Arm build, and the node uses solc-js.
 
 ## 6. Run ibc as a service
 
@@ -194,7 +187,7 @@ ExecStart=/usr/local/bin/ibc
 # Listen inside the server only; Caddy passes the traffic in.
 Environment=IBC_ADDR=127.0.0.1:2611
 Environment=IBC_DATA=/var/lib/ibc
-# The Solidity compiler (step 5).
+# The native Solidity compiler, if installed (step 5); otherwise the node downloads solc-js.
 Environment=IBC_SOLC=/usr/local/bin/solc
 # Creates /var/lib/ibc, owned by the ibc user.
 StateDirectory=ibc
@@ -367,7 +360,8 @@ your node.
 | `502 Bad Gateway` | ibc is not running: `systemctl status ibc`, `journalctl -u ibc` |
 | The page says passkeys need a secure page | The page is open at `http://`, not `https://` |
 | "This passkey is not an ibc identity on this node" when signing in | The passkey was made on another node's address |
-| "this node has no Solidity compiler" | Install `solc` on the server, or set `IBC_SOLC` (step 5) |
+| "solc 0.8.38: running solc-js needs Node.js" | Install Node.js (step 5) |
+| "solc 0.8.38: …" with a network error | The server cannot reach `https://binaries.soliditylang.org` to download the compiler |
 | `query expired, or its time is wrong` | The clock of the server or of the user's computer is wrong: `timedatectl` |
 | Partners never see your transactions, or a join never completes | Your node is not reachable at the address your agents registered, or theirs is not. Check with `curl https://<their node>/ibc/app?action=node_info` from each side |
 | The service does not start after an update | `journalctl -u ibc -e` shows why; restore the previous program, or a backup |

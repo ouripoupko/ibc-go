@@ -49,15 +49,15 @@
       "type": "Grant",
       "message": {
         "agent": "0x2c7536e3605d9c16a7a3d7b1898e529396a65c23",
-        "codeHash": "0x2dc081a8d6d4714c79b5abd2e9b08c3a33b4ef1dcf946ef8b8cf6c495014f47b",
         "functions": [
           "post",
           "like"
         ],
         "nodeKey": "0x57e3339b18e36035656375139a5e66b19dc7d60d",
-        "nonce": "n3"
+        "nonce": "n3",
+        "sourceHash": "0x2dc081a8d6d4714c79b5abd2e9b08c3a33b4ef1dcf946ef8b8cf6c495014f47b"
       },
-      "digest": "0x0e693cf38da4d915d6ea9bf96987839077853366d85efd6fa627affa1d704982"
+      "digest": "0x823a05c792de67b7d0ffeedc8b01c62c7d7478a3d4feb0c0cc407774ea217526"
     },
     {
       "type": "Consent",
@@ -65,14 +65,14 @@
         "agent": "0x2c7536e3605d9c16a7a3d7b1898e529396a65c23",
         "app": "https://app.example",
         "appKey": "0x0426efcebd0ee9e34a669187e18b3a9122b2f733945b649cc9f9f921e9f9dad81290238bde9cc7bb330d150c67704dd25ae7055205744b6f31bf4070745872d0e6",
-        "codeHash": "0x2dc081a8d6d4714c79b5abd2e9b08c3a33b4ef1dcf946ef8b8cf6c495014f47b",
         "functions": [
           "post"
         ],
         "nonce": "n4",
-        "read": true
+        "read": true,
+        "sourceHash": "0x2dc081a8d6d4714c79b5abd2e9b08c3a33b4ef1dcf946ef8b8cf6c495014f47b"
       },
-      "digest": "0xea6418aa5954eccd1c2c9ed50e8b6bbb1528ddbb4b603ff982a01ba4067206b5"
+      "digest": "0x34dcda62e7b9155d9d5846211697f02f7df25328678e2875976eb9ef59412818"
     },
     {
       "type": "Consent",
@@ -80,12 +80,12 @@
         "agent": "0x2c7536e3605d9c16a7a3d7b1898e529396a65c23",
         "app": "https://ibc.example.com",
         "appKey": "0x0426efcebd0ee9e34a669187e18b3a9122b2f733945b649cc9f9f921e9f9dad81290238bde9cc7bb330d150c67704dd25ae7055205744b6f31bf4070745872d0e6",
-        "codeHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
         "functions": [],
         "nonce": "n5",
-        "read": true
+        "read": true,
+        "sourceHash": "0x0000000000000000000000000000000000000000000000000000000000000000"
       },
-      "digest": "0x5c2eb0fc598dc168c62ea1e5ef92908b1a56e4c709f4385fc5ad108d539b8a60"
+      "digest": "0xd68ec52847e53111ac9f12124b3046366916ee23a8f0298670cfe1a098963274"
     },
     {
       "type": "Device",

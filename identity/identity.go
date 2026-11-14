@@ -268,10 +268,11 @@ type (
 		Constructor map[string]any    `json:"constructor,omitempty"`
 		Node        string            `json:"node"`
 		NodeKey     ethcommon.Address `json:"nodeKey"`
-		// The Solidity source and how the node compiled it, when the node
-		// compiled Code from it (see package compiler).
-		Source   string          `json:"source,omitempty"`
-		Compiler json.RawMessage `json:"compiler,omitempty"`
+		// The Solidity source, and how the creator's node compiled Code from
+		// it (see package compiler): a joining node compiles it again and
+		// compares. Partners join, and grant, by the source's hash.
+		Source   string          `json:"source"`
+		Compiler json.RawMessage `json:"compiler"`
 	}
 	CallBody struct {
 		Method string         `json:"method"`
@@ -287,6 +288,10 @@ type (
 		// node the guest joined through; it keeps the guest informed.
 		Guest bool              `json:"guest,omitempty"`
 		Host  ethcommon.Address `json:"host,omitempty"`
+		// SourceHash is the SourceHash of the contract's source as the
+		// joining agent read it. Partners refuse the join if it is not the
+		// contract's.
+		SourceHash ethcommon.Hash `json:"sourceHash"`
 	}
 	LeaveBody struct {
 		Member ethcommon.Address `json:"member"`
@@ -325,6 +330,9 @@ func (t Transaction) ParseBody() (any, error) {
 		if b.Code == "" || len(b.ABI) == 0 || b.NodeKey == (ethcommon.Address{}) {
 			return nil, errors.New("deploy body needs code, abi and nodeKey")
 		}
+		if b.Source == "" || len(b.Compiler) == 0 || string(b.Compiler) == "null" {
+			return nil, errors.New("deploy body needs the source and the compiler that compiled it")
+		}
 	case *CallBody:
 		if b.Method == "" {
 			return nil, errors.New("call body needs a method")
@@ -335,6 +343,9 @@ func (t Transaction) ParseBody() (any, error) {
 		}
 		if b.Guest && b.Host == (ethcommon.Address{}) {
 			return nil, errors.New("a guest's join body needs its host")
+		}
+		if b.SourceHash == (ethcommon.Hash{}) {
+			return nil, errors.New("join body needs the sourceHash of the contract's source")
 		}
 	case *LeaveBody:
 		if b.Member == (ethcommon.Address{}) {
@@ -440,8 +451,14 @@ func LoadOrCreateNodeKey(path string) (*ecdsa.PrivateKey, error) {
 	return key, nil
 }
 
-// CodeHash is a contract code's hash, as grants and consents name it: the
-// keccak256 of the creation bytecode (hex, with or without 0x).
+// SourceHash is a contract's source hash, as joins, grants and consents name
+// it: the keccak256 of the Solidity source text, byte for byte.
+func SourceHash(source string) ethcommon.Hash {
+	return crypto.Keccak256Hash([]byte(source))
+}
+
+// CodeHash is the keccak256 of a contract's creation bytecode (hex, with or
+// without 0x).
 func CodeHash(code string) (ethcommon.Hash, error) {
 	raw, err := hex.DecodeString(strings.TrimPrefix(strings.TrimSpace(code), "0x"))
 	if err != nil || len(raw) == 0 {

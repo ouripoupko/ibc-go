@@ -38,6 +38,15 @@ type Reply struct {
 	Reply any `json:"reply"`
 	// StateRoot is the contract's state root after the record.
 	StateRoot string `json:"state_root,omitempty"`
+	// For a join_contract outcome on the joiner's node: the node's check of
+	// the contract's source (SourceVerified, ...), and why it could not
+	// check, or why the node did not join.
+	SourceCheck string `json:"source_check,omitempty"`
+	Reason      string `json:"reason,omitempty"`
+	// SourceHash is the joined contract's source hash, as the join named it:
+	// the node's apps with a permission for it hear the outcome, even of a
+	// join that left the node no contract.
+	SourceHash string `json:"source_hash,omitempty"`
 }
 
 // Output receives what execution produces for the rest of the node.

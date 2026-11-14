@@ -19,16 +19,16 @@ type Event struct {
 type Scope struct {
 	Agent    string
 	Contract string
-	// Allow, if set, further limits the events to contracts it accepts (an
-	// app hears only about the contracts it may read).
-	Allow func(contract string) bool
+	// Allow, if set, further limits the events to those it accepts (an app
+	// hears only about the contracts it has a permission for).
+	Allow func(reply execution.Reply) bool
 }
 
 func (s Scope) matches(agent string, reply execution.Reply) bool {
 	if s.Agent != agent {
 		return false
 	}
-	if s.Allow != nil && (reply.Contract == nil || !s.Allow(*reply.Contract)) {
+	if s.Allow != nil && (reply.Contract == nil || !s.Allow(reply)) {
 		return false
 	}
 	return s.Contract == "" || (reply.Contract != nil && *reply.Contract == s.Contract)

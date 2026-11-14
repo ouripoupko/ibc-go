@@ -13,7 +13,7 @@
 //   - IbcApp: for an app on another site. It reads and writes silently where
 //     the user allowed it, and otherwise opens the user's node, where the user
 //     approves with the root passkey.
-import { newP256Key, nonce, now, p256Signer, sign, toHex, } from './keys.js';
+import { newP256Key, nonce, now, p256Signer, sign, sourceHashOf, toHex, } from './keys.js';
 /**
  * The version of the node's API that this client speaks: its HTTP calls and
  * its approval page's messages. A node answers node_info, and its approval
@@ -363,7 +363,7 @@ export class Ibc {
         return {
             name, contract: `${name}.sol`, default_app: '', profile: '', ...rest,
             code: code.trim(), abi: typeof abi === 'string' ? JSON.parse(abi) : abi, constructor: ctorOf(input),
-            node: this.url, nodeKey: this.nodeKey, ...(source ? { source, compiler } : {}),
+            node: this.url, nodeKey: this.nodeKey, source, compiler,
         };
     }
     /**
@@ -445,20 +445,22 @@ export class Ibc {
         return this.request('PUT', 'revoke_app', { body });
     }
     /**
-     * Asks a member of a contract to let this agent join. Resolves with true once
-     * this node holds the contract, or false if the contract refused. A guest
-     * takes no part in consensus: this node sends its transactions and reads to
-     * the member's node, its host.
+     * Asks a member of a contract to let this agent join, and resolves with the
+     * join's id once the member has it. source is the contract's Solidity
+     * source, as the agent read it: the members refuse the join if it is not
+     * the contract's. The outcome arrives later on the event stream (onEvent):
+     * a join_contract event for this id, with reply true or false and the
+     * node's check of the source (source_check, reason). A guest takes no part
+     * in consensus: this node sends its transactions and reads to the member's
+     * node, its host.
      */
-    async join(contract, memberUrl, memberAgent, { guest = false, profile = '' } = {}) {
-        const body = { node: this.url, nodeKey: this.nodeKey, profile };
+    async join(contract, memberUrl, memberAgent, { source, guest = false, profile = '' }) {
+        const body = { node: this.url, nodeKey: this.nodeKey, profile, sourceHash: sourceHashOf(source) };
         if (guest)
             Object.assign(body, { guest: true, host: memberAgent });
         const stx = await this.sign('join', contract, body);
-        const event = await this.submit('PUT', 'join_contract', {
-            body: { ...stx, partner: { address: memberUrl, agent: memberAgent } },
-        });
-        return event.reply;
+        await this.connect(); // so the outcome is heard
+        return this.request('PUT', 'join_contract', { body: { ...stx, partner: { address: memberUrl, agent: memberAgent } } });
     }
     /** Leaves a contract, or asks to remove another member. Resolves with the decision. */
     async leave(contract, member = this.agent) {
@@ -620,11 +622,16 @@ export class IbcApp {
     }
     /**
      * Asks the user to join a contract, through a member's node; as a guest
-     * with { guest: true }. public: true proposes to let anyone read the user's
-     * copy (not for a guest, who keeps none).
+     * with { guest: true }. source is the contract's Solidity source, which the
+     * user reads on the approval page and signs for, with the app's permissions
+     * and, with public: true, a proposal to let anyone read the user's copy (not
+     * for a guest, who keeps none): one approval. Resolves with the join's id
+     * once it is sent; the outcome arrives later, as a join_contract event for
+     * that id (onEvent), with reply true or false, and the user's node's check
+     * of the source (source_check, reason).
      */
-    async join(contract, memberNode, memberAgent, { guest = false, public: isPublic = false } = {}) {
-        return (await this.#approve({ type: 'join', contract, memberNode, memberAgent, guest, public: isPublic })).joined;
+    async join(contract, memberNode, memberAgent, { source, guest = false, public: isPublic = false }) {
+        return (await this.#approve({ type: 'join', contract, source, memberNode, memberAgent, guest, public: isPublic })).request;
     }
     /** Reads silently if the user allowed it, and otherwise asks the user. */
     async read(contract, method, values = {}) {

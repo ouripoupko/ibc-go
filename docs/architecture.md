@@ -51,7 +51,7 @@ execution.Navigator.Submit
 | [`node`](../node) | `docker-start.sh` | Wires storage, execution, consensus and HTTP in one process; startup recovery; orderly shutdown |
 | [`dispatcher`](../dispatcher) | `ibc.py`, `dispatcher/` | HTTP API, Server-Sent Events, the in-process event broker |
 | [`web`](../web) | — | The web interface: static pages and the JavaScript client, embedded in the binary and served at `/`. They call the API from the browser; the root passkey signs, and the page's own key reads. `approve.html` is where apps send the user to approve |
-| [`compiler`](../compiler) | — | Runs the Solidity compiler (`solc` or `solcjs`, `-solc`) on apps' source, with fixed settings |
+| [`compiler`](../compiler) | — | Compiles Solidity source with the pinned version (`-solc` if it is that version, or else solc-js, downloaded and run with Node.js), and checks a joined contract's source against its code with the deploy's version |
 | [`identity`](../identity) | — | Signed transactions and registrations (EIP-712), the node key |
 | [`consensus`](../consensus) | `consensus/` | The `Protocol` interface and the `Router`, which runs each contract's protocol, carries miners' messages between nodes, and syncs joining nodes |
 | [`consensus/cordial`](../consensus/cordial) | `consensus/pbft.py` | Cordial Miners: blocks, the blocklace, τ, the miner, its store, and the simulator tests |
@@ -67,7 +67,8 @@ execution.Navigator.Submit
    the router.
 3. **The router** verifies the signature and gives it to the agent's miner of the contract, which
    keeps it in its mempool. A deploy creates the contract and its miner; a join is relayed to a
-   member's node. For a contract the agent is a guest of, the router sends the transaction to a
+   member's node, and the joiner's node then checks the history and the source before it keeps
+   the contract ([`consensus/join.go`](../consensus/join.go)). For a contract the agent is a guest of, the router sends the transaction to a
    host's node instead, which puts it in its miner's mempool
    ([`consensus/guest.go`](../consensus/guest.go); see [guests](consensus.md#11-guests)).
 4. **The miners** of the contract's partners put transactions in signed blocks, exchange them, and
@@ -125,10 +126,10 @@ The dispatcher checks a signature on every call that changes or shows an agent's
 - **Every signature** is checked by one function, `identity.Verify`
   ([`identity/envelope.go`](../identity/envelope.go)): the scheme (secp256k1, P-256 or WebAuthn),
   and, for a call the node signed, the grant the agent's root signed (its functions; execution also
-  checks its code hash and node). Inside consensus it uses no clock. The dispatcher, the miners and a
+  checks its source hash and node). Inside consensus it uses no clock. The dispatcher, the miners and a
   joining node's ledger replay all call it. See [Identity and keys](keys.md).
 - **Apps** ([`dispatcher/apps.go`](../dispatcher/apps.go)): the node keeps, per agent and app key,
-  what the user allowed per contract code: reading, and the functions the node may call silently,
+  what the user allowed per contract source: reading, and the functions the node may call silently,
   with the grant. The dispatcher answers an app's reads and signs its silent calls accordingly.
 - **Node-to-node messages** are signed with the sending node's key when they are sent, not when
   they are queued, so the outbox's retries stay fresh ([`consensus/a2a.go`](../consensus/a2a.go)).

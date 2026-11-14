@@ -37,6 +37,12 @@ type agent struct {
 	exec   *ContractExecution
 }
 
+// testSource stands for the test contracts' Solidity source: joins and
+// grants name its hash.
+const testSource = "// the test contract's source"
+
+var testSourceHash = identity.SourceHash(testSource).Hex()
+
 // deployMessage is the deploy record's message, which the navigator stores
 // as the contract document.
 func deployMessage(t *testing.T) map[string]any {
@@ -56,6 +62,7 @@ func deployMessage(t *testing.T) map[string]any {
 		common.KeyCode:        "0x" + strings.TrimSpace(string(bin)),
 		common.KeyABI:         string(abiJSON),
 		common.KeyConstructor: map[string]any{"initialName": "registry", "start": json.Number("7")},
+		KeySource:             testSource,
 	}
 }
 
@@ -391,7 +398,7 @@ func newKey(t *testing.T) *ecdsa.PrivateKey {
 }
 
 func joinBody(key *ecdsa.PrivateKey) string {
-	return fmt.Sprintf(`{"node":"http://node.example","nodeKey":%q,"profile":"p"}`, identity.Address(key).Hex())
+	return fmt.Sprintf(`{"node":"http://node.example","nodeKey":%q,"profile":"p","sourceHash":%q}`, identity.Address(key).Hex(), testSourceHash)
 }
 
 // A contract without approve_partner and approve_removal: joins are
@@ -451,7 +458,7 @@ func TestMembershipPolicies(t *testing.T) {
 	abiJSON, _ := os.ReadFile("../testdata/Club.abi")
 	doc := common.NewMemoryDocument(map[string]any{
 		common.KeyPID: identity.Address(owner).Hex(), common.KeyAddress: "http://owner.example",
-		common.KeyCode: strings.TrimSpace(string(bin)), common.KeyABI: string(abiJSON),
+		common.KeyCode: strings.TrimSpace(string(bin)), common.KeyABI: string(abiJSON), KeySource: testSource,
 	})
 	a := &agent{me: alice, doc: doc, db: rawdb.NewMemoryDatabase(), ledger: &MemoryLedger{}}
 	a.exec = NewContractExecution(a.doc, contract, alice, a.db, a.ledger)
@@ -599,7 +606,7 @@ func TestGuests(t *testing.T) {
 	abiJSON, _ := os.ReadFile("../examples/build/Chat.abi")
 	doc := common.NewMemoryDocument(map[string]any{
 		common.KeyPID: identity.Address(owner).Hex(), common.KeyAddress: "http://owner.example",
-		common.KeyCode: strings.TrimSpace(string(bin)), common.KeyABI: string(abiJSON),
+		common.KeyCode: strings.TrimSpace(string(bin)), common.KeyABI: string(abiJSON), KeySource: testSource,
 		common.KeyConstructor: map[string]any{"initialTopic": "lunch"},
 	})
 	a := &agent{me: alice, doc: doc, db: rawdb.NewMemoryDatabase(), ledger: &MemoryLedger{}}
@@ -616,8 +623,8 @@ func TestGuests(t *testing.T) {
 	}
 	guestNode := newKey(t)
 	join := signedRecord(t, guest, identity.KindJoin, contract, fmt.Sprintf(
-		`{"node":"http://guest.example","nodeKey":%q,"guest":true,"host":%q}`,
-		identity.Address(guestNode).Hex(), identity.Address(owner).Hex()), ts)
+		`{"node":"http://guest.example","nodeKey":%q,"guest":true,"host":%q,"sourceHash":%q}`,
+		identity.Address(guestNode).Hex(), identity.Address(owner).Hex(), testSourceHash), ts)
 	if out := a.apply(t, join); out.Decision == nil || !*out.Decision {
 		t.Fatalf("guest join: %+v", out)
 	}
@@ -639,8 +646,63 @@ func TestGuests(t *testing.T) {
 	// Without approve_guest, a guest's join is refused.
 	b := newAgent(t, alice)
 	if out := b.apply(t, signedRecord(t, guest, identity.KindJoin, contract, fmt.Sprintf(
-		`{"node":"http://guest.example","nodeKey":%q,"guest":true,"host":%q}`,
-		identity.Address(guestNode).Hex(), identity.Address(owner).Hex()), ts)); out.Decision == nil || *out.Decision {
+		`{"node":"http://guest.example","nodeKey":%q,"guest":true,"host":%q,"sourceHash":%q}`,
+		identity.Address(guestNode).Hex(), identity.Address(owner).Hex(), testSourceHash), ts)); out.Decision == nil || *out.Decision {
 		t.Fatalf("guest join without approve_guest: %+v", out)
+	}
+}
+
+// A join names the source its agent read: another source is refused, before
+// the contract is asked. An accepted join records where it left the contract.
+func TestJoinNamesTheSource(t *testing.T) {
+	a := newAgent(t, alice)
+	carol, dave := newKey(t), newKey(t)
+	ts := "20240102030500000000"
+	other := fmt.Sprintf(`{"node":"http://node.example","nodeKey":%q,"sourceHash":%q}`,
+		identity.Address(newKey(t)).Hex(), identity.SourceHash("another source").Hex())
+	if out := a.apply(t, signedRecord(t, dave, identity.KindJoin, contract, other, ts)); out.Decision == nil || *out.Decision {
+		t.Fatalf("a join for another source: %+v", out)
+	}
+	if ok, _ := a.doc.GetSubCollection(PartnersCollection).Has(identity.Address(dave).Hex()); ok {
+		t.Fatal("dave was added")
+	}
+	join := signedRecord(t, carol, identity.KindJoin, contract, joinBody(newKey(t)), ts)
+	if out := a.apply(t, join); out.Decision == nil || !*out.Decision {
+		t.Fatalf("a join for the source: %+v", out)
+	}
+	p, ok := a.doc.Get(KeyChangePrefix + join.HashCode)
+	raw, _ := json.Marshal(p)
+	var cp changePoint
+	if err := json.Unmarshal(raw, &cp); !ok || err != nil || cp.Index == 0 || cp.StateRoot != a.exec.State().Root().Hex() {
+		t.Fatalf("change point = %+v", p)
+	}
+}
+
+// ReplayRoot runs a history on a scratch copy: the same state root as the
+// node that applied it.
+func TestReplayRoot(t *testing.T) {
+	out := newRecordingOutput()
+	n := newNavigator(t, rawdb.NewMemoryDatabase(), out)
+	deployed(t, n, out)
+	for i := uint64(2); i <= 4; i++ {
+		mustSubmit(t, n, indexed(writeRecord(t, bob, "setValue", fmt.Sprintf(`{"value": %d}`, i), "20240102030500000000"), i))
+	}
+	out.wait(t, 5)
+	entries, err := n.Ledger(alice, contract, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records := make([]Record, len(entries))
+	for i, e := range entries {
+		if records[i], err = DecodeRecord(e.Record); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, want, _ := n.Progress(alice, contract)
+	if got, err := ReplayRoot(alice, contract, records); err != nil || got != want {
+		t.Fatalf("ReplayRoot = %s, %v; want %s", got, err, want)
+	}
+	if _, err := ReplayRoot(alice, contract, records[1:]); err == nil {
+		t.Fatal("a history without its deploy replayed")
 	}
 }

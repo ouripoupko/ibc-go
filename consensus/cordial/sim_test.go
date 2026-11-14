@@ -471,7 +471,7 @@ func TestMembershipChanges(t *testing.T) {
 		for j := 0; j < 3; j++ {
 			newcomer := s.newAgent(false)
 			via := members[s.rng.Intn(len(members))]
-			body := fmt.Sprintf(`{"node":%q,"nodeKey":%q}`, newcomer.member.Node, newcomer.member.NodeKey.Hex())
+			body := fmt.Sprintf(`{"node":%q,"nodeKey":%q,"sourceHash":"0x1111111111111111111111111111111111111111111111111111111111111111"}`, newcomer.member.Node, newcomer.member.NodeKey.Hex())
 			stx := s.tx(newcomer, identity.KindJoin, body)
 			if _, err := via.miner.SubmitTx(stx); err != nil {
 				t.Fatal(err)
@@ -534,7 +534,7 @@ func TestRejectedJoinUnfreezes(t *testing.T) {
 	s.fixed(a, b)
 	stranger := s.newAgent(false)
 	s.deny[stranger.addr] = true
-	stx := s.tx(stranger, identity.KindJoin, fmt.Sprintf(`{"node":"x","nodeKey":%q}`, stranger.member.NodeKey.Hex()))
+	stx := s.tx(stranger, identity.KindJoin, fmt.Sprintf(`{"node":"x","nodeKey":%q,"sourceHash":"0x1111111111111111111111111111111111111111111111111111111111111111"}`, stranger.member.NodeKey.Hex()))
 	if _, err := a.miner.SubmitTx(stx); err != nil {
 		t.Fatal(err)
 	}
