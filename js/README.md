@@ -38,7 +38,9 @@ app.onEvent((event) => console.log(event));                 // events of the app
 ```
 
 `read` and `write` try silently first, and open the approval page when the node says the user must
-approve. Also: `app.permit(contract)` asks for permissions on an existing contract, and
+approve. They resolve with the function's result, and reject with an `IbcError` when the
+contract failed the call: a revert (`execution reverted: …`), an argument the function does not take
+or lacks, a value of the wrong type, an unknown function. Also: `app.permit(contract)` asks for permissions on an existing contract, and
 `app.join(contract, memberNode, memberAgent, { source, guest })` asks the user to join one, as a
 partner or as a guest.
 

@@ -303,7 +303,7 @@ async function showCall(ibc, identity, host) {
     };
     const signature = await signWithDevice(ibc, identity, app, { type: 'Transaction', message: tx });
     const event = await ibc.submit('POST', 'contract_write', { contract: request.contract, method: request.method, body: { tx, signature } });
-    return { reply: event.reply };
+    return { reply: event.reply, ...(event.error ? { error: event.error } : {}) };
   };
 }
 

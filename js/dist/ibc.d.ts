@@ -20,6 +20,12 @@ export interface IbcEvent {
     action: string;
     /** The outcome: a function's result, true or false, or an error string. */
     reply: unknown;
+    /**
+     * Set, to the same text as reply, when the transaction failed: a revert, an
+     * argument the function does not take, an unknown function. (A function
+     * may return a string, so reply alone does not tell.)
+     */
+    error?: string;
     state_root?: Hex;
     agent?: Address;
     /**

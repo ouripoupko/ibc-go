@@ -394,11 +394,6 @@ export function pretty(value) {
   return typeof value === 'string' ? value : JSON.stringify(value, null, 2);
 }
 
-/** Errors come back from contracts as strings in place of a result. */
-export function isErrorReply(value) {
-  return typeof value === 'string' && /^(execution reverted|out of gas|contract deployment failed|unknown method|\w+: (missing|unexpected) argument|\w+: argument )/.test(value);
-}
-
 export function short(id) {
   return typeof id === 'string' && id.length > 14 ? `${id.slice(0, 8)}…${id.slice(-4)}` : id;
 }
@@ -533,7 +528,7 @@ export function functionForm(fn, actionLabel, run) {
     try {
       const value = await run(inputs.read());
       result.textContent = pretty(value);
-      result.className = `result ${isErrorReply(value) ? 'bad' : 'ok'}`;
+      result.className = 'result ok';
     } catch (err) {
       result.textContent = errorText(err);
       result.className = 'result bad';

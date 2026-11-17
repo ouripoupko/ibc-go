@@ -95,7 +95,7 @@ func (d *Dispatcher) publicRead(record execution.Record, query url.Values) (any,
 	if err != nil {
 		var ce *common.ContractError
 		if errors.As(err, &ce) || errors.Is(err, common.ErrNotImplemented) {
-			return err.Error(), nil
+			return readError(err), nil
 		}
 		return nil, err
 	}

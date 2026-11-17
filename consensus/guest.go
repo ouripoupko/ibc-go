@@ -175,7 +175,7 @@ func (r *Router) Read(ctx context.Context, agent, contract, method string, value
 		return nil, fmt.Errorf("host's read reply: %w", err)
 	}
 	if reply.Error != "" {
-		return reply.Error, nil
+		return map[string]any{"error": reply.Error}, nil // the contract's error, as a read answers it
 	}
 	return reply.Value, nil
 }

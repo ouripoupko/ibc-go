@@ -64,6 +64,15 @@ fail_on_message() {
     fi
 }
 
+# fail_on_error: a read the contract failed (a revert, a wrong argument, an
+# unknown function) is answered {"error": "..."}.
+fail_on_error() {
+    local reply=$1
+    if jq -e 'type == "object" and keys == ["error"]' >/dev/null 2>&1 <<<"$reply"; then
+        die "$(jq -r .error <<<"$reply")"
+    fi
+}
+
 # sign KIND CONTRACT BODY_JSON: a transaction signed with the root key.
 sign() {
     "$IBC_BIN" sign tx -key "$IBC_KEY" -kind "$1" -contract "$2" -body "$3"
@@ -161,6 +170,8 @@ write)
     values=${3:-{\}}
     body=$(jq -cn --arg m "$method" --argjson v "$values" '{method: $m, values: $v}')
     event=$(submit_and_wait "$contract" POST "$AGENT/$contract/$method" contract_write "$(sign call "$contract" "$body")")
+    # A failed call (a revert, a wrong argument, an unknown method) has an error.
+    if jq -e '.error' >/dev/null <<<"$event"; then die "$(jq -r .error <<<"$event")"; fi
     jq -c .reply <<<"$event"
     ;;
 read)
@@ -171,6 +182,7 @@ read)
     body=$(jq -cn --arg m "$method" --argjson v "$values" '{method: $m, values: $v}')
     reply=$(request POST "$AGENT/$contract/$method" contract_read "$(query contract_read "$contract" "$body")")
     fail_on_message "$reply"
+    fail_on_error "$reply"
     jq -c . <<<"$reply"
     ;;
 join | guest)
@@ -219,6 +231,7 @@ anyone)
     reply=$(curl -sS -G "$IBC_URL/ibc/app/$agent/$contract/$method" --data-urlencode action=public_read \
         --data-urlencode "values=$values")
     fail_on_message "$reply"
+    fail_on_error "$reply"
     jq -c . <<<"$reply"
     ;;
 contracts)

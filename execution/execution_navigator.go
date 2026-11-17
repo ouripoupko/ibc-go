@@ -36,6 +36,10 @@ type Reply struct {
 	// Reply is the result, or the error string for a failed record (as
 	// Python returned str(e)).
 	Reply any `json:"reply"`
+	// Error is set, to the same text, when the record failed: a revert, an
+	// argument the method does not take, an unknown method. A function may
+	// return a string, so the reply alone does not tell.
+	Error string `json:"error,omitempty"`
 	// StateRoot is the contract's state root after the record.
 	StateRoot string `json:"state_root,omitempty"`
 	// For a join_contract outcome on the joiner's node: the node's check of
@@ -345,6 +349,7 @@ func (n *Navigator) report(agent string, out Outcome) {
 	}
 	if out.Err != nil {
 		reply.Reply = out.Err.Error()
+		reply.Error = out.Err.Error()
 	}
 	if out.Decision != nil {
 		n.cfg.Output.Decided(agent, contract, out.Record, *out.Decision)

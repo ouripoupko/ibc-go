@@ -32,6 +32,18 @@ export class IbcError extends Error {
   override name = 'IbcError';
 }
 
+/**
+ * A read's value: the node answers a read the contract failed (a revert, a
+ * wrong argument, an unknown function) with { error }, which this throws.
+ */
+function readValue(reply: unknown): unknown {
+  if (reply && typeof reply === 'object' && !Array.isArray(reply)) {
+    const keys = Object.keys(reply);
+    if (keys.length === 1 && keys[0] === 'error') throw new IbcError(String((reply as { error: unknown }).error));
+  }
+  return reply;
+}
+
 /** Does an error mean the user must approve on the node's page? */
 export const needsApproval = (err: unknown): boolean =>
   /needs your approval|nor an app it connected/.test((err as Error | undefined)?.message ?? '');
@@ -45,6 +57,12 @@ export interface IbcEvent {
   action: string;
   /** The outcome: a function's result, true or false, or an error string. */
   reply: unknown;
+  /**
+   * Set, to the same text as reply, when the transaction failed: a revert, an
+   * argument the function does not take, an unknown function. (A function
+   * may return a string, so reply alone does not tell.)
+   */
+  error?: string;
   state_root?: Hex;
   agent?: Address;
   /**
@@ -250,7 +268,7 @@ export class Ibc {
     if (reply && typeof reply === 'object' && !Array.isArray(reply) && 'message' in reply) {
       throw new IbcError(String(reply.message));
     }
-    return reply;
+    return readValue(reply);
   }
 
   constructor(url: string, agent: Address) {
@@ -552,16 +570,14 @@ export class Ibc {
   }
 
   #result(event: IbcEvent): unknown {
-    if (typeof event.reply === 'string' && /^execution reverted|^the node's grant/.test(event.reply)) {
-      throw new IbcError(event.reply);
-    }
+    if (event.error) throw new IbcError(event.error);
     return event.reply;
   }
 
   /** A read of a view or pure function: returns its result, at once. */
   async read(contract: string, method: string, values: Record<string, unknown> = {}, signer?: Signer): Promise<unknown> {
     const body = await this.query('contract_read', { contract, body: { method, values }, signer });
-    return this.request('POST', 'contract_read', { contract, method, body });
+    return readValue(await this.request('POST', 'contract_read', { contract, method, body }));
   }
 
   /** This agent's contracts on the node (an app sees those it may read). */
@@ -849,7 +865,7 @@ export class IbcApp {
         if (!needsApproval(err)) throw err;
       }
     }
-    return (await this.#approve({ type: 'read', contract, method, values })).value;
+    return readValue((await this.#approve({ type: 'read', contract, method, values })).value);
   }
 
   /** Writes silently if the user allowed this function, and otherwise asks the user. */
@@ -861,8 +877,8 @@ export class IbcApp {
         if (!needsApproval(err)) throw err;
       }
     }
-    const { reply } = await this.#approve({ type: 'call', contract, method, values });
-    if (typeof reply === 'string' && reply.startsWith('execution reverted')) throw new IbcError(reply);
+    const { reply, error } = await this.#approve({ type: 'call', contract, method, values });
+    if (typeof error === 'string' && error) throw new IbcError(error);
     return reply;
   }
 

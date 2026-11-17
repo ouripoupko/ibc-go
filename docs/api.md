@@ -52,8 +52,9 @@ when the call failed; check the reply itself.
   {"message": "consensus: unknown contract 0x67bb…"}
   ```
 
-- **Contract errors** (a revert, a wrong argument) come back as a string in place of the result:
-  `"execution reverted: amount must be positive"`.
+- **Contract errors** (a revert, a wrong argument, an unknown function) are marked, since a function
+  may return a string too. A read answers `{"error": "execution reverted: amount must be
+  positive"}`. A transaction's event has `error` set to the text, which is also its `reply`.
 - Status `400` means the body is not valid JSON, and `404` means the path has more than three parts
   after `/ibc/app/`.
 
@@ -521,10 +522,11 @@ approval page.
 
 **Reply:** the transaction id.
 
-**Event:** `contract_write`, with `reply` set to the function's result, or the error as a string. If
-the function fails, nothing it did is kept, and `state_root` is unchanged.
+**Event:** `contract_write`, with `reply` set to the function's result. If the function fails,
+`error` is set to the reason, `reply` is the same text, nothing the function did is kept, and
+`state_root` is unchanged. Check `error`, not the type of `reply`: a function may return a string.
 
-| Error reply | Meaning |
+| `error` | Meaning |
 |---|---|
 | `"execution reverted: <reason>"` | The function reverted with this reason (`require`, `revert`, or a custom error, shown as `Name(arg, …)`) |
 | `"execution reverted"` | The function reverted without a reason |
@@ -562,8 +564,8 @@ copy, and the function sees `msg.sender` set to **the agent**. The `<method>` in
 if given, it must match the query's. The function sees the latest state, and `block.timestamp` set to the
 time of the request.
 
-**Reply:** the function's result, or the error as a string (the same strings as for
-`contract_write`). `{"message": "no such contract"}` if the agent has no such contract, or its
+**Reply:** the function's result, or `{"error": "<reason>"}` if the contract failed it (the same
+reasons as for `contract_write`). `{"message": "no such contract"}` if the agent has no such contract, or its
 deployment has not finished yet.
 
 For a contract the agent is a [guest](#guests) of, the node sends the read to a host, which runs it
@@ -623,8 +625,8 @@ GET /ibc/app/<agent>/<contract>/<method>?action=public_read&values=<the argument
 `values` is the same object as in a `contract_read` body, e.g. `{"limit":5}`, and may be left out
 for a function without arguments.
 
-**Reply:** the function's result, or the error as a string, as for `contract_read`, e.g.
-`"execution reverted: sign in to read the messages"`. `{"message": "agent 0x… has no public
+**Reply:** the function's result, or `{"error": …}` as for `contract_read`, e.g.
+`{"error": "execution reverted: sign in to read the messages"}`. `{"message": "agent 0x… has no public
 contract 0x…"}` if the agent's copy is not public, or the agent has no such contract: the answer is
 the same, so a stranger learns nothing of private contracts.
 
@@ -848,6 +850,7 @@ PUT /ibc/app/<agent>/<contract>?action=a2a_consent
 | `contract` | The contract's id, or `null` for `register_agent` |
 | `action` | `register_agent`, `deploy_contract`, `contract_write`, `join` (a member's view of a join), `leave`, `rotate_key`, or `join_contract` (the joining agent's view) |
 | `reply` | The outcome: the function's result for `contract_write`, `true`/`false` for the others, or an error string |
+| `error` | Set, to the same text as `reply`, when the transaction failed (a revert, a wrong argument, an unknown function) |
 | `state_root` | The contract's state root after the transaction, as a hex hash. All zeros if the contract was never deployed |
 | `agent` | The subscribed agent the event belongs to |
 | `source_check`, `reason`, `source_hash` | `join_contract` only: see [`join_contract`](#join_contract) |

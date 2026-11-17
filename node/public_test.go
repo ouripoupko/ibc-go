@@ -2,6 +2,7 @@ package node
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -101,7 +102,7 @@ func TestPublicRead(t *testing.T) {
 		t.Fatalf("public counter = %v", got)
 	}
 	// Only reads: a function that changes state is refused.
-	if got, _ := publicRead(t, n, alice.id, cid, "setValue", map[string]any{"value": 1}).(string); !strings.Contains(got, "changes state") {
+	if got, _ := publicRead(t, n, alice.id, cid, "setValue", map[string]any{"value": 1}).(map[string]any); !strings.Contains(fmt.Sprint(got["error"]), "changes state") {
 		t.Fatalf("public setValue = %v", got)
 	}
 	// bob's agent has no copy: nothing public there.

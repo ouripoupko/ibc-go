@@ -365,7 +365,7 @@ func (d *Dispatcher) handle(ctx context.Context, record execution.Record, body [
 		if err != nil {
 			var ce *common.ContractError
 			if errors.As(err, &ce) || errors.Is(err, common.ErrNotImplemented) {
-				return err.Error(), nil
+				return readError(err), nil
 			}
 			return nil, err
 		}
@@ -718,6 +718,11 @@ func hashRecord(record execution.Record) string {
 }
 
 func message(text string) map[string]any { return map[string]any{"message": text} }
+
+// readError is the reply to a read the contract failed: a revert, an argument
+// the function does not take, an unknown function. It is an object, not the
+// text alone, because a function may return a string.
+func readError(err error) map[string]any { return map[string]any{"error": err.Error()} }
 
 func short(hash string) string {
 	if len(hash) > 10 {

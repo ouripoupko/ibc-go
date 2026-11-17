@@ -282,11 +282,20 @@ func TestCounter(t *testing.T) {
 	// A read-only call of a write method changes nothing.
 	// A read runs only view and pure functions.
 	expect(t, "read increment", c.read(counter, "increment", map[string]any{"amount": 100}),
-		`"increment changes state: send it as a transaction (contract_write)"`)
+		`{"error":"increment changes state: send it as a transaction (contract_write)"}`)
 	expect(t, "count after read", c.read(counter, "count", nil), `15`)
 	expect(t, "reset", c.write(counter, "reset", nil), `null`)
 	expect(t, "count after reset", c.read(counter, "count", nil), `0`)
 	expect(t, "missing argument", c.write(counter, "increment", nil), `"increment: missing argument \"amount\""`)
+	// An event says when a call failed: a function may return a string too.
+	stx := c.sign(identity.KindCall, counter, map[string]any{"method": "incremnt", "values": map[string]any{}})
+	if ev := c.await(c.request("POST", "contract_write", counter, "", stx)); ev["error"] != `unknown method "incremnt"` {
+		t.Errorf("event of an unknown method = %v", ev)
+	}
+	stx = c.sign(identity.KindCall, counter, map[string]any{"method": "increment", "values": map[string]any{"amount": 1}})
+	if ev := c.await(c.request("POST", "contract_write", counter, "", stx)); ev["error"] != nil {
+		t.Errorf("event of a call that worked = %v", ev)
+	}
 	expect(t, "no such contract", c.read("nope", "count", nil), `{"message":"no such contract"}`)
 }
 
@@ -328,7 +337,7 @@ func TestBoard(t *testing.T) {
 	expect(t, "myPosts", c.read(board, "myPosts", nil), `[0,1]`)
 	expect(t, "count", c.read(board, "count", nil), `2`)
 	expect(t, "whoAmI", c.read(board, "whoAmI", nil), fmt.Sprintf("%q", alice))
-	expect(t, "getPost(9)", c.read(board, "getPost", map[string]any{"id": 9}), `"execution reverted: no such post"`)
+	expect(t, "getPost(9)", c.read(board, "getPost", map[string]any{"id": 9}), `{"error":"execution reverted: no such post"}`)
 }
 
 // Chat, used by an app: the user lets the app post and like silently (the
@@ -441,7 +450,7 @@ func TestChatGuest(t *testing.T) {
 	if latest["author"] != bob.agent || latest["text"] != "hello from a guest" {
 		t.Errorf("latest = %v", latest)
 	}
-	expect(t, "a guest's revert", bob.read(chat, "latest", map[string]any{}), `"latest: missing argument \"limit\""`)
+	expect(t, "a guest's revert", bob.read(chat, "latest", map[string]any{}), `{"error":"latest: missing argument \"limit\""}`)
 
 	// Bob hears alice's posts.
 	stx := alice.sign(identity.KindCall, chat, map[string]any{"method": "post", "values": map[string]any{"text": "welcome"}})
@@ -512,9 +521,9 @@ func TestChatPublic(t *testing.T) {
 	expect(t, "anyone reads the topic", publicRead(t, alice.url, alice.agent, chat, "topic", nil), `"lunch"`)
 	expect(t, "anyone counts", publicRead(t, alice.url, alice.agent, chat, "count", nil), `1`)
 	expect(t, "but not the messages", publicRead(t, alice.url, alice.agent, chat, "latest", map[string]any{"limit": 1}),
-		`"execution reverted: sign in to read the messages"`)
+		`{"error":"execution reverted: sign in to read the messages"}`)
 	expect(t, "nor posts", publicRead(t, alice.url, alice.agent, chat, "post", map[string]any{"text": "spam"}),
-		`"post changes state: send it as a transaction (contract_write)"`)
+		`{"error":"post changes state: send it as a transaction (contract_write)"}`)
 	if latest := alice.read(chat, "latest", map[string]any{"limit": 1}).([]any); len(latest) != 1 {
 		t.Errorf("alice's signed read of latest = %v", latest)
 	}

@@ -287,7 +287,7 @@ C=$(ibc deploy Counter '{"start": 10}')       # the node compiles contracts/Coun
 ibc write "$C" increment '{"amount": 5}'
 # 15
 ibc write "$C" increment '{"amount": 0}'
-# "execution reverted: amount must be positive"
+# ibc.sh: execution reverted: amount must be positive    (and exit status 1)
 
 ibc read "$C" count
 # 15
@@ -401,9 +401,9 @@ P=$(ibc deploy Poll '{"text": "Lunch?", "choices": ["pizza", "salad", "soup"]}')
 ibc write "$P" vote '{"option": 1}'
 # 1
 ibc write "$P" vote '{"option": 2}'
-# "execution reverted: AlreadyVoted(1)"
+# ibc.sh: execution reverted: AlreadyVoted(1)
 ibc write "$P" vote '{"option": 7}'
-# "execution reverted: NoSuchOption(7, 3)"
+# ibc.sh: execution reverted: NoSuchOption(7, 3)
 
 ibc read "$P" results
 # ["Lunch?",["pizza","salad","soup"],[0,1,0]]
@@ -665,12 +665,13 @@ keep-alives.
 | `{"message": "this call needs a signed query"}` | Reads, `get_contract(s)` and the event stream are signed: see the [API reference](api.md#queries) |
 | `{"message": "query expired, or its time is wrong: check the clock"}` | Sign the query just before you send it; the node accepts it for 60 seconds |
 | `{"message": "query already used"}` | Every query is accepted once: sign a new one for each call |
-| `"increment: missing argument \"amount\""` | A key in `values` is missing or misspelled. Names must match the ABI exactly |
-| `"increment: unexpected argument \"amout\""` | A key in `values` that the method does not have |
-| `"unknown method \"incremnt\""` | No function with that name in the ABI |
-| `"increment changes state: send it as a transaction (contract_write)"` | Only `view` and `pure` functions can be read; others are transactions |
-| `"execution reverted: …"` | The contract reverted; the rest is its reason |
-| `"execution reverted"` (nothing after it) | The contract reverted without a reason, for example by calling `sha256` |
-| `"contract deployment failed: …"` | Every call to a contract whose constructor failed. Deploy it again |
-| `"0x…: not a partner or guest of this contract"` | A transaction from an agent the contract does not know |
-| `"increment: argument \"amount\": number 1.5 is not an exact integer; pass it as a string"` | Integers must be whole; very large ones must be strings |
+| *The rows below are contract errors: a read's `{"error": …}`, or a transaction event's `error`. The client throws them, and `ibc.sh` exits with them* | |
+| `increment: missing argument "amount"` | A key in `values` is missing or misspelled. Names must match the ABI exactly |
+| `increment: unexpected argument "amout"` | A key in `values` that the method does not have |
+| `unknown method "incremnt"` | No function with that name in the ABI |
+| `increment changes state: send it as a transaction (contract_write)` | Only `view` and `pure` functions can be read; others are transactions |
+| `execution reverted: …` | The contract reverted; the rest is its reason |
+| `execution reverted` (nothing after it) | The contract reverted without a reason, for example by calling `sha256` |
+| `contract deployment failed: …` | Every call to a contract whose constructor failed. Deploy it again |
+| `0x…: not a partner or guest of this contract` | A transaction from an agent the contract does not know |
+| `increment: argument "amount": number 1.5 is not an exact integer; pass it as a string` | Integers must be whole; very large ones must be strings |
