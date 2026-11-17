@@ -188,7 +188,7 @@ Every partner must compute the same result for the same records, so nothing depe
 | `block.gaslimit` | 100,000,000 for every call. Gas only bounds runaway code; nobody pays |
 | `chainid` | `0x1bc` |
 | Value transfers | Always zero |
-| Precompiles | None |
+| Precompiles | Osaka's, as on Ethereum: `ecrecover`, `sha256`, `ripemd160`, identity, `modexp`, bn254 add, mul and pairing, `blake2f`, KZG point evaluation, the BLS12-381 operations, and P-256 verification (`0x100`) |
 
 Every fork up to and including **Osaka** is active from genesis. Amsterdam and later are still in
 development in go-ethereum and stay off.
@@ -272,6 +272,9 @@ mv out/Registry_sol_Registry.bin testdata/Registry.bin
 mv out/Registry_sol_Registry.abi testdata/Registry.abi
 ```
 
+[`testdata/Precompiles.sol`](../testdata/Precompiles.sol) calls the precompiles, for
+`common/precompiles_test.go`; its `.bin` and `.abi` are committed and rebuilt the same way.
+
 The example contracts are rebuilt with `examples/scripts/compile.sh`.
 
 ### Upgrading go-ethereum
@@ -288,8 +291,6 @@ upgrade together.
 - **Recovering an identity** whose passkey is lost: future work, through trusted friends.
 - **A native app for the root key.** The root passkey belongs to the node's web address for now.
 - **Contract events.** Logs emitted by contracts are discarded.
-- **Precompile addresses.** There are no precompiles, but a call to one of their addresses does not
-  fail: `ecrecover` and `ripemd160` return zero, `sha256` reverts.
 - **Built-in methods.** `get_partners` and `get_parameters` answer "not implemented".
 - **Guests' trust in hosts.** A guest's node takes a host's answer to a read as it is, and is not
   told when the guest is removed (it learns at its next call). See

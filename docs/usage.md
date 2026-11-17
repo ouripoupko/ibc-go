@@ -186,9 +186,8 @@ contract Counter {
 | `require` / `revert` messages, custom errors | Become the reply, for example `execution reverted: amount must be positive` or `execution reverted: AlreadyVoted(1)` |
 | `msg.value`, `payable`, sending ether | There is no ether. `msg.value` is always 0, and sending any amount fails |
 | `emit` | Allowed, but events are not reported anywhere yet |
-| `keccak256` | Works |
-| `sha256` | Reverts: ibc has no precompiled contracts |
-| `ecrecover`, `ripemd160` | **Return zero without failing.** Do not use them |
+| `keccak256`, `sha256`, `ripemd160`, `ecrecover` | Work |
+| Precompiled contracts | Ethereum's, as of the Osaka fork: modexp, bn254 (add, mul, pairing: zero-knowledge proof verifiers such as Groth16 run), blake2f, KZG point evaluation, BLS12-381, and P-256 signature verification at `0x100` |
 | `block.coinbase`, `block.prevrandao`, `block.basefee`, `blockhash` | Always zero |
 | Gas | Each call may use up to 100 million gas. Nobody pays for it; it only stops runaway code |
 

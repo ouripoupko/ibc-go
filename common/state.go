@@ -356,7 +356,7 @@ func (s *State) deploy(fields map[string]any, caller, timestamp string) error {
 	evm, rules := newEVM(statedb, blockNumber, unixTime)
 	defer evm.Release()
 	from := AgentAddress(caller)
-	statedb.Prepare(rules, from, ethcommon.Address{}, nil, nil, nil)
+	statedb.Prepare(rules, from, ethcommon.Address{}, nil, vm.ActivePrecompiles(rules), nil)
 	evm.SetTxContext(vm.TxContext{Origin: from, GasPrice: new(uint256.Int)})
 	ret, address, _, err := evm.Create(from, append(code, packed...), vm.NewGasBudget(GasLimit, 0), new(uint256.Int))
 	if err != nil {
@@ -600,7 +600,7 @@ func (s *State) execute(caller, method string, values map[string]any, timestamp 
 	evm, rules := newEVM(statedb, blockNumber, unixTime)
 	defer evm.Release()
 	from := AgentAddress(caller)
-	statedb.Prepare(rules, from, ethcommon.Address{}, &s.address, nil, nil)
+	statedb.Prepare(rules, from, ethcommon.Address{}, &s.address, vm.ActivePrecompiles(rules), nil)
 	evm.SetTxContext(vm.TxContext{Origin: from, GasPrice: new(uint256.Int)})
 	ret, _, err := evm.Call(from, s.address, append(slices.Clone(m.ID), args...), vm.NewGasBudget(gas, 0), new(uint256.Int))
 	if err != nil {
@@ -728,9 +728,12 @@ func newEVM(statedb *state.StateDB, blockNumber, unixTime uint64) (*vm.EVM, para
 		BlobBaseFee: big.NewInt(0),
 		Random:      &random,
 	}
+	// The EVM has the precompiled contracts of the latest fork the chain
+	// config activates (Osaka): ecrecover, sha256, ripemd160, identity,
+	// modexp, bn254 add/mul/pairing, blake2f, KZG point evaluation, the
+	// BLS12-381 operations and P-256 verification. Callers mark their
+	// addresses warm (Prepare), as Ethereum does.
 	evm := vm.NewEVM(blockCtx, statedb, chainConfig, vm.Config{})
-	// No precompiles at all.
-	evm.SetPrecompiles(vm.PrecompiledContracts{})
 	return evm, chainConfig.Rules(number, true, unixTime)
 }
 
