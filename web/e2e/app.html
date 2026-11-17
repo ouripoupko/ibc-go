@@ -34,7 +34,7 @@
     });
     run('connect', () => app.connect());
     run('deploy', async () => {
-      const source = await (await fetch('/Chat.sol')).text();
+      const source = { 'Chat.sol': await (await fetch('/Chat.sol')).text() };
       chat = await app.deploy({ source, constructor: { initialTopic: 'lunch' } });
       return chat;
     });
@@ -42,7 +42,7 @@
     run('topic', () => app.read(chat, 'topic'));
     run('setTopic', () => app.write(chat, 'setTopic', { newTopic: 'dinner' }));
     run('deployPublic', async () => {
-      const source = await (await fetch('/Chat.sol')).text();
+      const source = { 'Chat.sol': await (await fetch('/Chat.sol')).text() };
       chat = await app.deploy({ source, constructor: { initialTopic: 'lunch' }, public: true });
       return chat;
     });
@@ -50,7 +50,7 @@
     // Joins the chat in the address, through the member there (?member=<agent>&memberNode=<url>).
     // The outcome arrives later, as an event: listen before asking.
     run('join', async () => {
-      const source = await (await fetch('/Chat.sol')).text();
+      const source = { 'Chat.sol': await (await fetch('/Chat.sol')).text() };
       const seen = [];
       const stop = app.onEvent((ev) => { if (ev.action === 'join_contract') seen.push(ev); });
       const id = await app.join(chat, params.get('memberNode'), params.get('member'), { source });

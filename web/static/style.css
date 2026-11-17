@@ -99,6 +99,10 @@ pre.result {
 }
 pre.result.ok { border-left: 3px solid var(--ok); }
 pre.result.bad { border-left: 3px solid var(--bad); color: var(--bad); }
+.file-path { margin: 12px 0 0; font-weight: 600; }
+ul.files { list-style: none; padding: 0; margin: 6px 0 0; }
+ul.files li { padding: 2px 0; overflow-wrap: anywhere; }
+label.inline { display: inline-block; font-weight: 400; }
 .status { margin-top: 10px; color: var(--muted); }
 .status.bad { color: var(--bad); }
 .status.ok { color: var(--ok); }

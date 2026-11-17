@@ -179,7 +179,8 @@ try {
     since(n).join(' | '));
   if (SHOTS) await pa.screenshot({ path: `${SHOTS}index-empty.png`, fullPage: true });
 
-  await (await pa.$('#d-source-file')).uploadFile(new URL('Counter.sol', CONTRACTS).pathname);
+  await (await pa.$('#d-source .source-files')).uploadFile(new URL('Counter.sol', CONTRACTS).pathname);
+  await pa.waitForFunction(() => /Counter\.sol/.test(document.querySelector('#d-source ul.files')?.textContent ?? ''));
   await pa.click('#d-compile');
   await waitText(pa, '#compile-status', /Compiled|error|not/, 90000);
   check('the node compiled the source', /Compiled Counter/.test(await text(pa, '#compile-status')), await text(pa, '#compile-status'));
@@ -222,9 +223,13 @@ try {
   const pb = await pageFor(ctx, 390);
   await createIdentity(pb, `${B}/#join=${invite}`, 'bob');
   check('invite prefilled from the link', await pb.$eval('#j-contract', (e) => e.value) === counter);
-  // Bob reads what he joins: the source, which Alice sent with the invite.
-  const setSource = (page, source) => page.$eval('#j-source', (e, v) => { e.value = v; }, source);
-  await setSource(pb, await readFile(new URL('Counter.sol', CONTRACTS), 'utf8'));
+  // Bob reads what he joins: the source, which Alice sent with the invite, as "Copy the
+  // source" gives it (its files as JSON); or one file, pasted, with its path.
+  const setSource = (page, text, path = '') => page.evaluate((t, p) => {
+    document.querySelector('#j-source .source-text').value = t;
+    if (p) document.querySelector('#j-source .source-path').value = p;
+  }, text, path);
+  await setSource(pb, JSON.stringify({ 'Counter.sol': await readFile(new URL('Counter.sol', CONTRACTS), 'utf8') }));
   await pb.click('#j-submit');
   await waitText(pb, '#join-status', /Joined|refused|Not joined/, 90000);
   check('bob joined, the source checked', /^Joined: open/.test(await text(pb, '#join-status')), await text(pb, '#join-status'));
@@ -305,7 +310,7 @@ try {
   await pb.goto(`${B}/#join=${chatInvite}`);
   await pb.waitForFunction((c) => document.querySelector('#j-contract').value === c, { timeout: 30000 }, chat);
   await pb.click('#j-guest');
-  await setSource(pb, await readFile(new URL('Chat.sol', CONTRACTS), 'utf8'));
+  await setSource(pb, await readFile(new URL('Chat.sol', CONTRACTS), 'utf8'), 'Chat.sol');
   n = boxes.length;
   await pb.click('#j-submit');
   await waitText(pb, '#join-status', /Joined|refused|Not joined/, 90000);
@@ -418,6 +423,27 @@ try {
   line = await appClick(pApp, 'connect', { approve: a });
   check('the approval page registers again, then the request continues',
     a.renewed === true && line === `connect "${alice.agent}"`, `${line} · renewed ${a.renewed}`);
+
+  // A contract of two files, one importing the other: picked together, compiled, deployed.
+  await pa.bringToFront();
+  await pa.goto(`${A}/`);
+  await pa.waitForSelector('#agent-area:not(.hidden)', { timeout: 30000 });
+  await (await pa.$('#d-source .source-files')).uploadFile(...['Tally.sol', 'Sum.sol'].map((f) => new URL(`multi/${f}`, import.meta.url).pathname));
+  await pa.waitForFunction(() => /Sum\.sol.*Tally\.sol/s.test(document.querySelector('#d-source ul.files')?.textContent ?? ''));
+  await pa.type('#d-contract', 'Tally');
+  await pa.click('#d-compile');
+  await waitText(pa, '#compile-status', /Compiled|error|not/, 90000);
+  check('the node compiled two files', /Compiled Tally/.test(await text(pa, '#compile-status')), await text(pa, '#compile-status'));
+  await pa.$eval('#d-name', (e) => { e.value = 'tally'; });
+  await pa.click('#d-submit');
+  await waitText(pa, '#deploy-status', /Deployed|rror/);
+  check('deployed two files', /Deployed/.test(await text(pa, '#deploy-status')), await text(pa, '#deploy-status'));
+  await pa.click('#deploy-status a');
+  await pa.waitForSelector('#contract-area:not(.hidden)');
+  check('the contract page shows both files', /Sum\.sol, Tally\.sol/.test(await text(pa, '#details'))
+    && await pa.$$eval('#code .file-path', (els) => els.map((e) => e.textContent).join()) === 'Sum.sol,Tally.sol', await text(pa, '#details'));
+  r = await runFn(pa, '#writes', 'count', [7]);
+  check('count(7) -> 7, through the imported library', r.text === '7', r.text);
 
   check('message boxes closed', await pa.$eval('body', () => !document.querySelector('dialog.signing')?.open));
   console.log('passkey requests:', boxes.length);

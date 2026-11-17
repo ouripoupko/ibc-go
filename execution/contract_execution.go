@@ -294,8 +294,7 @@ func (c *ContractExecution) checkGrant(agent string, g *identity.Grant) error {
 	if err != nil {
 		return err
 	}
-	source, _ := fields[KeySource].(string)
-	if source == "" || identity.SourceHash(source) != g.SourceHash {
+	if source, err := SourcesOf(fields); err != nil || identity.SourceHash(source) != g.SourceHash {
 		return fmt.Errorf("%w: it is for another source", ErrGrantDoesNotApply)
 	}
 	partner, err := c.partnersDB.Document(agent).Fields()
@@ -340,7 +339,7 @@ func (c *ContractExecution) decide(record Record) (bool, common.Result, error) {
 		if ferr != nil {
 			return false, common.Result{}, ferr
 		}
-		if source, _ := fields[KeySource].(string); source == "" || identity.SourceHash(source) != b.SourceHash {
+		if source, serr := SourcesOf(fields); serr != nil || identity.SourceHash(source) != b.SourceHash {
 			approved, res, err = c.state.Decide(agent.Hex(), "", agent, record.Timestamp, id, false)
 			break
 		}

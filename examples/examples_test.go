@@ -43,7 +43,9 @@ func newClient(t *testing.T) *client {
 	t.Helper()
 	// No compiler in the tests: a joined contract's source counts as checked.
 	n, err := node.New(node.Config{DB: rawdb.NewMemoryDatabase(),
-		CheckSource: func(context.Context, string, json.RawMessage, string) (string, string) { return compiler.Verified, "" }})
+		CheckSource: func(context.Context, identity.Sources, json.RawMessage, string) (string, string) {
+			return compiler.Verified, ""
+		}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -405,14 +407,14 @@ func (c *client) getContract(contract string) map[string]any {
 	return out
 }
 
-// source is an example contract's Solidity source.
-func source(t *testing.T, name string) string {
+// source is an example contract's Solidity source: its one file.
+func source(t *testing.T, name string) identity.Sources {
 	t.Helper()
 	src, err := os.ReadFile("contracts/" + name + ".sol")
 	if err != nil {
 		t.Fatal(err)
 	}
-	return string(src)
+	return identity.Sources{name + ".sol": string(src)}
 }
 
 // joinAsGuest asks host, on its node, to let the user join as a guest a

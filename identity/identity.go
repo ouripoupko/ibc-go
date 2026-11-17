@@ -268,10 +268,11 @@ type (
 		Constructor map[string]any    `json:"constructor,omitempty"`
 		Node        string            `json:"node"`
 		NodeKey     ethcommon.Address `json:"nodeKey"`
-		// The Solidity source, and how the creator's node compiled Code from
-		// it (see package compiler): a joining node compiles it again and
-		// compares. Partners join, and grant, by the source's hash.
-		Source   string          `json:"source"`
+		// The Solidity source, its files by path, and how the creator's node
+		// compiled Code from it (see package compiler): a joining node
+		// compiles it again and compares. Partners join, and grant, by the
+		// source's hash (SourceHash).
+		Source   Sources         `json:"source"`
 		Compiler json.RawMessage `json:"compiler"`
 	}
 	CallBody struct {
@@ -330,8 +331,11 @@ func (t Transaction) ParseBody() (any, error) {
 		if b.Code == "" || len(b.ABI) == 0 || b.NodeKey == (ethcommon.Address{}) {
 			return nil, errors.New("deploy body needs code, abi and nodeKey")
 		}
-		if b.Source == "" || len(b.Compiler) == 0 || string(b.Compiler) == "null" {
+		if len(b.Source) == 0 || len(b.Compiler) == 0 || string(b.Compiler) == "null" {
 			return nil, errors.New("deploy body needs the source and the compiler that compiled it")
+		}
+		if err := b.Source.Validate(); err != nil {
+			return nil, fmt.Errorf("deploy body: %w", err)
 		}
 	case *CallBody:
 		if b.Method == "" {
@@ -449,12 +453,6 @@ func LoadOrCreateNodeKey(path string) (*ecdsa.PrivateKey, error) {
 		return nil, fmt.Errorf("save node key %s: %w", path, err)
 	}
 	return key, nil
-}
-
-// SourceHash is a contract's source hash, as joins, grants and consents name
-// it: the keccak256 of the Solidity source text, byte for byte.
-func SourceHash(source string) ethcommon.Hash {
-	return crypto.Keccak256Hash([]byte(source))
 }
 
 // CodeHash is the keccak256 of a contract's creation bytecode (hex, with or

@@ -117,9 +117,9 @@ func (d *Dispatcher) sourceHash(agent, contract string) (ethcommon.Hash, error) 
 	if !ok {
 		return ethcommon.Hash{}, fmt.Errorf("%w %q", execution.ErrUnknownContract, contract)
 	}
-	source, _ := summary[execution.KeySource].(string)
-	if source == "" {
-		return ethcommon.Hash{}, fmt.Errorf("contract %s has no source", contract)
+	source, err := execution.SourcesOf(summary)
+	if err != nil {
+		return ethcommon.Hash{}, fmt.Errorf("contract %s: %w", contract, err)
 	}
 	return identity.SourceHash(source), nil
 }

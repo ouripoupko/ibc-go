@@ -173,10 +173,29 @@ function concat(...parts: Uint8Array[]): Uint8Array {
 export const keccak256 = (bytes: Uint8Array): Uint8Array => keccak_256(bytes);
 
 /**
- * A contract source's hash, as joins, grants and consents name it: the
- * keccak256 of the Solidity source text, byte for byte (as UTF-8).
+ * A contract's Solidity source: its files, by path ("Main.sol",
+ * "lib/Util.sol"). Files import each other by these paths; a contract
+ * compiles from its files alone. Paths are relative, of letters, digits, '.',
+ * '_', '-' and '/', and end in .sol.
  */
-export const sourceHashOf = (source: string): Hex => toHex(keccak256(new TextEncoder().encode(source)));
+export type Sources = Record<string, string>;
+
+/**
+ * A contract source's hash, as joins, grants and consents name it: keccak256
+ * over the files sorted by path, each as keccak256(path) ‖ keccak256(content)
+ * (UTF-8). The same as the node's (identity.SourceHash).
+ */
+export function sourceHashOf(source: Sources): Hex {
+  const paths = Object.keys(source).sort(); // ASCII paths: the node's byte order
+  if (paths.length === 0) throw new Error('the source has no files');
+  const utf8 = new TextEncoder();
+  const all = new Uint8Array(64 * paths.length);
+  paths.forEach((path, i) => {
+    all.set(keccak256(utf8.encode(path)), 64 * i);
+    all.set(keccak256(utf8.encode(source[path])), 64 * i + 32);
+  });
+  return toHex(keccak256(all));
+}
 
 /** A random nonce, as hex without 0x. */
 export function nonce(): string {

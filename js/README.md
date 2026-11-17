@@ -27,7 +27,8 @@ const app = await IbcApp.open('https://node.example');   // the user's node
 
 // From a click (browsers open the approval page only from a click):
 const agent = await app.connect();      // who the user is: they sign in, or create an identity
-const source = await (await fetch('/Chat.sol')).text();
+// A source is the contract's files, by path; they import each other by these paths.
+const source = { 'Chat.sol': await (await fetch('/Chat.sol')).text() };
 const chat = await app.deploy({ source, constructor: { initialTopic: 'lunch' } });
 // The user approves on their node: the deploy, and what the app may do without asking.
 
@@ -41,8 +42,8 @@ app.onEvent((event) => console.log(event));                 // events of the app
 approve. They resolve with the function's result, and reject with an `IbcError` when the
 contract failed the call: a revert (`execution reverted: …`), an argument the function does not take
 or lacks, a value of the wrong type, an unknown function. Also: `app.permit(contract)` asks for permissions on an existing contract, and
-`app.join(contract, memberNode, memberAgent, { source, guest })` asks the user to join one, as a
-partner or as a guest.
+`app.join(contract, memberNode, memberAgent, { source, guest, contractName })` asks the user to join one, as a
+partner or as a guest (`contractName`, `Name` or `path:Name`, if the source has several contracts).
 
 ## Joining
 
@@ -52,7 +53,7 @@ the members refuse it if it is not the contract's. The approval window closes as
 sent, and `join` resolves with its id; the outcome arrives later, as an event:
 
 ```js
-const source = await (await fetch('/Chat.sol')).text();     // byte for byte the deployed source
+const source = { 'Chat.sol': await (await fetch('/Chat.sol')).text() };  // the deployed files, same paths
 const id = await app.join(chat, memberNode, memberAgent, { source });
 app.onEvent((event) => {
   if (event.action !== 'join_contract' || event.request !== id) return;
@@ -117,8 +118,8 @@ const agent = addressOf(rootKey.publicKey);
 const ibc = await Ibc.connect('http://localhost:2611', { agent, root: p256Signer(rootKey) });
 await ibc.register();
 
-const compiled = await ibc.compile(source);    // the node compiles
-const counter = await ibc.deploy({ name: 'counter', code: compiled.code, abi: compiled.abi,
+const compiled = await ibc.compile(source);    // the node compiles; source: { 'Counter.sol': '…' }
+const counter = await ibc.deploy({ name: 'counter', contract: compiled.contract, code: compiled.code, abi: compiled.abi,
   constructor: { start: 10 }, source, compiler: compiled.compiler });
 await ibc.write(counter, 'increment', { amount: 5 });   // 15
 await ibc.read(counter, 'count');                       // 15

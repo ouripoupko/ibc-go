@@ -97,7 +97,19 @@ func TestVectors(t *testing.T) {
 		keys = append(keys, keyVector{PublicKey: hexutil.Encode(PublicKey(k)), Address: a.Hex()})
 	}
 
-	got, _ := json.MarshalIndent(map[string]any{"messages": vectors, "keys": keys}, "", "  ")
+	type sourceVector struct {
+		Files Sources `json:"files"`
+		Hash  string  `json:"hash"`
+	}
+	sources := []sourceVector{}
+	for _, files := range []Sources{
+		{"Counter.sol": "contract Counter {}\n"},
+		{"Main.sol": "import \"./lib/Util.sol\";\ncontract Main {}\n", "lib/Util.sol": "library Util {}\n", "z/Last.sol": "// ünïcode content\n"},
+	} {
+		sources = append(sources, sourceVector{Files: files, Hash: SourceHash(files).Hex()})
+	}
+
+	got, _ := json.MarshalIndent(map[string]any{"messages": vectors, "keys": keys, "sources": sources}, "", "  ")
 	got = append(got, '\n')
 	const path = "testdata/vectors.json"
 	if *update {

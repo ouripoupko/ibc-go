@@ -58,13 +58,12 @@
 
       <section class="card">
         <h2>Deploy a contract</h2>
-        <p class="hint">Give the contract's Solidity source (<code>.sol</code>). This node compiles
-          it, and you sign the deployment.</p>
+        <p class="hint">Give the contract's Solidity source: its <code>.sol</code> files, which may
+          import each other by their paths (pick a folder to keep its paths). Nothing else is
+          fetched: give every file it imports. This node compiles it, and you sign the deployment.</p>
         <form id="deploy">
-          <label for="d-source">Source (.sol)</label>
-          <input type="file" id="d-source-file" accept=".sol,.txt">
-          <textarea id="d-source" placeholder="pragma solidity ^0.8.24;&#10;contract Counter { … }" spellcheck="false"></textarea>
-          <label for="d-contract">Contract name <span class="type">(if the file has several)</span></label>
+          <div id="d-source"></div>
+          <label for="d-contract">Contract name <span class="type">(if the source has several: Name, or path:Name)</span></label>
           <input type="text" id="d-contract" autocomplete="off">
           <button type="button" class="secondary" id="d-compile">Compile</button>
           <div class="status" id="compile-status"></div>
@@ -96,11 +95,11 @@
           <input type="url" id="j-node" required autocomplete="off" placeholder="https://…">
           <label for="j-agent">Member's agent id</label>
           <input type="text" id="j-agent" required autocomplete="off" placeholder="0x…">
-          <label for="j-source">The contract's source (.sol)</label>
+          <h3 style="font-size: 14px; margin: 16px 0 0">The contract's source</h3>
           <p class="hint">Read what you join: the members refuse the join if this is not the contract's
-            source, and your node checks that it compiles to the contract's code.</p>
-          <input type="file" id="j-source-file" accept=".sol,text/plain">
-          <textarea id="j-source" required spellcheck="false" placeholder="pragma solidity …"></textarea>
+            source, all its files with the same paths, and your node checks that it compiles to the
+            contract's code. Paste what the member's "Copy the source" gave you, or pick the files.</p>
+          <div id="j-source"></div>
           <label class="check"><input type="checkbox" id="j-guest"> Join as a guest: your node keeps no copy
             and takes no part in consensus; it sends your transactions and reads to the member's node</label>
           <button type="submit" id="j-submit">Ask to join</button>

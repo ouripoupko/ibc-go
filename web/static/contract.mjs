@@ -1,7 +1,7 @@
 // The contract page: details, an invite, and a form for each ABI function.
 import {
   $, el, status, busy, errorText, connect, parseAbi, functionForm, isRead, encodeInvite, pretty, short,
-  loadIdentity, sourceHashOf, writeFunctions, permissionItems, registerPermission,
+  loadIdentity, sourceHashOf, sourcePaths, showSource, writeFunctions, permissionItems, registerPermission,
 } from './app.mjs';
 import { signBatch } from './js/index.js';
 
@@ -46,7 +46,8 @@ function show(c) {
     ['Transactions', guest ? undefined : (c.block_number ?? 0)],
     ['State root', c.state_root],
     ['EVM address', c.evm_address],
-    ['Source file', c.contract],
+    ['Contract in the source', c.contract],
+    ['Source files', c.source ? sourcePaths(c.source).join(', ') : undefined],
     ['Deployment error', c.deploy_error],
     ['Source', c.source_check === 'verified' ? 'checked: it compiles to the deployed code' : undefined],
   ];
@@ -65,9 +66,10 @@ function show(c) {
   $('#invite').textContent = invite;
   $('#copy-source').addEventListener('click', async () => {
     try {
-      await navigator.clipboard.writeText(c.source ?? '');
+      await navigator.clipboard.writeText(JSON.stringify(c.source ?? {}, sourcePaths(c.source), 2));
       $('#copy-source').textContent = 'Copied';
     } catch {
+      $('#code').replaceChildren(el('pre', { class: 'result' }, JSON.stringify(c.source ?? {}, sourcePaths(c.source), 2)));
       $('#code').classList.remove('hidden');
       getSelection().selectAllChildren($('#code'));
     }
@@ -110,7 +112,7 @@ function show(c) {
   $('#reads').replaceChildren(...reads.map((f) => functionForm(f, 'Read', (values) => ibc.read(c.id, f.name, values))));
   $('#writes').replaceChildren(...writes.map((f) => functionForm(f, 'Send', (values) => ibc.write(c.id, f.name, values))));
   if (c.source) {
-    $('#code').textContent = c.source;
+    showSource($('#code'), c.source);
     $('#code-toggle').classList.remove('hidden');
     $('#show-code').addEventListener('click', () => {
       const shown = $('#code').classList.toggle('hidden');

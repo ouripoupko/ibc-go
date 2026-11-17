@@ -215,7 +215,7 @@ func (d *Dispatcher) handle(ctx context.Context, record execution.Record, body [
 		// An app sees the contracts it may read.
 		mine := []map[string]any{}
 		for _, summary := range list {
-			if source, _ := summary[execution.KeySource].(string); source != "" && c.app.permission(identity.SourceHash(source)).Read {
+			if source, err := execution.SourcesOf(summary); err == nil && c.app.permission(identity.SourceHash(source)).Read {
 				mine = append(mine, summary)
 			}
 		}
@@ -294,11 +294,11 @@ func (d *Dispatcher) handle(ctx context.Context, record execution.Record, body [
 
 	case route{http.MethodPost, actionCompile}:
 		var req struct {
-			Source   string `json:"source"`
-			Contract string `json:"contract"`
+			Source   identity.Sources `json:"source"`
+			Contract string           `json:"contract"`
 		}
-		if err := json.Unmarshal(body, &req); err != nil || req.Source == "" {
-			return nil, errors.New("compile needs {source, contract}")
+		if err := json.Unmarshal(body, &req); err != nil || len(req.Source) == 0 {
+			return nil, errors.New("compile needs {source, contract}: source is the files, by path")
 		}
 		res, err := d.compiler.Compile(ctx, req.Source, req.Contract)
 		if err != nil {

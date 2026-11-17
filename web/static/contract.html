@@ -26,7 +26,7 @@
         <h2 id="name"></h2>
         <dl class="details" id="details"></dl>
         <p class="hidden" id="code-toggle"><button type="button" class="link" id="show-code">Show the code</button></p>
-        <pre class="result hidden" id="code"></pre>
+        <div class="hidden" id="code"></div>
       </section>
 
       <section class="card" id="invite-card">
@@ -38,7 +38,8 @@
           <button class="secondary" id="copy-invite">Copy</button>
         </div>
         <p class="hint">They also need the contract's source, to read what they join: send it with
-          the invite.</p>
+          the invite. It is copied as JSON of its files by path, which they paste where they join:
+          the paths are part of the source.</p>
         <button class="secondary" id="copy-source">Copy the source</button>
       </section>
 

@@ -13,7 +13,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -35,7 +37,7 @@ var Settings = map[string]any{
 
 // Result is a compiled contract.
 type Result struct {
-	Contract   string          `json:"contract"` // the contract's name in the source
+	Contract   string          `json:"contract"` // the contract's name in the source ("Name" or "path:Name")
 	Code       string          `json:"code"`     // the creation bytecode, hex
 	ABI        json.RawMessage `json:"abi"`
 	SourceHash string          `json:"sourceHash"` // identity.SourceHash of the source
@@ -74,18 +76,28 @@ type contract struct {
 // runner runs a compiler: --version, or --standard-json with input on stdin.
 type runner func(ctx context.Context, stdin []byte, args ...string) ([]byte, error)
 
-// standardJSON compiles source (one file) with settings, and returns its
-// deployable contracts by name.
-func standardJSON(ctx context.Context, run runner, source string, settings map[string]any) (map[string]contract, error) {
+// standardJSON compiles the source's files with settings, and returns their
+// deployable contracts by "path:Name". The files are all the compiler gets:
+// it runs with no import callback, in an empty directory, and a compilation
+// that read any file not in the source is refused, so imports resolve only
+// within the source.
+func standardJSON(ctx context.Context, run runner, source identity.Sources, settings map[string]any) (map[string]contract, error) {
+	if err := source.Validate(); err != nil {
+		return nil, err
+	}
 	all := map[string]any{"outputSelection": map[string]any{"*": map[string]any{"*": []string{"abi", "evm.bytecode.object"}}}}
 	for k, v := range settings {
 		if k != "outputSelection" {
 			all[k] = v
 		}
 	}
+	files := make(map[string]any, len(source))
+	for path, content := range source {
+		files[path] = map[string]any{"content": content}
+	}
 	input, err := json.Marshal(map[string]any{
 		"language": "Solidity",
-		"sources":  map[string]any{"contract.sol": map[string]any{"content": source}},
+		"sources":  files,
 		"settings": all,
 	})
 	if err != nil {
@@ -104,6 +116,7 @@ func standardJSON(ctx context.Context, run runner, source string, settings map[s
 			Severity         string `json:"severity"`
 			FormattedMessage string `json:"formattedMessage"`
 		} `json:"errors"`
+		Sources   map[string]json.RawMessage `json:"sources"`
 		Contracts map[string]map[string]struct {
 			ABI json.RawMessage `json:"abi"`
 			EVM struct {
@@ -125,33 +138,61 @@ func standardJSON(ctx context.Context, run runner, source string, settings map[s
 	if len(problems) > 0 {
 		return nil, errSource{problems}
 	}
+	for path := range res.Sources {
+		if _, ok := source[path]; !ok {
+			return nil, errSource{[]string{fmt.Sprintf("the compiler read %s, which is not in the source: imports must name the source's own files", path)}}
+		}
+	}
+	for path := range res.Contracts {
+		if _, ok := source[path]; !ok {
+			return nil, errSource{[]string{fmt.Sprintf("the compiler compiled %s, which is not in the source", path)}}
+		}
+	}
 	contracts := map[string]contract{}
-	for n, c := range res.Contracts["contract.sol"] {
-		if c.EVM.Bytecode.Object != "" { // skip interfaces and abstract contracts
-			contracts[n] = contract{ABI: c.ABI, Code: c.EVM.Bytecode.Object}
+	for path, cs := range res.Contracts {
+		for n, c := range cs {
+			if c.EVM.Bytecode.Object != "" { // skip interfaces and abstract contracts
+				contracts[path+":"+n] = contract{ABI: c.ABI, Code: c.EVM.Bytecode.Object}
+			}
 		}
 	}
 	return contracts, nil
 }
 
-// pick returns the contract named name, or the only one if name is empty.
+// pick returns the contract that name names: "path:Name", or "Name" if only
+// one file has a contract of that name; or the only contract, if name is
+// empty. It returns the contract's name as name gave it ("Name" for an empty
+// name).
 func pick(contracts map[string]contract, name string) (string, contract, error) {
-	names := make([]string, 0, len(contracts))
-	for n := range contracts {
-		names = append(names, n)
+	keys := make([]string, 0, len(contracts))
+	for k := range contracts {
+		keys = append(keys, k)
 	}
-	sort.Strings(names)
+	sort.Strings(keys)
+	shortName := func(key string) string { return key[strings.LastIndex(key, ":")+1:] }
 	if name == "" {
-		if len(names) != 1 {
-			return "", contract{}, fmt.Errorf("the source has %d contracts (%s): say which one", len(names), strings.Join(names, ", "))
+		if len(keys) != 1 {
+			return "", contract{}, fmt.Errorf("the source has %d deployable contracts (%s): say which one", len(keys), strings.Join(keys, ", "))
 		}
-		name = names[0]
+		return shortName(keys[0]), contracts[keys[0]], nil
 	}
-	c, ok := contracts[name]
-	if !ok {
-		return "", contract{}, fmt.Errorf("no deployable contract %q in the source (it has: %s)", name, strings.Join(names, ", "))
+	if c, ok := contracts[name]; ok {
+		return name, c, nil
 	}
-	return name, c, nil
+	var found []string
+	for _, k := range keys {
+		if shortName(k) == name {
+			found = append(found, k)
+		}
+	}
+	switch len(found) {
+	case 1:
+		return name, contracts[found[0]], nil
+	case 0:
+		return "", contract{}, fmt.Errorf("no deployable contract %q in the source (it has: %s)", name, strings.Join(keys, ", "))
+	default:
+		return "", contract{}, fmt.Errorf("%d files have a contract %q (%s): name it as path:Name", len(found), name, strings.Join(found, ", "))
+	}
 }
 
 // versionOf reads a compiler's version from its --version output.
@@ -218,9 +259,10 @@ func (s *Solc) versionLocked(ctx context.Context) (string, error) {
 	return s.version, nil
 }
 
-// Compile compiles source (one file) with the node's Settings, and returns
-// the contract named name, or the only contract in the file if name is empty.
-func (s *Solc) Compile(ctx context.Context, source, name string) (Result, error) {
+// Compile compiles source with the node's Settings, and returns the contract
+// that name names ("Name" or "path:Name"), or the only deployable contract if
+// name is empty.
+func (s *Solc) Compile(ctx context.Context, source identity.Sources, name string) (Result, error) {
 	if s == nil || len(s.Command) == 0 {
 		return Result{}, ErrNoCompiler
 	}
@@ -233,7 +275,7 @@ func (s *Solc) Compile(ctx context.Context, source, name string) (Result, error)
 	return compileResult(ctx, s.run, version, source, name)
 }
 
-func compileResult(ctx context.Context, run runner, version, source, name string) (Result, error) {
+func compileResult(ctx context.Context, run runner, version string, source identity.Sources, name string) (Result, error) {
 	contracts, err := standardJSON(ctx, run, source, Settings)
 	if err != nil {
 		return Result{}, err
@@ -259,7 +301,24 @@ func runCommand(ctx context.Context, timeout time.Duration, command []string, st
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, command[0], append(append([]string{}, command[1:]...), args...)...)
+	// The compiler runs in an empty directory, so that one that reads
+	// imports from its directory finds nothing there; a program given by a
+	// relative path is found from here first.
+	prog := command[0]
+	if strings.ContainsRune(prog, filepath.Separator) && !filepath.IsAbs(prog) {
+		abs, err := filepath.Abs(prog)
+		if err != nil {
+			return nil, err
+		}
+		prog = abs
+	}
+	dir, err := os.MkdirTemp("", "ibc-solc-")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(dir)
+	cmd := exec.CommandContext(ctx, prog, append(append([]string{}, command[1:]...), args...)...)
+	cmd.Dir = dir
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}

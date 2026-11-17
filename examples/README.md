@@ -12,8 +12,11 @@ Example contracts and clients for ibc. The [usage guide](../docs/usage.md) walks
 | [`Chat.sol`](contracts/Chat.sol) | A contract for an app: users let it post and like without asking; the topic asks each time. Anyone may join as a guest (`approve_guest`). Made public, anyone reads its topic and count, but not its messages (`msg.sender != address(0)`) |
 
 The node compiles a contract from its source when you deploy it (`ibc.sh deploy`, the web
-interface, apps): the deploy carries the source, and whoever joins reads it. Joining from the shell
-names the source file: `ibc.sh join CONTRACT MEMBER_URL MEMBER_ID contracts/Chat.sol`.
+interface, apps): the deploy carries the source, and whoever joins reads it. A source is files by
+path, which import each other: `ibc.sh deploy NAME` deploys `contracts/NAME.sol`, or the contract
+`NAME` of the files in a folder `contracts/NAME/` (by their paths in it). Joining from the shell
+names the source: `ibc.sh join CONTRACT MEMBER_URL MEMBER_ID contracts/Chat.sol` (or the folder, or
+a `.json` of the files, as a contract's page copies them).
 
 The compiled contracts in [`build/`](build), `<Name>.bin` (bytecode) and `<Name>.abi` (interface),
 are for the Go tests. After changing a contract, compile it again (needs Node.js):

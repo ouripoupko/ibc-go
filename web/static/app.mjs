@@ -398,10 +398,92 @@ export function short(id) {
   return typeof id === 'string' && id.length > 14 ? `${id.slice(0, 8)}…${id.slice(-4)}` : id;
 }
 
-/** Reads a file input as text. */
-export function readFile(input) {
-  const file = input.files?.[0];
-  return file ? file.text() : Promise.resolve(null);
+// Contract sources: a contract's Solidity files, by path ({ "Main.sol": "…",
+// "lib/Util.sol": "…" }). Files import each other by these paths, and the
+// source hash covers the paths too: a joiner needs the same paths as the
+// deployer, which "Copy the source" (JSON) keeps.
+
+/** The source's paths, sorted as the node sorts them. */
+export const sourcePaths = (source) => Object.keys(source ?? {}).sort();
+
+/**
+ * Parses pasted source text: the source's files as JSON (what "Copy the
+ * source" gives), or one Solidity file, which gets path. A Solidity file
+ * cannot start with "{".
+ */
+export function parseSourceText(text, path) {
+  const trimmed = text.trim();
+  if (!trimmed) return {};
+  if (trimmed.startsWith('{')) {
+    let files;
+    try {
+      files = JSON.parse(trimmed);
+    } catch {
+      throw new Error('The pasted source starts with "{" but is not JSON of files by path.');
+    }
+    if (!files || typeof files !== 'object' || Array.isArray(files) || Object.values(files).some((v) => typeof v !== 'string')) {
+      throw new Error('The pasted JSON is not the source\'s files by path ({"Main.sol": "…"}).');
+    }
+    return files;
+  }
+  if (!path) throw new Error('Give the pasted file\'s path (as the other files import it).');
+  return { [path]: text };
+}
+
+/**
+ * A source input: Solidity files picked one by one (each by its name) or as a
+ * folder (by their paths in it), and a pasted file or JSON of files.
+ * read() returns the source; onChange is called when it may have changed.
+ */
+export function sourceInput({ onChange = () => {}, pasteLabel = 'Or paste a file' } = {}) {
+  const picked = new Map(); // path -> content
+  const list = el('ul', { class: 'files' });
+  const changed = () => {
+    list.replaceChildren(...[...picked.keys()].sort().map((path) => el('li', {},
+      el('span', { class: 'mono' }, path), ' ',
+      el('button', { type: 'button', class: 'link', onclick: () => { picked.delete(path); changed(); } }, 'remove'))));
+    onChange();
+  };
+  const add = async (input, byFolder) => {
+    for (const file of input.files ?? []) {
+      // A folder's files come with "folder/sub/File.sol": the paths are within the folder.
+      const path = byFolder ? file.webkitRelativePath.split('/').slice(1).join('/') : file.name;
+      if (path.endsWith('.sol')) picked.set(path, await file.text());
+    }
+    input.value = '';
+    changed();
+  };
+  const files = el('input', { type: 'file', class: 'source-files', multiple: true, accept: '.sol', onchange: (e) => add(e.target, false) });
+  const folder = el('input', { type: 'file', class: 'source-folder', webkitdirectory: true, onchange: (e) => add(e.target, true) });
+  const text = el('textarea', { class: 'source-text', spellcheck: 'false', placeholder: 'pragma solidity ^0.8.24;\ncontract Counter { … }\n\nor the source\'s files as JSON, as "Copy the source" gives them', oninput: onChange });
+  const path = el('input', { type: 'text', class: 'source-path', autocomplete: 'off', value: 'Contract.sol', oninput: onChange });
+  const node = el('div', {},
+    el('div', { class: 'row' }, el('label', { class: 'inline' }, 'Files ', files), el('label', { class: 'inline' }, 'A folder ', folder)),
+    list,
+    el('label', {}, pasteLabel),
+    text,
+    el('label', {}, 'The pasted file\'s path ', el('span', { class: 'type' }, '(as other files import it; not for JSON)')),
+    path);
+  return {
+    node,
+    read() {
+      const source = { ...Object.fromEntries(picked) };
+      for (const [p, content] of Object.entries(parseSourceText(text.value, path.value.trim()))) {
+        if (p in source && source[p] !== content) throw new Error(`Two different files for ${p}.`);
+        source[p] = content;
+      }
+      if (!Object.keys(source).length) throw new Error('Give the contract\'s source.');
+      return source;
+    },
+  };
+}
+
+/** Shows a source's files, each under its path, in container. */
+export function showSource(container, source) {
+  container.replaceChildren(...sourcePaths(source).flatMap((path) => [
+    el('div', { class: 'file-path mono' }, path),
+    el('pre', { class: 'result' }, source[path]),
+  ]));
 }
 
 // Invites: a member shares the contract id, its node and its agent id, so

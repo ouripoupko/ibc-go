@@ -10,11 +10,15 @@
 #   ibc.sh whoami                                your agent id (the key's address)
 #   ibc.sh register                              register yourself on the node
 #   ibc.sh exists                                are you registered?
-#   ibc.sh deploy NAME [CONSTRUCTOR_JSON]        deploy contracts/NAME.sol, compiled by the node; prints the contract id
+#   ibc.sh deploy NAME [CONSTRUCTOR_JSON]        deploy contracts/NAME.sol, or the contract NAME of the files in
+#                                                the folder contracts/NAME/ (they import each other by their paths
+#                                                in it), compiled by the node; prints the contract id
 #   ibc.sh write CONTRACT METHOD [VALUES_JSON]   a transaction; waits for and prints its result
 #   ibc.sh read CONTRACT METHOD [VALUES_JSON]    a read of a view function; prints its result
 #   ibc.sh join CONTRACT MEMBER_URL MEMBER_ID SOURCE    ask a member to let you join a contract of the
-#                                                source file SOURCE (the contract's .sol); waits for the outcome
+#                                                source SOURCE: the contract's .sol file, the folder of its files,
+#                                                or a .json of its files by path (as its page copies them);
+#                                                waits for the outcome
 #   ibc.sh guest CONTRACT MEMBER_URL MEMBER_ID SOURCE   join as a guest: no copy here; calls and reads go to the member
 #   ibc.sh leave CONTRACT [MEMBER_ID]            leave a contract (or ask to remove a member)
 #   ibc.sh public CONTRACT                       let anyone read your copy, unsigned
@@ -150,13 +154,22 @@ deploy)
     need_key
     name=${1:?usage: ibc.sh deploy NAME [CONSTRUCTOR_JSON]}
     ctor=${2:-{\}}
-    [ -f "$CONTRACTS/$name.sol" ] || die "no $CONTRACTS/$name.sol"
+    # A folder of files, which import each other, and the contract NAME in them; or one file.
+    if [ -d "$CONTRACTS/$name" ]; then
+        src=$("$IBC_BIN" source -C "$CONTRACTS/$name" "$CONTRACTS/$name") || die "cannot read $CONTRACTS/$name/"
+        want=$name
+    elif [ -f "$CONTRACTS/$name.sol" ]; then
+        src=$("$IBC_BIN" source -C "$CONTRACTS" "$CONTRACTS/$name.sol") || die "cannot read $CONTRACTS/$name.sol"
+        want=""
+    else
+        die "no $CONTRACTS/$name.sol, nor a folder $CONTRACTS/$name/"
+    fi
     # The node compiles the source; the deploy carries both, so joiners can compile it again.
-    compiled=$(request POST "" compile "$(jq -cn --rawfile src "$CONTRACTS/$name.sol" '{source: $src, contract: ""}')")
+    compiled=$(request POST "" compile "$(jq -cn --argjson src "$src" --arg want "$want" '{source: $src, contract: $want}')")
     fail_on_message "$compiled"
     body=$(jq -cn --arg name "$name" --arg node "$IBC_URL" --arg nodeKey "$(node_key)" \
-        --rawfile src "$CONTRACTS/$name.sol" --argjson c "$compiled" --argjson ctor "$ctor" \
-        '{name: $name, contract: ($name + ".sol"), default_app: "", profile: "",
+        --argjson src "$src" --argjson c "$compiled" --argjson ctor "$ctor" \
+        '{name: $name, contract: $c.contract, default_app: "", profile: "",
           code: $c.code, abi: $c.abi, constructor: $ctor, node: $node, nodeKey: $nodeKey,
           source: $src, compiler: $c.compiler}')
     event=$(submit_and_wait "" PUT "$AGENT" deploy_contract "$(sign deploy "" "$body")")
@@ -192,8 +205,15 @@ join | guest)
     member_url=${2:?$usage}
     member=${3:?$usage}
     source=${4:?$usage}
-    [ -f "$source" ] || die "no source file $source"
-    join_body=$(jq -cn --arg node "$IBC_URL" --arg nodeKey "$(node_key)" --arg hash "$("$IBC_BIN" source-hash "$source")" \
+    # The paths in the source: in its folder, or the file's name.
+    if [ -d "$source" ]; then
+        hash=$("$IBC_BIN" source-hash -C "$source" "$source")
+    elif [ -f "$source" ]; then
+        hash=$("$IBC_BIN" source-hash -C "$(dirname "$source")" "$source")
+    else
+        die "no source $source"
+    fi
+    join_body=$(jq -cn --arg node "$IBC_URL" --arg nodeKey "$(node_key)" --arg hash "$hash" \
         '{node: $node, nodeKey: $nodeKey, profile: "", sourceHash: $hash}')
     if [ "$cmd" = guest ]; then
         join_body=$(jq -c --arg host "$member" '. + {guest: true, host: $host}' <<<"$join_body")

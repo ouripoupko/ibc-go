@@ -136,7 +136,7 @@ const types = {
   Grant: [                                     // lets the agent's node sign calls silently
     { name: 'agent',      type: 'address' },
     { name: 'nodeKey',    type: 'address' },  // the node that may sign
-    { name: 'sourceHash', type: 'bytes32' },  // keccak256 of the contract's Solidity source
+    { name: 'sourceHash', type: 'bytes32' },  // the contract's source hash (below)
     { name: 'functions',  type: 'string[]' }, // the functions it may call
     { name: 'nonce',      type: 'string' },
   ],
@@ -215,9 +215,17 @@ A signed transaction is sent as:
 The **transaction id** is the EIP-712 digest of the transaction, whoever signs it. A deploy's id is
 the new contract's id.
 
-A contract's **source hash** is the keccak256 of its Solidity source text, byte for byte (as UTF-8):
-joins, grants and consents name contracts by it (`identity.SourceHash`, `sourceHashOf` in the
-client, `ibc source-hash FILE`). The bodies, by kind:
+A contract's **source** is its Solidity files, by path: `{"Main.sol": "…", "lib/Util.sol": "…"}`.
+The files import each other by these paths (`import "./lib/Util.sol";` in `Main.sol`), and the
+contract compiles from them alone: the node fetches nothing, so a contract that uses a library
+(OpenZeppelin, …) includes its files. Paths are relative, of ASCII letters, digits, `.`, `_`, `-`
+and `/`, with no segment starting with `.`, and end in `.sol`; a source has at most 256 files.
+
+Its **source hash** is keccak256 over the files sorted by path, each as keccak256(path) ‖
+keccak256(content) (UTF-8), the same for a single file: the same files in any order give the
+same hash, and a change to any path or content changes it. Joins, grants and consents name
+contracts by it (`identity.SourceHash`, `sourceHashOf` in the client, `ibc source-hash [-C DIR]
+FILE|DIR...`; `ibc source` prints the files as JSON). The bodies, by kind:
 
 | Kind | Body |
 |---|---|
@@ -425,15 +433,22 @@ source; the node produces the bytecode the user signs.
 
 ```
 POST /ibc/app?action=compile
-{"source": "pragma solidity ^0.8.24; contract Chat { … }", "contract": "Chat"}
+{"source": {"Chat.sol": "pragma solidity ^0.8.24; import \"./lib/Names.sol\"; contract Chat { … }",
+            "lib/Names.sol": "pragma solidity ^0.8.24; library Names { … }"},
+ "contract": "Chat"}
 ```
 
-`contract` names the contract to compile when the source has several; it may be omitted otherwise.
+`source` is the contract's [source](#transactions): its files, by path, all compiled together.
+`contract` names the contract to deploy, `Name`, or `path:Name` if two files have a contract of
+that name; it may be omitted if the source has only one deployable contract (a library or base
+contract imported from another file counts as one, so a source of several files usually names it).
+An import of a file not in `source` does not compile.
 
 **Reply:** `{"contract": "Chat", "code": "6080…", "abi": [...], "sourceHash": "0x…", "compiler":
 {"version": "0.8.38+commit.1835d247.Emscripten.clang", "settings": {"optimizer": {"enabled": true, "runs": 200}}}}`.
 **Errors:** `solc 0.8.38: …` (the node could not get its compiler); `the source does not compile:
-…`; `the source has 2 contracts (A, B): say which one`.
+…`; `the source has 2 deployable contracts (Chat.sol:Chat, lib/Names.sol:Names): say which one`;
+`2 files have a contract "Vault" (…): name it as path:Name`; `source file path "…": …`.
 
 The node compiles with the Solidity version this release of ibc pins (0.8.38): with the `-solc`
 compiler if it is that version, or else with the solc-js build of it, which the node downloads from
@@ -460,8 +475,9 @@ The body:
 | `node` | yes | This node's URL |
 | `nodeKey` | yes | This node's key, from `node_info` |
 | `protocol` | no | The consensus protocol: `cordial` (the default; `BFT` means the same) or `immediate`, which orders the creator's own transactions locally, with no partners, for testing |
-| `source`, `compiler` | yes | The Solidity source and how the node compiled `code` from it (the `compiler` of [compile](#compile)). Joins name the source's hash, and a joiner's node compiles the source again with that compiler and compares |
-| `name`, `contract`, `default_app`, `profile` | no | Labels kept with the contract and returned by `get_contract` |
+| `source`, `compiler` | yes | The Solidity [source](#transactions) (its files, by path) and how the node compiled `code` from it (the `compiler` of [compile](#compile)). Joins name the source's hash, and a joiner's node compiles the source again with that compiler and compares |
+| `contract` | no | The contract in the source, as [compile](#compile) named it (`Name` or `path:Name`) |
+| `name`, `default_app`, `profile` | no | Labels kept with the contract and returned by `get_contract` |
 
 **Reply:** the transaction id, which is the new contract's id. Use it as `<contract>` in every later
 call.
@@ -869,7 +885,7 @@ Returned by `get_contracts` and `get_contract`. Fields are present only when the
 | `pid` | The creating agent |
 | `address` | The creating agent's node URL |
 | `code`, `abi` | The bytecode and ABI given at deployment |
-| `source`, `compiler` | The Solidity source and how the node compiled it, if it did |
+| `source`, `compiler` | The Solidity source (its files, by path) and how the node compiled it |
 | `role` | `partner`, or `guest`: the agent is a [guest](#guests), and this node has no copy of the contract (no state fields) |
 | `hosts` | For a guest: the contract's members, `[{agent, nodeKey, node}]`, to whom its node sends its transactions and reads |
 | `public` | Whether the agent lets anyone read its copy ([public contracts](#public-contracts)) |

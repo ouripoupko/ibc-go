@@ -118,5 +118,21 @@
       },
       "digest": "0x5f4e868d932344a26e965b01236b18bb6d240c8169abe5331cad67b745f0afb2"
     }
+  ],
+  "sources": [
+    {
+      "files": {
+        "Counter.sol": "contract Counter {}\n"
+      },
+      "hash": "0xb5132bcc3113c9b0adebd7257469c1db166f9e3584fcefec63915e9c01499db0"
+    },
+    {
+      "files": {
+        "Main.sol": "import \"./lib/Util.sol\";\ncontract Main {}\n",
+        "lib/Util.sol": "library Util {}\n",
+        "z/Last.sol": "// ünïcode content\n"
+      },
+      "hash": "0xa3718800404fcab19c0dce8881a03ca5f9320b6498e63e21915a51520396687b"
+    }
   ]
 }

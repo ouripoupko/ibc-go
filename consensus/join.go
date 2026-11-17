@@ -35,7 +35,7 @@ import (
 // CheckSource compiles a deploy's source with the compiler it names, and
 // compares the result with the deploy's code: compiler.Verified,
 // compiler.Mismatch, or compiler.Unchecked with the reason.
-type CheckSource func(ctx context.Context, source string, compiler json.RawMessage, code string) (check, reason string)
+type CheckSource func(ctx context.Context, source identity.Sources, compiler json.RawMessage, code string) (check, reason string)
 
 // welcomeNote is one member's welcome of this node.
 type welcomeNote struct {
@@ -275,7 +275,10 @@ func (r *Router) checkSource(deploy execution.Record) (string, string) {
 		return compiler.Unchecked, "this node does not check sources"
 	}
 	fields := deploy.Message.Fields
-	source, _ := fields[execution.KeySource].(string)
+	source, err := execution.SourcesOf(fields)
+	if err != nil {
+		return compiler.Mismatch, "the deploy's source cannot be read: " + err.Error()
+	}
 	code, _ := fields["code"].(string)
 	info, err := json.Marshal(fields["compiler"])
 	if err != nil {

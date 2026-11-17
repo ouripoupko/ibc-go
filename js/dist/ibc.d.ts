@@ -1,4 +1,4 @@
-import { type Address, type Envelope, type Hex, type P256Key, type Signer, type Transaction, type Query, type Registration, type Consent, type Grant, type Device, type Publish } from './keys.js';
+import { type Address, type Envelope, type Hex, type P256Key, type Signer, type Transaction, type Query, type Registration, type Consent, type Grant, type Device, type Publish, type Sources } from './keys.js';
 /**
  * The version of the node's API that this client speaks: its HTTP calls and
  * its approval page's messages. A node answers node_info, and its approval
@@ -68,7 +68,8 @@ export interface ContractSummary {
     address?: string;
     code?: Hex;
     abi?: unknown;
-    source?: string;
+    /** The contract's Solidity source: its files, by path. */
+    source?: Sources;
     compiler?: unknown;
     role: 'partner' | 'guest';
     /** Whether the agent lets anyone read its copy (public_read). */
@@ -101,6 +102,7 @@ export interface AppRecord {
 }
 /** What the node compiled: the deploy needs it. */
 export interface Compiled {
+    /** The contract's name, as the compile named it ("Name" or "path:Name"). */
     contract: string;
     code: Hex;
     abi: unknown[];
@@ -122,11 +124,13 @@ export type ConstructorArgs = object;
  */
 export interface DeployInput {
     name: string;
+    /** The contract in the source, as compile() named it (Compiled.contract); default: name. */
+    contract?: string;
     code: Hex;
     abi: unknown;
     constructor?: ConstructorArgs;
     protocol?: string;
-    source: string;
+    source: Sources;
     compiler: unknown;
     [field: string]: unknown;
 }
@@ -232,8 +236,13 @@ export declare class Ibc {
     register(registration?: Registration, signature?: Envelope | null): Promise<unknown>;
     /** Is this agent registered on the node? */
     exists(): Promise<boolean>;
-    /** Compiles Solidity source on the node. */
-    compile(source: string, contract?: string): Promise<Compiled>;
+    /**
+     * Compiles Solidity source on the node: its files, by path, which import
+     * each other by those paths (nothing else is fetched). contract names the
+     * contract to deploy, "Name" or "path:Name"; it may be left out if the
+     * source has only one deployable contract.
+     */
+    compile(source: Sources, contract?: string): Promise<Compiled>;
     /** The deploy transaction's body, for a compiled contract. */
     deployBody(input: DeployInput): Record<string, unknown>;
     /**
@@ -284,7 +293,7 @@ export declare class Ibc {
     /**
      * Asks a member of a contract to let this agent join, and resolves with the
      * join's id once the member has it. source is the contract's Solidity
-     * source, as the agent read it: the members refuse the join if it is not
+     * source (its files), as the agent read it: the members refuse the join if it is not
      * the contract's. The outcome arrives later on the event stream (onEvent):
      * a join_contract event for this id, with reply true or false and the
      * node's check of the source (source_check, reason). A guest takes no part
@@ -292,7 +301,7 @@ export declare class Ibc {
      * node, its host.
      */
     join(contract: string, memberUrl: string, memberAgent: Address, { source, guest, profile }: {
-        source: string;
+        source: Sources;
         guest?: boolean;
         profile?: string;
     }): Promise<string>;
@@ -306,7 +315,7 @@ export type ApprovalRequest = {
     type: 'connect';
 } | {
     type: 'deploy';
-    source: string;
+    source: Sources;
     contract?: string;
     name?: string;
     constructor?: ConstructorArgs;
@@ -329,7 +338,8 @@ export type ApprovalRequest = {
 } | {
     type: 'join';
     contract: string;
-    source: string;
+    source: Sources;
+    contractName?: string;
     memberNode: string;
     memberAgent: Address;
     guest?: boolean;
@@ -391,7 +401,7 @@ export declare class IbcApp {
      * the user decides, and it is off unless proposed.
      */
     deploy(input: {
-        source: string;
+        source: Sources;
         contract?: string;
         name?: string;
         constructor?: ConstructorArgs;
@@ -407,16 +417,20 @@ export declare class IbcApp {
     }): Promise<ApprovalResult>;
     /**
      * Asks the user to join a contract, through a member's node; as a guest
-     * with { guest: true }. source is the contract's Solidity source, which the
+     * with { guest: true }. source is the contract's Solidity source (its files), which the
      * user reads on the approval page and signs for, with the app's permissions
      * and, with public: true, a proposal to let anyone read the user's copy (not
      * for a guest, who keeps none): one approval. Resolves with the join's id
      * once it is sent; the outcome arrives later, as a join_contract event for
      * that id (onEvent), with reply true or false, and the user's node's check
-     * of the source (source_check, reason).
+     * of the source (source_check, reason). contractName names the contract
+     * in the source ("Name" or "path:Name"), for the page to show its
+     * functions; it may be left out if the source has only one deployable
+     * contract.
      */
-    join(contract: string, memberNode: string, memberAgent: Address, { source, guest, public: isPublic }: {
-        source: string;
+    join(contract: string, memberNode: string, memberAgent: Address, { source, contractName, guest, public: isPublic }: {
+        source: Sources;
+        contractName?: string;
         guest?: boolean;
         public?: boolean;
     }): Promise<string>;

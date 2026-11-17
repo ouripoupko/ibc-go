@@ -251,8 +251,8 @@ configuration 0, with the creator alone. `join`, `leave` and `rotate_key` transa
    miners put no other transactions in their blocks; incoming ones wait in the mempool. The idle
    rule keeps them making (empty) blocks until the change is output.
 3. **Decide.** When τ outputs the change, execution applies it at its place in the order:
-   - a `join` names the hash of the contract's source as the joining agent read it
-     (`sourceHash`); if that is not the hash of the source in the contract's deploy, it is
+   - a `join` names the hash of the contract's source (all its files, with their paths) as the
+     joining agent read it (`sourceHash`); if that is not the hash of the source in the contract's deploy, it is
      refused. Otherwise `join` calls the contract's `approve_partner(address)` as the joining
      agent; a contract without that function accepts every join (as the Python default did);
    - `leave` of oneself is always accepted; removing another member calls the contract's
@@ -278,7 +278,8 @@ configuration 0, with the creator alone. `join`, `leave` and `rotate_key` transa
    to their state root. If a member gives a fake history, the node takes a correct member's
    instead: a corrupt member cannot leave the joiner out by lying, and so cannot fill the
    configuration with members who never take part.
-7. **The source check.** The new node then compiles the deploy's source with the compiler the
+7. **The source check.** The new node then compiles the deploy's source (its files, and nothing
+   else: imports resolve only within them) with the compiler the
    deploy names (`compiler`: version and settings), and compares the result with the deployed
    code. If they differ (`mismatch`), the contract is not what its source says, and the node does
    not join: it keeps nothing, and the agent hears why. Its absence then costs the contract's

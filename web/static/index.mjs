@@ -1,7 +1,7 @@
 // The contracts page: your identity, your contracts, deploy, join, and the
 // apps you connected.
 import {
-  $, el, status, busy, errorText, connect, paramInputs, readFile, decodeInvite, short,
+  $, el, status, busy, errorText, connect, paramInputs, sourceInput, decodeInvite, short,
   loadIdentity, createIdentity, signIn, reregister, passkeysAvailable, isKnown,
 } from './app.mjs';
 
@@ -102,23 +102,22 @@ function addRow(c) {
 
 // Deploy: the node compiles the source, and the root signs the deployment.
 
-$('#d-source-file').addEventListener('change', async (e) => {
-  const text = await readFile(e.target);
-  if (text !== null) $('#d-source').value = text;
-  if (!$('#d-name').value && e.target.files?.[0]) $('#d-name').value = e.target.files[0].name.replace(/\.sol$/, '');
-  compiled = null;
-  $('#d-compiled').classList.add('hidden');
+let deploySource = null; // the source that compiled
+const deployInput = sourceInput({
+  onChange: () => {
+    compiled = null;
+    $('#d-compiled').classList.add('hidden');
+  },
 });
-$('#d-source').addEventListener('input', () => {
-  compiled = null;
-  $('#d-compiled').classList.add('hidden');
-});
+$('#d-source').append(deployInput.node);
 
 $('#d-compile').addEventListener('click', () => busy($('#d-compile'), $('#compile-status'), async () => {
   status($('#compile-status'), 'Compiling on the node…');
-  compiled = await ibc.compile($('#d-source').value, $('#d-contract').value.trim());
+  const source = deployInput.read();
+  compiled = await ibc.compile(source, $('#d-contract').value.trim());
+  deploySource = source;
   status($('#compile-status'), `Compiled ${compiled.contract} with solc ${compiled.compiler.version}.`, 'ok');
-  if (!$('#d-name').value) $('#d-name').value = compiled.contract;
+  if (!$('#d-name').value) $('#d-name').value = compiled.contract.split(':').pop();
   const holder = $('#d-ctor');
   holder.replaceChildren();
   ctorInputs = paramInputs([]);
@@ -134,12 +133,12 @@ $('#deploy').addEventListener('submit', (event) => {
   event.preventDefault();
   busy($('#d-submit'), $('#deploy-status'), async () => {
     if (!compiled) throw new Error('compile the source first');
-    const name = $('#d-name').value.trim() || compiled.contract;
+    const name = $('#d-name').value.trim() || compiled.contract.split(':').pop();
     const constructor = ctorInputs.read();
     status($('#deploy-status'), 'Approve the deploy with your passkey, then wait for the node…');
     const id = await ibc.deploy({
-      name, code: compiled.code, abi: compiled.abi, constructor, protocol: $('#d-protocol').value,
-      source: $('#d-source').value, compiler: compiled.compiler,
+      name, contract: compiled.contract, code: compiled.code, abi: compiled.abi, constructor, protocol: $('#d-protocol').value,
+      source: deploySource, compiler: compiled.compiler,
     });
     addRow({ id, name, protocol: $('#d-protocol').value, block_number: 1 });
     const done = $('#deploy-status');
@@ -166,10 +165,8 @@ function prefillInvite(code) {
   }
 }
 
-$('#j-source-file').addEventListener('change', async (e) => {
-  const text = await readFile(e.target);
-  if (text !== null) $('#j-source').value = text;
-});
+const joinInput = sourceInput({ pasteLabel: 'Paste the source' });
+$('#j-source').append(joinInput.node);
 
 $('#join').addEventListener('submit', (event) => {
   event.preventDefault();
@@ -178,7 +175,7 @@ $('#join').addEventListener('submit', (event) => {
     status($('#join-status'), 'Approve the join with your passkey…');
     const guest = $('#j-guest').checked;
     const id = await ibc.join(contract, $('#j-node').value.trim(), $('#j-agent').value.trim(),
-      { guest, source: $('#j-source').value });
+      { guest, source: joinInput.read() });
     status($('#join-status'), 'Asked. The members decide, then your node checks the contract…');
     // The outcome arrives on the event stream.
     const stop = ibc.onEvent((ev) => {

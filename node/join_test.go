@@ -79,7 +79,7 @@ func TestJoinChecks(t *testing.T) {
 	source := identity.SourceHash(readSource(t, "Registry")).Hex()
 
 	// The members refuse a join for another source.
-	id := carol.joinWith(t, c, a, alice, cid, identity.SourceHash("another source").Hex(), false)
+	id := carol.joinWith(t, c, a, alice, cid, identity.SourceHash(identity.Sources{"Other.sol": "another source"}).Hex(), false)
 	if ev := ec.waitFor(t, id); ev["reply"] != false {
 		t.Fatalf("a join for another source = %v", ev)
 	}
@@ -125,5 +125,42 @@ func TestJoinChecks(t *testing.T) {
 	}
 	if got := dave.get(t, d, "get_contract", cid); len(got.(map[string]any)) != 0 {
 		t.Fatalf("dave has the contract: %v", got)
+	}
+}
+
+// A contract whose source is several files: the joiner names the hash of all
+// of them, its node checks all of them, and both copies show all of them.
+func TestJoinSourceFiles(t *testing.T) {
+	var checked identity.Sources
+	a := startNode(t, Config{})
+	c := startNode(t, Config{CheckSource: func(_ context.Context, src identity.Sources, _ json.RawMessage, _ string) (string, string) {
+		checked = src
+		return compiler.Verified, ""
+	}})
+	alice, carol := newUser(t), newUser(t)
+	ea, ec := openStream(t, a.URL, alice, ""), openStream(t, c.URL, carol, "")
+	alice.register(t, a, ea)
+	carol.register(t, c, ec)
+	files := readSource(t, "Registry")
+	files["lib/Names.sol"] = "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.0;\nlibrary Names {}\n"
+	cid := alice.deployWith(t, a, ea, "Registry", files, "", map[string]any{"initialName": "files", "start": 0})
+
+	// A join that names one of the files only is refused.
+	only := identity.SourceHash(readSource(t, "Registry")).Hex()
+	if ev := ec.waitFor(t, carol.joinWith(t, c, a, alice, cid, only, false)); ev["reply"] != false {
+		t.Fatalf("a join for one of the files = %v", ev)
+	}
+	id := carol.joinWith(t, c, a, alice, cid, identity.SourceHash(files).Hex(), false)
+	if ev := ec.waitFor(t, id); ev["reply"] != true || ev["source_check"] != compiler.Verified {
+		t.Fatalf("carol's join = %v", ev)
+	}
+	if identity.SourceHash(checked) != identity.SourceHash(files) || len(checked) != 2 {
+		t.Fatalf("carol's node checked %v", checked)
+	}
+	for who, got := range map[string]any{"alice": alice.get(t, a, "get_contract", cid), "carol": carol.get(t, c, "get_contract", cid)} {
+		src, err := identity.SourcesFrom(got.(map[string]any)["source"])
+		if err != nil || identity.SourceHash(src) != identity.SourceHash(files) {
+			t.Fatalf("%s's contract source = %v (%v)", who, got.(map[string]any)["source"], err)
+		}
 	}
 }

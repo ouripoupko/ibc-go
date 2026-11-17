@@ -8,6 +8,7 @@ import (
 	ethcommon "github.com/ethereum/go-ethereum/common"
 
 	"github.com/ouripoupko/ibc-go/common"
+	"github.com/ouripoupko/ibc-go/identity"
 )
 
 // Public contracts: an agent may let anyone read its copy of a contract
@@ -30,6 +31,12 @@ const (
 	KeySourceCheck       = "source_check"
 	KeySourceCheckReason = "source_check_reason"
 )
+
+// SourcesOf returns the contract's source from its document's fields (the
+// deploy's files, by path), validated.
+func SourcesOf(fields map[string]any) (identity.Sources, error) {
+	return identity.SourcesFrom(fields[KeySource])
+}
 
 // The results of checking a deploy's source against its code.
 const (

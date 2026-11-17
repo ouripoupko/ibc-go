@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/ouripoupko/ibc-go/identity"
 )
 
 // runnerJS runs a solc-js build (a soljson file) as a compiler: with
@@ -55,11 +57,20 @@ func (t *Toolchain) soljson(path string) runner {
 		node = "node"
 	}
 	return func(ctx context.Context, stdin []byte, args ...string) ([]byte, error) {
-		runner := filepath.Join(t.Dir, "runner.cjs")
+		// Absolute paths: the compiler runs in an empty directory.
+		dir, err := filepath.Abs(t.Dir)
+		if err != nil {
+			return nil, err
+		}
+		build, err := filepath.Abs(path)
+		if err != nil {
+			return nil, err
+		}
+		runner := filepath.Join(dir, "runner.cjs")
 		if err := os.WriteFile(runner, runnerJS, 0o644); err != nil {
 			return nil, err
 		}
-		out, err := runCommand(ctx, t.Timeout, []string{node, runner, path}, stdin, args...)
+		out, err := runCommand(ctx, t.Timeout, []string{node, runner, build}, stdin, args...)
 		if errors.Is(err, ErrNoCompiler) {
 			return nil, fmt.Errorf("running solc-js needs Node.js (%s): it is not installed", node)
 		}
@@ -187,7 +198,7 @@ func (t *Toolchain) download(ctx context.Context, version string) (string, error
 }
 
 // Compile compiles source with the pinned version and the node's Settings.
-func (t *Toolchain) Compile(ctx context.Context, source, name string) (Result, error) {
+func (t *Toolchain) Compile(ctx context.Context, source identity.Sources, name string) (Result, error) {
 	if t == nil {
 		return Result{}, ErrNoCompiler
 	}
@@ -222,7 +233,7 @@ func (t *Toolchain) Describe(ctx context.Context) (string, error) {
 // Check compiles a deploy's source with the deploy's compiler and settings,
 // and compares the result with the deploy's code: Verified, Mismatch, or
 // Unchecked with the reason it could not be compiled.
-func (t *Toolchain) Check(ctx context.Context, source string, compiler json.RawMessage, code string) (string, string) {
+func (t *Toolchain) Check(ctx context.Context, source identity.Sources, compiler json.RawMessage, code string) (string, string) {
 	if t == nil {
 		return Unchecked, "this node has no compiler"
 	}

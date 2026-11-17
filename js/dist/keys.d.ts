@@ -242,10 +242,18 @@ export declare function toHex(bytes: Uint8Array): Hex;
 export declare function fromHex(hex: Hex): Uint8Array;
 export declare const keccak256: (bytes: Uint8Array) => Uint8Array;
 /**
- * A contract source's hash, as joins, grants and consents name it: the
- * keccak256 of the Solidity source text, byte for byte (as UTF-8).
+ * A contract's Solidity source: its files, by path ("Main.sol",
+ * "lib/Util.sol"). Files import each other by these paths; a contract
+ * compiles from its files alone. Paths are relative, of letters, digits, '.',
+ * '_', '-' and '/', and end in .sol.
  */
-export declare const sourceHashOf: (source: string) => Hex;
+export type Sources = Record<string, string>;
+/**
+ * A contract source's hash, as joins, grants and consents name it: keccak256
+ * over the files sorted by path, each as keccak256(path) ‖ keccak256(content)
+ * (UTF-8). The same as the node's (identity.SourceHash).
+ */
+export declare function sourceHashOf(source: Sources): Hex;
 /** A random nonce, as hex without 0x. */
 export declare function nonce(): string;
 /** The time in unix seconds, for queries. */

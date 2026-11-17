@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { digestOf, addressOf, fromHex, toHex, newP256Key, p256Signer, sign, signBatch } from '../dist/keys.js';
+import { digestOf, addressOf, fromHex, toHex, newP256Key, p256Signer, sign, signBatch, sourceHashOf } from '../dist/keys.js';
 
 const vectors = JSON.parse(await readFile(new URL('../../identity/testdata/vectors.json', import.meta.url), 'utf8'));
 
@@ -13,6 +13,15 @@ test('EIP-712 digests match the node', () => {
   for (const { type, message, digest } of vectors.messages) {
     assert.equal(toHex(digestOf(type, message)), digest, type);
   }
+});
+
+test('source hashes match the node, in any file order', () => {
+  for (const { files, hash } of vectors.sources) {
+    assert.equal(sourceHashOf(files), hash);
+    const reversed = Object.fromEntries(Object.entries(files).reverse());
+    assert.equal(sourceHashOf(reversed), hash);
+  }
+  assert.throws(() => sourceHashOf({}));
 });
 
 test('agent addresses match the node, for secp256k1 and P-256 keys', () => {

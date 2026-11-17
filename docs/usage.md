@@ -72,12 +72,17 @@ phone, your computer, or a security key. The node never sees it.
 - **Sign in on another device.** Click **Sign in with my passkey** and choose it (synced to the
   device, or on your phone nearby). You approve twice.
 - **Your contracts.** The page lists your contracts on this node.
-- **Deploy.** Choose the contract's Solidity source (`.sol`), or paste it, and click **Compile**: your
-  node compiles it. Fill in the constructor's arguments and click **Deploy**.
+- **Deploy.** Choose the contract's Solidity files (`.sol`), or a folder of them, or paste one file,
+  and click **Compile**: your node compiles them together. Files import each other by their paths
+  (picked one by one, a file's path is its name; in a folder, its path in it). Nothing else is
+  fetched: include every file the contract imports. If the source has several contracts (an
+  imported library counts), give the **Contract name**. Fill in the constructor's arguments and
+  click **Deploy**.
 - **Join.** Paste an invite from a member, or enter the contract id, the member's node URL and the
   member's agent id, and the contract's **source** (the member sends it with the invite: **Copy the
-  source** on the contract's page). You read what you join: the members refuse the join if the
-  source is not the contract's, and your node checks that it compiles to the contract's code. Tick
+  source** on the contract's page copies its files as JSON, which you paste). You read what you
+  join: the members refuse the join if the source is not the contract's, every file with the same
+  path, and your node checks that it compiles to the contract's code. Tick
   **Join as a guest** to join as a [guest](#joining-as-a-guest). The contract's own rules decide.
   The page tells you when the join is done; a contract whose source your node could not check is
   marked **source not checked**.
@@ -234,8 +239,10 @@ function approve_removal(address member) external view returns (bool);
 
 ## Compile it
 
-**Your node compiles.** You always give the Solidity source, in the web interface, through apps and
-from the shell; your node compiles it with the Solidity version this release of ibc pins (0.8.38),
+**Your node compiles.** You always give the Solidity source, its files by path, in the web
+interface, through apps and from the shell. The files import each other by their paths, and are
+all the compiler gets: an import of anything else (a library such as OpenZeppelin included) fails,
+so put the library's files in the source. your node compiles it with the Solidity version this release of ibc pins (0.8.38),
 and the deploy transaction carries the source, the compiler's version and settings, and the
 bytecode. A deploy must carry its source: whoever joins the contract reads it, and their node
 compiles it again with the same version and compares. The node uses the `-solc` compiler if it is

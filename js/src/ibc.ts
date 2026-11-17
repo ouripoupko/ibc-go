@@ -16,7 +16,7 @@
 
 import {
   type Address, type Envelope, type Hex, type P256Key, type Signer, type Transaction, type Query, type Registration,
-  type Consent, type Grant, type Device, type Publish,
+  type Consent, type Grant, type Device, type Publish, type Sources,
   newP256Key, nonce, now, p256Signer, sign, sourceHashOf, toHex,
 } from './keys.js';
 
@@ -111,7 +111,8 @@ export interface ContractSummary {
   address?: string;
   code?: Hex;
   abi?: unknown;
-  source?: string;
+  /** The contract's Solidity source: its files, by path. */
+  source?: Sources;
   compiler?: unknown;
   role: 'partner' | 'guest';
   /** Whether the agent lets anyone read its copy (public_read). */
@@ -138,6 +139,7 @@ export interface AppRecord {
 
 /** What the node compiled: the deploy needs it. */
 export interface Compiled {
+  /** The contract's name, as the compile named it ("Name" or "path:Name"). */
   contract: string;
   code: Hex;
   abi: unknown[];
@@ -163,11 +165,13 @@ function ctorOf(o: object): Record<string, unknown> {
  */
 export interface DeployInput {
   name: string;
+  /** The contract in the source, as compile() named it (Compiled.contract); default: name. */
+  contract?: string;
   code: Hex;
   abi: unknown;
   constructor?: ConstructorArgs;
   protocol?: string;
-  source: string;
+  source: Sources;
   compiler: unknown;
   [field: string]: unknown;
 }
@@ -526,8 +530,13 @@ export class Ibc {
     return this.request('GET', 'is_exist_agent');
   }
 
-  /** Compiles Solidity source on the node. */
-  compile(source: string, contract = ''): Promise<Compiled> {
+  /**
+   * Compiles Solidity source on the node: its files, by path, which import
+   * each other by those paths (nothing else is fetched). contract names the
+   * contract to deploy, "Name" or "path:Name"; it may be left out if the
+   * source has only one deployable contract.
+   */
+  compile(source: Sources, contract = ''): Promise<Compiled> {
     return this.request('POST', 'compile', { agent: '', body: { source, contract } });
   }
 
@@ -536,7 +545,7 @@ export class Ibc {
     const { name, code, abi, source, compiler, ...rest } = input;
     delete rest.constructor;
     return {
-      name, contract: `${name}.sol`, default_app: '', profile: '', ...rest,
+      name, contract: name, default_app: '', profile: '', ...rest,
       code: code.trim(), abi: typeof abi === 'string' ? JSON.parse(abi) : abi, constructor: ctorOf(input),
       node: this.url, nodeKey: this.nodeKey, source, compiler,
     };
@@ -634,7 +643,7 @@ export class Ibc {
   /**
    * Asks a member of a contract to let this agent join, and resolves with the
    * join's id once the member has it. source is the contract's Solidity
-   * source, as the agent read it: the members refuse the join if it is not
+   * source (its files), as the agent read it: the members refuse the join if it is not
    * the contract's. The outcome arrives later on the event stream (onEvent):
    * a join_contract event for this id, with reply true or false and the
    * node's check of the source (source_check, reason). A guest takes no part
@@ -642,7 +651,7 @@ export class Ibc {
    * node, its host.
    */
   async join(contract: string, memberUrl: string, memberAgent: Address,
-    { source, guest = false, profile = '' }: { source: string; guest?: boolean; profile?: string }): Promise<string> {
+    { source, guest = false, profile = '' }: { source: Sources; guest?: boolean; profile?: string }): Promise<string> {
     const body: Record<string, unknown> = { node: this.url, nodeKey: this.nodeKey, profile, sourceHash: sourceHashOf(source) };
     if (guest) Object.assign(body, { guest: true, host: memberAgent });
     const stx = await this.sign('join', contract, body);
@@ -673,11 +682,11 @@ export class Ibc {
 /** A request to the node's approval page. */
 export type ApprovalRequest =
   | { type: 'connect' }
-  | { type: 'deploy'; source: string; contract?: string; name?: string; constructor?: ConstructorArgs; protocol?: string; public?: boolean }
+  | { type: 'deploy'; source: Sources; contract?: string; name?: string; constructor?: ConstructorArgs; protocol?: string; public?: boolean }
   | { type: 'permit'; contract: string; public?: boolean }
   | { type: 'call'; contract: string; method: string; values?: Record<string, unknown> }
   | { type: 'read'; contract: string; method: string; values?: Record<string, unknown> }
-  | { type: 'join'; contract: string; source: string; memberNode: string; memberAgent: Address; guest?: boolean; public?: boolean };
+  | { type: 'join'; contract: string; source: Sources; contractName?: string; memberNode: string; memberAgent: Address; guest?: boolean; public?: boolean };
 
 /** What the approval page answers: the agent, and the request's result. */
 export interface ApprovalResult {
@@ -825,7 +834,7 @@ export class IbcApp {
    * the user decides, and it is off unless proposed.
    */
   async deploy(input: {
-    source: string; contract?: string; name?: string; constructor?: ConstructorArgs; protocol?: string; public?: boolean;
+    source: Sources; contract?: string; name?: string; constructor?: ConstructorArgs; protocol?: string; public?: boolean;
   }): Promise<string> {
     const { source, contract = '', name, protocol } = input;
     return (await this.#approve({
@@ -843,17 +852,24 @@ export class IbcApp {
 
   /**
    * Asks the user to join a contract, through a member's node; as a guest
-   * with { guest: true }. source is the contract's Solidity source, which the
+   * with { guest: true }. source is the contract's Solidity source (its files), which the
    * user reads on the approval page and signs for, with the app's permissions
    * and, with public: true, a proposal to let anyone read the user's copy (not
    * for a guest, who keeps none): one approval. Resolves with the join's id
    * once it is sent; the outcome arrives later, as a join_contract event for
    * that id (onEvent), with reply true or false, and the user's node's check
-   * of the source (source_check, reason).
+   * of the source (source_check, reason). contractName names the contract
+   * in the source ("Name" or "path:Name"), for the page to show its
+   * functions; it may be left out if the source has only one deployable
+   * contract.
    */
   async join(contract: string, memberNode: string, memberAgent: Address,
-    { source, guest = false, public: isPublic = false }: { source: string; guest?: boolean; public?: boolean }): Promise<string> {
-    return (await this.#approve({ type: 'join', contract, source, memberNode, memberAgent, guest, public: isPublic })).request!;
+    { source, contractName, guest = false, public: isPublic = false }:
+    { source: Sources; contractName?: string; guest?: boolean; public?: boolean }): Promise<string> {
+    return (await this.#approve({
+      type: 'join', contract, source, memberNode, memberAgent, guest, public: isPublic,
+      ...(contractName ? { contractName } : {}),
+    })).request!;
   }
 
   /** Reads silently if the user allowed it, and otherwise asks the user. */

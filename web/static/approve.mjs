@@ -9,8 +9,11 @@
 //   { type: 'permit', contract, public, appKey }   permissions on an existing contract
 //   { type: 'call', contract, method, values, appKey }
 //   { type: 'read', contract, method, values, appKey }
-//   { type: 'join', contract, source, memberNode, memberAgent, guest, public, appKey }
-// A join carries the contract's source: the user reads it here, and signs the
+//   { type: 'join', contract, source, contractName, memberNode, memberAgent, guest, public, appKey }
+// A source is the contract's Solidity files, by path ({ "Main.sol": "…" }).
+// contractName names the contract in it ("Name" or "path:Name") if it has
+// several. A join carries the contract's source: the user reads it here, all
+// its files, and signs the
 // join (which names the source's hash), the app's permissions and the
 // public choice at once. The page answers as soon as the join is sent; its
 // outcome reaches the app as a join_contract event.
@@ -22,7 +25,7 @@
 // A user with no identity on this node yet can create one here, or sign in.
 import {
   $, el, status, errorText, loadIdentity, connect, rootSigner, signIn, createIdentity, isKnown, reregister,
-  pretty, short, sourceHashOf, writeFunctions, permissionItems, registerPermission,
+  pretty, short, sourceHashOf, sourcePaths, showSource, writeFunctions, permissionItems, registerPermission,
 } from './app.mjs';
 import { API_VERSION, digestOf, nonce, now, signBatch, toHex } from './js/index.js';
 
@@ -47,8 +50,15 @@ function valid(r) {
   const known = ['connect', 'deploy', 'permit', 'call', 'read', 'join'];
   if (!r || r.apiVersion !== API_VERSION || !known.includes(r.type) || !/^0x04[0-9a-fA-F]{128}$/.test(r.appKey ?? '')) return false;
   if (r.type === 'connect') return true;
-  if (r.type === 'join' && typeof r.source !== 'string') return false;
-  return r.type === 'deploy' ? typeof r.source === 'string' : typeof r.contract === 'string';
+  if ((r.type === 'join' || r.type === 'deploy') && !isSource(r.source)) return false;
+  if (r.type === 'join' && r.contractName !== undefined && typeof r.contractName !== 'string') return false;
+  return r.type === 'deploy' || typeof r.contract === 'string';
+}
+
+/** Whether s is a source: files (text) by path, at least one. */
+function isSource(s) {
+  return !!s && typeof s === 'object' && !Array.isArray(s) && Object.keys(s).length > 0 &&
+    Object.values(s).every((v) => typeof v === 'string');
 }
 
 async function onMessage(e) {
@@ -139,13 +149,21 @@ function details(rows) {
   $('#details').classList.remove('hidden');
 }
 
+/** The source's files, for the details. */
+function filesRow(source) {
+  const paths = sourcePaths(source);
+  return ['Source files', paths.length ? `${paths.join(', ')} (${paths.length})` : undefined];
+}
+
 function showCode(source) {
-  if (!source) return;
-  $('#code').textContent = source;
+  if (!source || !Object.keys(source).length) return;
+  showSource($('#code'), source);
+  const n = Object.keys(source).length;
+  $('#show-code').textContent = n > 1 ? `Show the code (${n} files)` : 'Show the code';
   $('#code-toggle').classList.remove('hidden');
   $('#show-code').addEventListener('click', () => {
     const hidden = $('#code').classList.toggle('hidden');
-    $('#show-code').textContent = hidden ? 'Show the code' : 'Hide the code';
+    $('#show-code').textContent = hidden ? (n > 1 ? `Show the code (${n} files)` : 'Show the code') : 'Hide the code';
   });
 }
 
@@ -233,7 +251,8 @@ async function showDeploy(ibc, identity, host) {
   status($('#status'), '');
   const name = request.name || compiled.contract;
   $('#what').textContent = `A new ${compiled.contract} contract, which you will own.`;
-  details([['Contract', name], ['Arguments', Object.entries(ctor).map(([k, v]) => `${k}: ${pretty(v)}`).join(', ')]]);
+  details([['Contract', name], ['Arguments', Object.entries(ctor).map(([k, v]) => `${k}: ${pretty(v)}`).join(', ')],
+    filesRow(request.source)]);
   showCode(request.source);
   const app = await siteOf(ibc);
   const choose = app.site?.permissions?.[compiled.sourceHash] ? null : permissionsForm(compiled.abi);
@@ -243,7 +262,7 @@ async function showDeploy(ibc, identity, host) {
     const tx = {
       contract: '', kind: 'deploy', agent: identity.agent, nonce: nonce(),
       body: JSON.stringify(ibc.deployBody({
-        name, code: compiled.code, abi: compiled.abi, constructor: ctor,
+        name, contract: compiled.contract, code: compiled.code, abi: compiled.abi, constructor: ctor,
         protocol: request.protocol, source: request.source, compiler: compiled.compiler,
       })),
     };
@@ -260,10 +279,11 @@ async function showDeploy(ibc, identity, host) {
 async function showPermit(ibc, identity, host) {
   const c = await ibc.contract(request.contract);
   if (!c?.id) throw new Error('You have no such contract on this node.');
-  const sourceHash = sourceHashOf(c.source ?? '');
+  if (!c.source) throw new Error('This contract has no source on this node.');
+  const sourceHash = sourceHashOf(c.source);
   $('#title').textContent = `${host} wants to use ${c.name || short(c.id)}`;
   $('#what').textContent = 'Choose what it may do without asking you. It asks you for everything else.';
-  details([['Contract', c.name], ['Id', short(c.id)]]);
+  details([['Contract', c.name], ['Id', short(c.id)], filesRow(c.source)]);
   showCode(c.source);
   const app = await siteOf(ibc);
   const choose = permissionsForm(c.abi, app.site?.permissions?.[sourceHash]);
@@ -332,10 +352,10 @@ async function showJoin(ibc, identity, host) {
   // The node compiles the source, for its functions; once joined, it checks
   // that the source is the deployed contract's.
   status($('#status'), 'Compiling the code on your node…');
-  const compiled = await ibc.compile(request.source);
+  const compiled = await ibc.compile(request.source, request.contractName ?? '');
   status($('#status'), '');
   details([['Contract', `${compiled.contract} (${short(request.contract)})`],
-    ['Through', `${request.memberNode} (${short(request.memberAgent)})`]]);
+    ['Through', `${request.memberNode} (${short(request.memberAgent)})`], filesRow(request.source)]);
   showCode(request.source);
   const sourceHash = sourceHashOf(request.source);
   const app = await siteOf(ibc);

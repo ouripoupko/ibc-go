@@ -364,7 +364,12 @@ export class Ibc {
     exists() {
         return this.request('GET', 'is_exist_agent');
     }
-    /** Compiles Solidity source on the node. */
+    /**
+     * Compiles Solidity source on the node: its files, by path, which import
+     * each other by those paths (nothing else is fetched). contract names the
+     * contract to deploy, "Name" or "path:Name"; it may be left out if the
+     * source has only one deployable contract.
+     */
     compile(source, contract = '') {
         return this.request('POST', 'compile', { agent: '', body: { source, contract } });
     }
@@ -373,7 +378,7 @@ export class Ibc {
         const { name, code, abi, source, compiler, ...rest } = input;
         delete rest.constructor;
         return {
-            name, contract: `${name}.sol`, default_app: '', profile: '', ...rest,
+            name, contract: name, default_app: '', profile: '', ...rest,
             code: code.trim(), abi: typeof abi === 'string' ? JSON.parse(abi) : abi, constructor: ctorOf(input),
             node: this.url, nodeKey: this.nodeKey, source, compiler,
         };
@@ -458,7 +463,7 @@ export class Ibc {
     /**
      * Asks a member of a contract to let this agent join, and resolves with the
      * join's id once the member has it. source is the contract's Solidity
-     * source, as the agent read it: the members refuse the join if it is not
+     * source (its files), as the agent read it: the members refuse the join if it is not
      * the contract's. The outcome arrives later on the event stream (onEvent):
      * a join_contract event for this id, with reply true or false and the
      * node's check of the source (source_check, reason). A guest takes no part
@@ -633,16 +638,22 @@ export class IbcApp {
     }
     /**
      * Asks the user to join a contract, through a member's node; as a guest
-     * with { guest: true }. source is the contract's Solidity source, which the
+     * with { guest: true }. source is the contract's Solidity source (its files), which the
      * user reads on the approval page and signs for, with the app's permissions
      * and, with public: true, a proposal to let anyone read the user's copy (not
      * for a guest, who keeps none): one approval. Resolves with the join's id
      * once it is sent; the outcome arrives later, as a join_contract event for
      * that id (onEvent), with reply true or false, and the user's node's check
-     * of the source (source_check, reason).
+     * of the source (source_check, reason). contractName names the contract
+     * in the source ("Name" or "path:Name"), for the page to show its
+     * functions; it may be left out if the source has only one deployable
+     * contract.
      */
-    async join(contract, memberNode, memberAgent, { source, guest = false, public: isPublic = false }) {
-        return (await this.#approve({ type: 'join', contract, source, memberNode, memberAgent, guest, public: isPublic })).request;
+    async join(contract, memberNode, memberAgent, { source, contractName, guest = false, public: isPublic = false }) {
+        return (await this.#approve({
+            type: 'join', contract, source, memberNode, memberAgent, guest, public: isPublic,
+            ...(contractName ? { contractName } : {}),
+        })).request;
     }
     /** Reads silently if the user allowed it, and otherwise asks the user. */
     async read(contract, method, values = {}) {

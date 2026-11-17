@@ -20,9 +20,10 @@ const root = p256Signer(rootKey);
 // The node compiles each contract's source; the deploy carries the source and
 // the compiler, so that a partner who joins can compile it again and compare.
 async function load(name) {
-  const source = await readFile(new URL(`${name}.sol`, contracts), 'utf8');
-  const { code, abi, compiler } = await ibc.compile(source);
-  return { name, code, abi, source, compiler };
+  // The source is files by path: here, one file.
+  const source = { [`${name}.sol`]: await readFile(new URL(`${name}.sol`, contracts), 'utf8') };
+  const { contract, code, abi, compiler } = await ibc.compile(source);
+  return { name, contract, code, abi, source, compiler };
 }
 
 const ibc = await Ibc.connect(url, { agent, root });

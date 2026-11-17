@@ -43,7 +43,7 @@ A transaction reaches partners in one of two forms, and they accept nothing else
   |---|---|
   | `agent` | The agent |
   | `nodeKey` | The node that may sign |
-  | `sourceHash` | The contracts it is for: the keccak256 of their Solidity source |
+  | `sourceHash` | The contracts it is for: the hash of their Solidity source, all its files ([source hash](api.md#transactions)) |
   | `functions` | The functions the node may call silently |
 
   Every partner checks the grant's signature (`identity.Verify`), that the node signed, that the
@@ -112,12 +112,14 @@ could already show it.
 
 ## 5. Deploying and joining: users sign the source
 
-Apps send Solidity **source**, not bytecode. The user's node compiles it (with the compiler version
+Apps send Solidity **source**, not bytecode: the contract's files, by path, which import each
+other by those paths and are all the compiler gets. The user's node compiles it (with the compiler version
 this release of ibc pins, and fixed settings), shows it to the user on request, and packages the
 deploy transaction: bytecode, ABI, source, and the compiler's version and settings. The user signs
 that with the root key. An app cannot slip in code the user was not shown.
 
-A user who **joins** reads the source too, and signs the join, which names the source's hash, with
+A user who **joins** reads the source too, every file of it, and signs the join, which names the
+source's hash (over all the files and their paths), with
 the app's permissions and the public choice, in one approval. The members refuse a join for another
 source. Once the members accept it, the joiner's node compiles the deploy's source with the deploy's
 compiler, downloading that version if it does not have it, and compares it with the deployed code:
@@ -173,11 +175,11 @@ with it:
    | `type` | Fields | The user approves |
    |---|---|---|
    | `connect` | none | Connecting the app: it learns the agent id, with no permissions |
-   | `deploy` | `source`, `contract` (name, optional), `name`, `constructor`, `protocol`, `public` | The deploy, compiled by the node; and the app's permissions for this source, the first time |
+   | `deploy` | `source` (files by path), `contract` (`Name` or `path:Name`, optional), `name`, `constructor`, `protocol`, `public` | The deploy, compiled by the node; and the app's permissions for this source, the first time |
    | `permit` | `contract`, `public` | The app's permissions for an existing contract's source |
    | `call` | `contract`, `method`, `values` | A transaction, signed by the root |
    | `read` | `contract`, `method`, `values` | A read, signed by the root |
-   | `join` | `contract`, `source`, `memberNode`, `memberAgent`, `guest`, `public` | Joining a contract, of the source shown; and the app's permissions for this source, the first time. The page answers `{request}` (the join's id) once the join is sent, and closes: the outcome reaches the app as a `join_contract` event for that id |
+   | `join` | `contract`, `source` (files by path), `contractName` (optional, as for a deploy), `memberNode`, `memberAgent`, `guest`, `public` | Joining a contract, of the source shown; and the app's permissions for this source, the first time. The page answers `{request}` (the join's id) once the join is sent, and closes: the outcome reaches the app as a `join_contract` event for that id |
 
    `public` (optional, `true` or `false`) is what the app proposes for "Anyone may read this
    contract": the box on the page starts ticked or not, and the user decides. Without it, the box

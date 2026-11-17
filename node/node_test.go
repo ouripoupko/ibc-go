@@ -29,7 +29,9 @@ import (
 
 // checkSource stands in for compiling a joined contract's source.
 func checkSource(check, reason string) consensus.CheckSource {
-	return func(context.Context, string, json.RawMessage, string) (string, string) { return check, reason }
+	return func(context.Context, identity.Sources, json.RawMessage, string) (string, string) {
+		return check, reason
+	}
 }
 
 // testCompiler is the compiler a test deploy names.
@@ -326,14 +328,14 @@ func (u *user) sign(t *testing.T, kind, contract string, body any) identity.Sign
 	return stx
 }
 
-// readSource is a test contract's Solidity source.
-func readSource(t *testing.T, name string) string {
+// readSource is a test contract's Solidity source: its one file.
+func readSource(t *testing.T, name string) identity.Sources {
 	t.Helper()
 	src, err := os.ReadFile("../testdata/" + name + ".sol")
 	if err != nil {
 		t.Fatal(err)
 	}
-	return string(src)
+	return identity.Sources{name + ".sol": string(src)}
 }
 
 func readTestdata(t *testing.T, name string) (code, abi string) {
@@ -352,11 +354,17 @@ func readTestdata(t *testing.T, name string) (code, abi string) {
 // deploy deploys a test contract from u on n and waits until it is live.
 func (u *user) deploy(t *testing.T, n *testNode, events *stream, name, protocol string, ctor map[string]any) string {
 	t.Helper()
+	return u.deployWith(t, n, events, name, readSource(t, name), protocol, ctor)
+}
+
+// deployWith deploys a test contract's code, saying its source is source.
+func (u *user) deployWith(t *testing.T, n *testNode, events *stream, name string, source identity.Sources, protocol string, ctor map[string]any) string {
+	t.Helper()
 	code, abi := readTestdata(t, name)
 	stx := u.sign(t, identity.KindDeploy, "", map[string]any{
 		"name": "my-" + name, "contract": name + ".sol", "protocol": protocol, "default_app": "https://app.example",
 		"profile": "", "code": code, "abi": json.RawMessage(abi), "constructor": ctor,
-		"node": n.URL, "nodeKey": n.NodeKey(), "source": readSource(t, name), "compiler": testCompiler,
+		"node": n.URL, "nodeKey": n.NodeKey(), "source": source, "compiler": testCompiler,
 	})
 	id := call(t, n.URL, "PUT", u.id, "deploy_contract", "", "", stx)
 	contractID, ok := id.(string)
@@ -684,7 +692,7 @@ func TestApps(t *testing.T) {
 
 	// A node signing under a grant for other code: partners refuse it in
 	// execution (the call is recorded, and changes nothing).
-	otherCode := identity.SourceHash("another source")
+	otherCode := identity.SourceHash(identity.Sources{"Other.sol": "another source"})
 	wrong, _ := identity.CertifyGrant(identity.Grant{Agent: alice.addr, NodeKey: identity.Address(a.nodeKey),
 		SourceHash: otherCode, Functions: []string{"setValue"}, Nonce: "n"}, alice.root)
 	stx, _ := identity.SignTx(identity.Transaction{Contract: cid, Kind: identity.KindCall, Agent: alice.addr, Nonce: "w",

@@ -39,7 +39,7 @@ type agent struct {
 
 // testSource stands for the test contracts' Solidity source: joins and
 // grants name its hash.
-const testSource = "// the test contract's source"
+var testSource = identity.Sources{"Test.sol": "// the test contract's source"}
 
 var testSourceHash = identity.SourceHash(testSource).Hex()
 
@@ -659,7 +659,7 @@ func TestJoinNamesTheSource(t *testing.T) {
 	carol, dave := newKey(t), newKey(t)
 	ts := "20240102030500000000"
 	other := fmt.Sprintf(`{"node":"http://node.example","nodeKey":%q,"sourceHash":%q}`,
-		identity.Address(newKey(t)).Hex(), identity.SourceHash("another source").Hex())
+		identity.Address(newKey(t)).Hex(), identity.SourceHash(identity.Sources{"Other.sol": "another source"}).Hex())
 	if out := a.apply(t, signedRecord(t, dave, identity.KindJoin, contract, other, ts)); out.Decision == nil || *out.Decision {
 		t.Fatalf("a join for another source: %+v", out)
 	}
