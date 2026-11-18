@@ -62,6 +62,17 @@
         <div class="status" id="apps-status"></div>
       </section>
 
+      <section class="card hidden" id="target-card">
+        <h2>Contracts</h2>
+        <p class="hint">This agreement's world holds the contracts its source makes. Choose one,
+          and its address (the root contract's is known; another's you read from the contract
+          that made it), to read and call it below.</p>
+        <label for="target-contract">Contract</label>
+        <select id="target-contract"></select>
+        <label for="target-address">Address</label>
+        <input type="text" id="target-address" autocomplete="off" placeholder="0x…">
+      </section>
+
       <section class="card" id="reads-card">
         <h2>Read</h2>
         <p class="hint">A read changes nothing, and does not ask you: this page reads for you.</p>

@@ -38,8 +38,9 @@ func (s Scope) matches(agent string, reply execution.Reply) bool {
 // pub/sub. Publish never blocks: a subscriber that falls too far behind is
 // disconnected (its channel is closed), and its client reconnects.
 type Broker struct {
-	mu   sync.Mutex
-	subs map[*subscription]struct{}
+	mu     sync.Mutex
+	subs   map[*subscription]struct{}
+	decode func(agent string, reply *execution.Reply)
 }
 
 type subscription struct {
@@ -75,8 +76,21 @@ func (b *Broker) remove(sub *subscription) {
 	}
 }
 
+// SetDecoder sets how a call's reply is decoded before it is delivered.
+func (b *Broker) SetDecoder(decode func(agent string, reply *execution.Reply)) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.decode = decode
+}
+
 // Publish delivers a reply to every subscriber whose scopes match it.
 func (b *Broker) Publish(agent string, reply execution.Reply) {
+	b.mu.Lock()
+	decode := b.decode
+	b.mu.Unlock()
+	if decode != nil {
+		decode(agent, &reply)
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	for sub := range b.subs {

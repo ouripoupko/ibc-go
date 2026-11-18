@@ -133,7 +133,7 @@ func TestJoinChecks(t *testing.T) {
 func TestJoinSourceFiles(t *testing.T) {
 	var checked identity.Sources
 	a := startNode(t, Config{})
-	c := startNode(t, Config{CheckSource: func(_ context.Context, src identity.Sources, _ json.RawMessage, _ string) (string, string) {
+	c := startNode(t, Config{CheckSource: func(_ context.Context, src identity.Sources, _ json.RawMessage, _ compiler.Claim) (string, string) {
 		checked = src
 		return compiler.Verified, ""
 	}})

@@ -165,13 +165,17 @@ func (c *ContractExecution) connectGuest(pid string, b *identity.JoinBody) error
 		"nodeKey": b.NodeKey.Hex(), "role": RoleGuest, "host": b.Host.Hex()})
 }
 
-// Call executes a contract method. With shouldLog the record is logged and
+// Call executes the record's call. With shouldLog the record is logged and
 // executed as a write transaction; without it the call is read-only
 // (eth_call) and changes nothing. A failing call returns a
 // *common.ContractError, whose Error() is the reply.
 func (c *ContractExecution) Call(record Record, shouldLog bool) (common.Result, error) {
+	to, data, err := record.Call()
+	if err != nil {
+		return common.Result{}, &common.ContractError{Err: err}
+	}
 	if !shouldLog {
-		return c.state.View(record.Agent, record.Method, record.Message.Values, record.Timestamp)
+		return c.state.View(record.Agent, to, data, record.Timestamp)
 	}
 	if !c.state.Ready() {
 		return common.Result{}, common.ErrNotRunning
@@ -179,7 +183,7 @@ func (c *ContractExecution) Call(record Record, shouldLog bool) (common.Result, 
 	if err := c.ledger.Log(record); err != nil {
 		return common.Result{}, err
 	}
-	return c.state.Call(record.Agent, record.Method, record.Message.Values, record.Timestamp)
+	return c.state.Call(record.Agent, to, data, record.Timestamp)
 }
 
 // Outcome is the result of applying one ledger record.
@@ -254,7 +258,13 @@ func (c *ContractExecution) apply(index uint64, record Record) (Outcome, error) 
 				}
 			}
 		}
-		out.Result, err = c.state.Call(record.Agent, record.Method, record.Message.Values, record.Timestamp)
+		to, data, cerr := record.Call()
+		if cerr != nil {
+			out.Result, err = c.state.Advance()
+			out.Err = &common.ContractError{Err: cerr}
+			break
+		}
+		out.Result, err = c.state.Call(record.Agent, to, data, record.Timestamp)
 		out.Value = out.Result.Value
 	case ActionJoin, ActionLeave, ActionRotateKey:
 		var approved bool
@@ -307,16 +317,17 @@ func (c *ContractExecution) checkGrant(agent string, g *identity.Grant) error {
 	return nil
 }
 
-// decide applies a membership change (§10 of docs/consensus.md):
+// decide applies a membership change (§10 of docs/consensus.md). The root
+// contract decides the changes whose membership function it defines (the
+// deploy lists them); the others get the defaults:
 //   - any join whose source hash is not the hash of the contract's source is
 //     refused: the joiner read another source than the contract's;
-//   - join: the contract's approve_partner(joiner), called as the joiner;
-//     approved if the contract has no such function;
-//   - a guest's join: the contract's approve_guest(joiner), called as the
-//     joiner; refused if the contract has no such function;
-//   - leave: always approved for oneself; removing another member calls the
-//     contract's approve_removal(member) as the requester, and is refused if
-//     the contract has no such function;
+//   - join: approve_partner(joiner), called as the joiner; by default,
+//     approved;
+//   - a guest's join: approve_guest(joiner), called as the joiner; by
+//     default, refused;
+//   - leave: always approved for oneself; removing another member calls
+//     approve_removal(member) as the requester; by default, refused;
 //   - rotate_key: approved.
 //
 // The decision is stored with the cursor, and the partners collection is
@@ -344,13 +355,13 @@ func (c *ContractExecution) decide(record Record) (bool, common.Result, error) {
 			break
 		}
 		if b.Guest {
-			approved, res, err = c.state.Decide(agent.Hex(), common.MethodApproveGuest, agent, record.Timestamp, id, false)
+			approved, res, err = c.state.Decide(agent.Hex(), identity.ApproveGuest, agent, record.Timestamp, id, false)
 			if err == nil && approved {
 				err = c.connectGuest(agent.Hex(), b)
 			}
 			break
 		}
-		approved, res, err = c.state.Decide(agent.Hex(), common.MethodApprovePartner, agent, record.Timestamp, id, true)
+		approved, res, err = c.state.Decide(agent.Hex(), identity.ApprovePartner, agent, record.Timestamp, id, true)
 		if err == nil && approved {
 			err = c.Connect(b.Node, agent.Hex(), b.Profile, b.NodeKey.Hex())
 		}
@@ -358,7 +369,7 @@ func (c *ContractExecution) decide(record Record) (bool, common.Result, error) {
 		if b.Member == agent {
 			approved, res, err = c.state.Decide(agent.Hex(), "", b.Member, record.Timestamp, id, true)
 		} else {
-			approved, res, err = c.state.Decide(agent.Hex(), common.MethodApproveRemoval, b.Member, record.Timestamp, id, false)
+			approved, res, err = c.state.Decide(agent.Hex(), identity.ApproveRemoval, b.Member, record.Timestamp, id, false)
 		}
 		if err == nil && approved {
 			err = c.partnersDB.Delete(b.Member.Hex())
@@ -419,5 +430,5 @@ func readCursor(doc common.Document) (uint64, error) {
 // as opposed to a local infrastructure failure.
 func isDeterministic(err error) bool {
 	var ce *common.ContractError
-	return errors.As(err, &ce) || errors.Is(err, common.ErrNotImplemented)
+	return errors.As(err, &ce)
 }

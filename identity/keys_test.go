@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	ethcommon "github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/rlp"
 )
@@ -34,7 +35,7 @@ func newKeys(t *testing.T) keys {
 	nodeKey, _ := crypto.GenerateKey()
 	codeHash := crypto.Keccak256Hash([]byte("chat code"))
 	cert, err := CertifyGrant(Grant{Agent: agent, NodeKey: Address(nodeKey), SourceHash: codeHash,
-		Functions: []string{"post", "like"}, Nonce: NewNonce()}, root)
+		Functions: []string{"post(string)", "like(uint256)"}, Nonce: NewNonce()}, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,9 +53,10 @@ func sign(t *testing.T, s KeySigner, digest ethcommon.Hash) Envelope {
 
 var digest = crypto.Keccak256Hash([]byte("a message"))
 
-func call(agent ethcommon.Address, method string) Transaction {
+// call is a call of the function with this signature, without arguments.
+func call(agent ethcommon.Address, signature string) Transaction {
 	return Transaction{Contract: "0xchat", Kind: KindCall, Agent: agent, Nonce: NewNonce(),
-		Body: `{"method":"` + method + `","values":{}}`}
+		Body: `{"data":"` + hexutil.Encode(Selector(signature)) + `"}`}
 }
 
 // An address is the keccak256 of the public key's coordinates, for both
@@ -104,7 +106,7 @@ func TestSchemes(t *testing.T) {
 func TestRootSignsTransactions(t *testing.T) {
 	k := newKeys(t)
 	for _, tx := range []Transaction{
-		call(k.agent, "setTopic"),
+		call(k.agent, "setTopic(string)"),
 		{Kind: KindJoin, Contract: "0xchat", Agent: k.agent, Nonce: "n", Body: `{"node":"n","nodeKey":"0x0000000000000000000000000000000000000001","sourceHash":"0x0000000000000000000000000000000000000000000000000000000000000002"}`},
 		{Kind: KindLeave, Contract: "0xchat", Agent: k.agent, Nonce: "n", Body: `{"member":"` + k.agent.Hex() + `"}`},
 	} {
@@ -118,7 +120,7 @@ func TestRootSignsTransactions(t *testing.T) {
 	}
 	// Another key signing as the agent is refused.
 	other, _ := NewP256Key()
-	stx, _ := SignTx(call(k.agent, "post"), P256Signer{Key: other})
+	stx, _ := SignTx(call(k.agent, "post(string)"), P256Signer{Key: other})
 	if _, err := stx.Verify(); err != ErrBadSignature {
 		t.Errorf("another key: %v", err)
 	}
@@ -127,7 +129,7 @@ func TestRootSignsTransactions(t *testing.T) {
 // The node signs calls under a grant: only the functions it names.
 func TestNodeGrant(t *testing.T) {
 	k := newKeys(t)
-	stx, err := SignTx(call(k.agent, "post"), k.node)
+	stx, err := SignTx(call(k.agent, "post(string)"), k.node)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,29 +146,29 @@ func TestNodeGrant(t *testing.T) {
 			t.Errorf("%s: %v, want %q", name, err, want)
 		}
 	}
-	setTopic, _ := SignTx(call(k.agent, "setTopic"), k.node)
-	fail("a function the grant does not name", setTopic, "does not let the node call setTopic")
+	setTopic, _ := SignTx(call(k.agent, "setTopic(string)"), k.node)
+	fail("a function the grant does not name", setTopic, "does not let the node call function")
 	join, _ := SignTx(Transaction{Kind: KindJoin, Contract: "0xchat", Agent: k.agent, Nonce: "n",
 		Body: `{"node":"n","nodeKey":"0x0000000000000000000000000000000000000001","sourceHash":"0x0000000000000000000000000000000000000000000000000000000000000002"}`}, k.node)
 	fail("a join", join, "a node signs only calls")
 
 	otherNode, _ := crypto.GenerateKey()
-	byOther, _ := SignTx(call(k.agent, "post"), Secp256k1Signer{Key: otherNode, Cert: k.node.Cert})
+	byOther, _ := SignTx(call(k.agent, "post(string)"), Secp256k1Signer{Key: otherNode, Cert: k.node.Cert})
 	fail("another node with this grant", byOther, "not by the node the grant names")
 
 	other := newKeys(t)
 	forged, _ := CertifyGrant(Grant{Agent: k.agent, NodeKey: Address(k.nodeKey), SourceHash: k.codeHash,
-		Functions: []string{"transfer"}, Nonce: "n"}, other.root)
-	byForged, _ := SignTx(call(k.agent, "transfer"), Secp256k1Signer{Key: k.nodeKey, Cert: forged})
+		Functions: []string{"transfer(address,uint256)"}, Nonce: "n"}, other.root)
+	byForged, _ := SignTx(call(k.agent, "transfer(address,uint256)"), Secp256k1Signer{Key: k.nodeKey, Cert: forged})
 	fail("a grant signed by another agent's root", byForged, "not signed by the agent's root key")
 
 	changed := *k.node.Cert
-	changed.Grant.Functions = []string{"post", "like", "transfer"}
-	byChanged, _ := SignTx(call(k.agent, "transfer"), Secp256k1Signer{Key: k.nodeKey, Cert: &changed})
+	changed.Grant.Functions = []string{"post(string)", "like(uint256)", "transfer(address,uint256)"}
+	byChanged, _ := SignTx(call(k.agent, "transfer(address,uint256)"), Secp256k1Signer{Key: k.nodeKey, Cert: &changed})
 	fail("a grant changed after signing", byChanged, "grant")
 
 	empty, _ := CertifyGrant(Grant{Agent: k.agent, NodeKey: Address(k.nodeKey), SourceHash: k.codeHash, Nonce: "n"}, k.root)
-	byEmpty, _ := SignTx(call(k.agent, "post"), Secp256k1Signer{Key: k.nodeKey, Cert: empty})
+	byEmpty, _ := SignTx(call(k.agent, "post(string)"), Secp256k1Signer{Key: k.nodeKey, Cert: empty})
 	fail("a grant with no functions", byEmpty, "at least one function")
 
 	// A grant allows transactions only.
@@ -185,7 +187,7 @@ func TestConsent(t *testing.T) {
 	k := newKeys(t)
 	appKey, _ := NewP256Key()
 	c := Consent{Agent: k.agent, App: "https://wishes.example", AppKey: PublicKey(appKey), SourceHash: k.codeHash,
-		Read: true, Functions: []string{"post"}, Nonce: "n"}
+		Read: true, Functions: []string{"post(string)"}, Nonce: "n"}
 	sc, err := SignConsent(c, k.root)
 	if err != nil {
 		t.Fatal(err)
@@ -197,7 +199,7 @@ func TestConsent(t *testing.T) {
 	if err := byApp.Verify(); err != ErrBadSignature {
 		t.Errorf("consent signed by the app: %v", err)
 	}
-	sc.Consent.Functions = append(sc.Consent.Functions, "transfer")
+	sc.Consent.Functions = append(sc.Consent.Functions, "transfer(address,uint256)")
 	if err := sc.Verify(); err == nil {
 		t.Error("a changed consent was accepted")
 	}
@@ -255,7 +257,7 @@ func TestSignedTxRLP(t *testing.T) {
 	k := newKeys(t)
 	for _, s := range []KeySigner{k.root, k.node} {
 		stx, err := SignTx(Transaction{Contract: "0xchat", Kind: KindCall, Agent: k.agent, Nonce: "n",
-			Body: `{"method":"post","values":{"v":"<1>"}}`}, s)
+			Body: `{"data":"` + hexutil.Encode(Selector("post(string)")) + `"}`}, s)
 		if err != nil {
 			t.Fatal(err)
 		}

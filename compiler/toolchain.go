@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -230,10 +232,20 @@ func (t *Toolchain) Describe(ctx context.Context) (string, error) {
 	return "solc-js " + version, nil
 }
 
+// Claim is what a deploy says its source compiles to: the root contract's
+// name, its creation code, the ABIs of the source's contracts and the
+// membership functions the root contract defines.
+type Claim struct {
+	Contract   string
+	Code       string
+	ABIs       map[string]json.RawMessage
+	Membership []string
+}
+
 // Check compiles a deploy's source with the deploy's compiler and settings,
-// and compares the result with the deploy's code: Verified, Mismatch, or
-// Unchecked with the reason it could not be compiled.
-func (t *Toolchain) Check(ctx context.Context, source identity.Sources, compiler json.RawMessage, code string) (string, string) {
+// and compares the result with what the deploy claims: Verified, Mismatch,
+// or Unchecked with the reason it could not be compiled.
+func (t *Toolchain) Check(ctx context.Context, source identity.Sources, compiler json.RawMessage, claim Claim) (string, string) {
 	if t == nil {
 		return Unchecked, "this node has no compiler"
 	}
@@ -258,11 +270,63 @@ func (t *Toolchain) Check(ctx context.Context, source identity.Sources, compiler
 	if err != nil {
 		return Unchecked, err.Error()
 	}
-	want := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(code), "0x"))
-	for _, c := range contracts {
-		if strings.ToLower(strings.TrimPrefix(c.Code, "0x")) == want {
-			return Verified, ""
+	return compare(contracts, claim, version)
+}
+
+// compare checks a deploy's claim against the compiled contracts.
+func compare(contracts map[string]contract, claim Claim, version string) (string, string) {
+	root, ok := contracts[claim.Contract]
+	if !ok || root.Code == "" {
+		return Mismatch, fmt.Sprintf("the source has no deployable contract %s", claim.Contract)
+	}
+	if hexOf(root.Code) != hexOf(claim.Code) {
+		return Mismatch, fmt.Sprintf("the source, compiled with solc %s, is not the deployed code", version)
+	}
+	abis, membership, err := describe(contracts, claim.Contract)
+	if err != nil {
+		return Mismatch, err.Error()
+	}
+	if !sameABIs(abis, claim.ABIs) {
+		return Mismatch, "the deploy's ABIs are not the source's"
+	}
+	if !slices.Equal(membership, ordered(claim.Membership)) {
+		return Mismatch, fmt.Sprintf("the deploy's membership functions %v are not the contract's %v", claim.Membership, membership)
+	}
+	return Verified, ""
+}
+
+func hexOf(code string) string {
+	return strings.ToLower(strings.TrimPrefix(strings.TrimSpace(code), "0x"))
+}
+
+// sameABIs reports whether two sets of ABIs say the same, as JSON values.
+func sameABIs(a, b map[string]json.RawMessage) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for name, x := range a {
+		y, ok := b[name]
+		if !ok {
+			return false
+		}
+		var vx, vy any
+		if json.Unmarshal(x, &vx) != nil || json.Unmarshal(y, &vy) != nil || !reflect.DeepEqual(vx, vy) {
+			return false
 		}
 	}
-	return Mismatch, fmt.Sprintf("the source, compiled with solc %s, is not the deployed code", version)
+	return true
+}
+
+// ordered returns membership functions in identity.MembershipFunctions order.
+func ordered(names []string) []string {
+	out := []string{}
+	for _, n := range identity.MembershipFunctions {
+		if slices.Contains(names, n) {
+			out = append(out, n)
+		}
+	}
+	if len(out) != len(names) {
+		return names // an unknown name: no match
+	}
+	return out
 }

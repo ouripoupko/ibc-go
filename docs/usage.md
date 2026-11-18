@@ -197,10 +197,37 @@ contract cannot see anything that differs between nodes. That is why the fields 
 Solidity features up to the Osaka fork work, so recent compilers can be used with their default
 settings.
 
+### Several contracts in one agreement
+
+A contract on ibc is an agreement: one deploy, one group of partners, and its own EVM world. The
+contract you deploy is its root, and it may create others with `new`; they all live in that world,
+and call each other as on Ethereum:
+
+```solidity
+contract Community {
+    Membership public membership;
+    Currency public currency;
+
+    constructor() {
+        membership = new Membership(msg.sender);
+        currency = new Currency(membership);
+    }
+}
+```
+
+Members call any of them: the root, or another by its address (here read from `currency()`), with
+`at` in the client, `to` in the API, and a fourth argument to `ibc.sh write` and `ibc.sh read`. In
+every one, `msg.sender` is the member who signed. One deploy and one join cover them all, and each
+contract has its own storage, its own functions and its own 24 KB code limit.
+
+In a source, a function signature must mean one function: two contracts may both have `owner()`,
+but not with different outputs; the compiler on the node refuses such a source. Name the functions
+apart (for example `memberCount` and `accountCount`) if they differ.
+
 ### Who may join, and who may remove
 
-A contract can decide its own membership by defining these functions. ibc calls them when a join or
-a removal is ordered:
+The root contract can decide the agreement's membership by defining these functions. ibc calls them
+when a join or a removal is ordered:
 
 ```solidity
 /// Called as the joining agent. Return true to let it join.
@@ -212,6 +239,9 @@ function approve_guest(address guest) external view returns (bool);
 /// Called as the member who asks to remove another. Return true to remove it.
 function approve_removal(address member) external view returns (bool);
 ```
+
+Each must take an address and return `bool`; `true` approves, and `false` or a revert refuses. The
+node records at deploy which of them the contract defines.
 
 - **Without `approve_partner`**, every join is approved.
 - **Without `approve_guest`**, no one may join as a guest.
@@ -358,7 +388,8 @@ outcome arrives later, as a `join_contract` event for that id, with `reply` and 
 check of the source (`source_check`: `verified`, `unchecked` or `mismatch`). `deploy`, `join` and
 `permit` also take `public`, to propose letting anyone read the user's copy, and anyone reads one
 with `Ibc.publicRead(node, agent, contract, method, values)`: see
-[Publishing](#publishing-public-contracts).
+[Publishing](#publishing-public-contracts). `read` and `write` also take `{ at }`: the address of
+another contract of the agreement (see [several contracts](#several-contracts-in-one-agreement)).
 
 **`Ibc`, the user's own client**, with the user's keys: the node's web page uses it, and so can
 tools. The root key signs transactions; a key the node knows (or the root) signs queries.
@@ -371,9 +402,9 @@ const agent = addressOf(rootKey.publicKey);
 const ibc = await Ibc.connect('http://localhost:2611', { agent, root: p256Signer(rootKey) });
 await ibc.register();
 
+const source = { 'Counter.sol': counterSol };           // the source: its files, by path
 const compiled = await ibc.compile(source);            // the node compiles
-const counter = await ibc.deploy({ name: 'my-counter', code: compiled.code, abi: compiled.abi,
-  constructor: { start: 10 }, source, compiler: compiled.compiler });
+const counter = await ibc.deploy({ name: 'my-counter', ...compiled, constructor: { start: 10 }, source });
 await ibc.write(counter, 'increment', { amount: 5 });  // 15
 await ibc.read(counter, 'count');                      // 15
 ibc.close();
@@ -456,7 +487,8 @@ topic and count, but `latest` refuses an unknown reader: see
 
 ### Arguments
 
-Pass arguments as a JSON object keyed by the parameter names in the ABI:
+Pass arguments as a JSON object keyed by the parameter names in the ABI. Name the function by its
+name, or by its signature (`pay(address,uint256)`) if the source has several functions of that name:
 
 | Solidity type | Send | Receive |
 |---|---|---|
@@ -618,23 +650,29 @@ NODE_KEY=$(curl -s "$IBC/ibc/app?action=node_info" | jq -r .nodeKey)
 ./ibc sign registration -key $KEY -node $IBC -node-key $NODE_KEY |
   curl -s -X PUT "$IBC/ibc/app/$ME?action=register_agent" -H 'Content-Type: application/json' -d @-
 
-# Deploy: the node compiles the source; a deploy transaction carries the source and the compiler.
-# The reply is the new contract's id.
-COMPILED=$(jq -cn --rawfile src examples/contracts/Counter.sol '{source: $src}' |
+# Deploy: the node compiles the source and encodes the constructor's arguments; a deploy
+# transaction carries what the compiler made of the source. The reply is the new contract's id.
+SRC=$(./ibc source -C examples/contracts examples/contracts/Counter.sol)
+COMPILED=$(jq -cn --argjson src "$SRC" '{source: $src, contract: "Counter"}' |
   curl -s -X POST "$IBC/ibc/app?action=compile" -H 'Content-Type: application/json' -d @-)
-BODY=$(jq -cn --arg node $IBC --arg nodeKey $NODE_KEY --rawfile src examples/contracts/Counter.sol --argjson c "$COMPILED" \
-  '{name: "my-counter", code: $c.code, abi: $c.abi, constructor: {start: 10}, node: $node, nodeKey: $nodeKey,
-    source: $src, compiler: $c.compiler}')
+ARGS=$(jq -c '{abi: (.abi[] | select(.type == "constructor")), values: {start: 10}}' <<<"$COMPILED" |
+  curl -s -X POST "$IBC/ibc/app?action=encode" -H 'Content-Type: application/json' -d @- | jq -r .data)
+BODY=$(jq -cn --arg node $IBC --arg nodeKey $NODE_KEY --arg args "$ARGS" --argjson src "$SRC" --argjson c "$COMPILED" \
+  '{name: "my-counter", contract: $c.contract, code: $c.code, args: $args, abis: $c.abis, membership: $c.membership,
+    node: $node, nodeKey: $nodeKey, source: $src, compiler: $c.compiler}')
 CONTRACT=$(./ibc sign tx -key $KEY -kind deploy -body "$BODY" |
   curl -s -X PUT "$IBC/ibc/app/$ME?action=deploy_contract" -H 'Content-Type: application/json' -d @- | jq -r .)
 
-# Write: a call transaction. The reply is its id; the result appears on the event stream.
-./ibc sign tx -key $KEY -kind call -contract $CONTRACT -body '{"method": "increment", "values": {"amount": 5}}' |
-  curl -s -X POST "$IBC/ibc/app/$ME/$CONTRACT/increment?action=contract_write" -H 'Content-Type: application/json' -d @-
+# Write: a call transaction, its calldata encoded by the node. The reply is its id; the result
+# appears on the event stream.
+DATA=$(jq -c '{abi: (.abi[] | select(.name == "increment")), values: {amount: 5}}' <<<"$COMPILED" |
+  curl -s -X POST "$IBC/ibc/app?action=encode" -H 'Content-Type: application/json' -d @- | jq -r .data)
+./ibc sign tx -key $KEY -kind call -contract $CONTRACT -body "{\"data\": \"$DATA\"}" |
+  curl -s -X POST "$IBC/ibc/app/$ME/$CONTRACT?action=contract_write" -H 'Content-Type: application/json' -d @-
 
-# Read: a signed query. The reply is the result.
+# Read: a signed query, by function name; the node encodes and decodes. The reply is the result.
 ./ibc sign query -key $KEY -action contract_read -contract $CONTRACT -body '{"method": "count", "values": {}}' |
-  curl -s -X POST "$IBC/ibc/app/$ME/$CONTRACT/count?action=contract_read" -H 'Content-Type: application/json' -d @-
+  curl -s -X POST "$IBC/ibc/app/$ME/$CONTRACT?action=contract_read" -H 'Content-Type: application/json' -d @-
 ```
 
 On the stream, each result is one line:
@@ -642,7 +680,7 @@ On the stream, each result is one line:
 ```
 data: {"request":"0x5d2c…","contract":null,"action":"register_agent","reply":true,"agent":"0x86D6…"}
 data: {"request":"0x67bb…","contract":"0x67bb…","action":"deploy_contract","reply":true,"state_root":"0x…","agent":"0x86D6…"}
-data: {"request":"0x9a00…","contract":"0x67bb…","action":"contract_write","reply":15,"state_root":"0x…","agent":"0x86D6…"}
+data: {"request":"0x9a00…","contract":"0x67bb…","action":"contract_write","reply":15,"selector":"0x7cf5dab0","state_root":"0x…","agent":"0x86D6…"}
 ```
 
 Match `request` with the id you got when you sent the request. Empty `data:` lines are
@@ -655,7 +693,7 @@ keep-alives.
 | `{"message": "… signature does not match the agent"}` | The transaction was changed after it was signed, or signed by another key |
 | `{"message": "transaction signed by 0x…, sent as 0x…"}` | The agent in the URL is not the one who signed |
 | `{"message": "registration authorizes node key 0x…, this node's key is 0x…"}` | Sign the registration with the `nodeKey` from this node's `node_info` |
-| `{"message": "calling setTopic needs your approval on your node's page"}` | An app asked for a call the user did not let it make silently: open the approval page (`IbcApp` does) |
+| `{"message": "calling setTopic(string) needs your approval on your node's page"}` | An app asked for a call the user did not let it make silently: open the approval page (`IbcApp` does) |
 | `{"message": "this node has no Solidity compiler (see -solc)"}` | Start the node with `-solc` pointing at `solc` or `solcjs` |
 | `{"message": "unknown agent \"0x…\""}` | Register first |
 | `{"message": "consensus: unknown contract 0x…"}` | You are not a partner of this contract on this node: check the id, or join it first |
@@ -671,13 +709,14 @@ keep-alives.
 | `{"message": "this call needs a signed query"}` | Reads, `get_contract(s)` and the event stream are signed: see the [API reference](api.md#queries) |
 | `{"message": "query expired, or its time is wrong: check the clock"}` | Sign the query just before you send it; the node accepts it for 60 seconds |
 | `{"message": "query already used"}` | Every query is accepted once: sign a new one for each call |
+| `{"message": "increment: missing argument \"amount\""}` | A key in `values` is missing or misspelled. Names must match the ABI exactly (the node refuses to encode the call) |
+| `{"message": "increment: unexpected argument \"amout\""}` | A key in `values` that the function does not have |
+| `{"message": "unknown method \"incremnt\""}` | No function with that name in the contract's source |
+| `{"message": "the source has several functions named pay (…): name it by its signature"}` | Name the function by its signature, such as `pay(address,uint256)` |
+| `{"message": "increment changes state: send it as a transaction (contract_write)"}` | Only `view` and `pure` functions can be read; others are transactions |
 | *The rows below are contract errors: a read's `{"error": …}`, or a transaction event's `error`. The client throws them, and `ibc.sh` exits with them* | |
-| `increment: missing argument "amount"` | A key in `values` is missing or misspelled. Names must match the ABI exactly |
-| `increment: unexpected argument "amout"` | A key in `values` that the method does not have |
-| `unknown method "incremnt"` | No function with that name in the ABI |
-| `increment changes state: send it as a transaction (contract_write)` | Only `view` and `pure` functions can be read; others are transactions |
-| `execution reverted: …` | The contract reverted; the rest is its reason |
-| `execution reverted` (nothing after it) | The contract reverted without a reason, for example by calling `sha256` |
+| `execution reverted: …` | The contract reverted; the rest is its reason, or its custom error with its arguments |
+| `execution reverted` (nothing after it) | The contract reverted without a reason, or has no function with the call's selector (for example, calldata meant for another contract of the agreement: check `to`) |
 | `contract deployment failed: …` | Every call to a contract whose constructor failed. Deploy it again |
 | `0x…: not a partner or guest of this contract` | A transaction from an agent the contract does not know |
 | `increment: argument "amount": number 1.5 is not an exact integer; pass it as a string` | Integers must be whole; very large ones must be strings |

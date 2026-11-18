@@ -10,11 +10,14 @@
 #   ibc.sh whoami                                your agent id (the key's address)
 #   ibc.sh register                              register yourself on the node
 #   ibc.sh exists                                are you registered?
-#   ibc.sh deploy NAME [CONSTRUCTOR_JSON]        deploy contracts/NAME.sol, or the contract NAME of the files in
+#   ibc.sh deploy NAME [CONSTRUCTOR_JSON]        deploy the contract NAME of contracts/NAME.sol, or of the files in
 #                                                the folder contracts/NAME/ (they import each other by their paths
 #                                                in it), compiled by the node; prints the contract id
-#   ibc.sh write CONTRACT METHOD [VALUES_JSON]   a transaction; waits for and prints its result
-#   ibc.sh read CONTRACT METHOD [VALUES_JSON]    a read of a view function; prints its result
+#   ibc.sh write CONTRACT METHOD [VALUES_JSON] [AT]   a transaction; waits for and prints its result
+#   ibc.sh read CONTRACT METHOD [VALUES_JSON] [AT]    a read of a view function; prints its result
+#                                                METHOD: a function of the contract's source, by name or
+#                                                signature; AT: the address of the contract in the
+#                                                agreement to call (default: the root contract)
 #   ibc.sh join CONTRACT MEMBER_URL MEMBER_ID SOURCE    ask a member to let you join a contract of the
 #                                                source SOURCE: the contract's .sol file, the folder of its files,
 #                                                or a .json of its files by path (as its page copies them);
@@ -23,7 +26,7 @@
 #   ibc.sh leave CONTRACT [MEMBER_ID]            leave a contract (or ask to remove a member)
 #   ibc.sh public CONTRACT                       let anyone read your copy, unsigned
 #   ibc.sh private CONTRACT                      stop it
-#   ibc.sh anyone AGENT CONTRACT METHOD [VALUES_JSON]   read a public contract, unsigned, as anyone
+#   ibc.sh anyone AGENT CONTRACT METHOD [VALUES_JSON] [AT]   read a public contract, unsigned, as anyone
 #   ibc.sh contracts                             list your contracts
 #   ibc.sh contract CONTRACT                     one contract's summary
 #   ibc.sh stream [CONTRACT]                     follow your event stream (Ctrl-C to stop)
@@ -127,7 +130,7 @@ submit_and_wait() {
 }
 
 cmd=${1:-}
-[ -n "$cmd" ] || { sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
+[ -n "$cmd" ] || { sed -n '2,/^set -euo/{/^set -euo/!p}' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
 shift
 
 case "$cmd" in
@@ -160,17 +163,24 @@ deploy)
         want=$name
     elif [ -f "$CONTRACTS/$name.sol" ]; then
         src=$("$IBC_BIN" source -C "$CONTRACTS" "$CONTRACTS/$name.sol") || die "cannot read $CONTRACTS/$name.sol"
-        want=""
+        want=$name
     else
         die "no $CONTRACTS/$name.sol, nor a folder $CONTRACTS/$name/"
     fi
     # The node compiles the source; the deploy carries both, so joiners can compile it again.
     compiled=$(request POST "" compile "$(jq -cn --argjson src "$src" --arg want "$want" '{source: $src, contract: $want}')")
     fail_on_message "$compiled"
-    body=$(jq -cn --arg name "$name" --arg node "$IBC_URL" --arg nodeKey "$(node_key)" \
-        --argjson src "$src" --argjson c "$compiled" --argjson ctor "$ctor" \
+    # The constructor's arguments, encoded by the node.
+    args=0x
+    if jq -e '.abi[] | select(.type == "constructor")' >/dev/null <<<"$compiled"; then
+        encoded=$(request POST "" encode "$(jq -c --argjson v "$ctor" '{abi: (.abi[] | select(.type == "constructor")), values: $v}' <<<"$compiled")")
+        fail_on_message "$encoded"
+        args=$(jq -r .data <<<"$encoded")
+    fi
+    body=$(jq -cn --arg name "$name" --arg node "$IBC_URL" --arg nodeKey "$(node_key)" --arg args "$args" \
+        --argjson src "$src" --argjson c "$compiled" \
         '{name: $name, contract: $c.contract, default_app: "", profile: "",
-          code: $c.code, abi: $c.abi, constructor: $ctor, node: $node, nodeKey: $nodeKey,
+          code: $c.code, args: $args, abis: $c.abis, membership: $c.membership, node: $node, nodeKey: $nodeKey,
           source: $src, compiler: $c.compiler}')
     event=$(submit_and_wait "" PUT "$AGENT" deploy_contract "$(sign deploy "" "$body")")
     [ "$(jq -r .reply <<<"$event")" = "true" ] || die "deploy failed: $(jq -r .reply <<<"$event")"
@@ -178,22 +188,35 @@ deploy)
     ;;
 write)
     need_key
-    contract=${1:?usage: ibc.sh write CONTRACT METHOD [VALUES_JSON]}
-    method=${2:?usage: ibc.sh write CONTRACT METHOD [VALUES_JSON]}
+    contract=${1:?usage: ibc.sh write CONTRACT METHOD [VALUES_JSON] [AT]}
+    method=${2:?usage: ibc.sh write CONTRACT METHOD [VALUES_JSON] [AT]}
     values=${3:-{\}}
-    body=$(jq -cn --arg m "$method" --argjson v "$values" '{method: $m, values: $v}')
-    event=$(submit_and_wait "$contract" POST "$AGENT/$contract/$method" contract_write "$(sign call "$contract" "$body")")
+    at=${4:-}
+    # The function, from the ABIs the contract's deploy carries; the node encodes the call.
+    item=$(signed_get "$AGENT/$contract" get_contract "$contract" | jq -c --arg m "$method" '
+        [.abis // {} | to_entries[].value[] | select(.type == "function")
+         | select(.name == $m or (.name + "(" + ([.inputs[].type] | join(",")) + ")") == $m)] | unique')
+    case $(jq length <<<"$item") in
+    0) die "no function $method in the contract's source" ;;
+    1) ;;
+    *) die "several functions are named $method: name it by its signature, such as $(jq -r '.[0] | .name + "(" + ([.inputs[].type] | join(",")) + ")"' <<<"$item")" ;;
+    esac
+    encoded=$(request POST "" encode "$(jq -cn --argjson f "$item" --argjson v "$values" '{abi: $f[0], values: $v}')")
+    fail_on_message "$encoded"
+    body=$(jq -cn --arg data "$(jq -r .data <<<"$encoded")" --arg to "$at" 'if $to == "" then {data: $data} else {to: $to, data: $data} end')
+    event=$(submit_and_wait "$contract" POST "$AGENT/$contract" contract_write "$(sign call "$contract" "$body")")
     # A failed call (a revert, a wrong argument, an unknown method) has an error.
     if jq -e '.error' >/dev/null <<<"$event"; then die "$(jq -r .error <<<"$event")"; fi
     jq -c .reply <<<"$event"
     ;;
 read)
     need_key
-    contract=${1:?usage: ibc.sh read CONTRACT METHOD [VALUES_JSON]}
-    method=${2:?usage: ibc.sh read CONTRACT METHOD [VALUES_JSON]}
+    contract=${1:?usage: ibc.sh read CONTRACT METHOD [VALUES_JSON] [AT]}
+    method=${2:?usage: ibc.sh read CONTRACT METHOD [VALUES_JSON] [AT]}
     values=${3:-{\}}
-    body=$(jq -cn --arg m "$method" --argjson v "$values" '{method: $m, values: $v}')
-    reply=$(request POST "$AGENT/$contract/$method" contract_read "$(query contract_read "$contract" "$body")")
+    at=${4:-}
+    body=$(jq -cn --arg m "$method" --argjson v "$values" --arg to "$at" '{method: $m, values: $v} + (if $to == "" then {} else {to: $to} end)')
+    reply=$(request POST "$AGENT/$contract" contract_read "$(query contract_read "$contract" "$body")")
     fail_on_message "$reply"
     fail_on_error "$reply"
     jq -c . <<<"$reply"
@@ -244,12 +267,12 @@ public | private)
     jq -c . <<<"$reply"
     ;;
 anyone)
-    agent=${1:?usage: ibc.sh anyone AGENT CONTRACT METHOD [VALUES_JSON]}
-    contract=${2:?usage: ibc.sh anyone AGENT CONTRACT METHOD [VALUES_JSON]}
-    method=${3:?usage: ibc.sh anyone AGENT CONTRACT METHOD [VALUES_JSON]}
+    agent=${1:?usage: ibc.sh anyone AGENT CONTRACT METHOD [VALUES_JSON] [AT]}
+    contract=${2:?usage: ibc.sh anyone AGENT CONTRACT METHOD [VALUES_JSON] [AT]}
+    method=${3:?usage: ibc.sh anyone AGENT CONTRACT METHOD [VALUES_JSON] [AT]}
     values=${4:-{\}}
     reply=$(curl -sS -G "$IBC_URL/ibc/app/$agent/$contract/$method" --data-urlencode action=public_read \
-        --data-urlencode "values=$values")
+        --data-urlencode "values=$values" ${5:+--data-urlencode "to=$5"})
     fail_on_message "$reply"
     fail_on_error "$reply"
     jq -c . <<<"$reply"

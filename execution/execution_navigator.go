@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/ethdb"
 
 	"github.com/ouripoupko/ibc-go/common"
@@ -34,8 +35,13 @@ type Reply struct {
 	Contract *string `json:"contract"` // null for agent-level actions
 	Action   string  `json:"action"`
 	// Reply is the result, or the error string for a failed record (as
-	// Python returned str(e)).
+	// Python returned str(e)). For a call, the node decodes the return data
+	// with the source's ABIs; data it cannot decode stays hex.
 	Reply any `json:"reply"`
+	// Selector is a call's function selector, and Revert the data of its
+	// revert, hex: what the node decodes the reply and the error from.
+	Selector string `json:"selector,omitempty"`
+	Revert   string `json:"revert,omitempty"`
 	// Error is set, to the same text, when the record failed: a revert, an
 	// argument the method does not take, an unknown method. A function may
 	// return a string, so the reply alone does not tell.
@@ -347,9 +353,16 @@ func (n *Navigator) report(agent string, out Outcome) {
 		Reply:     out.Value,
 		StateRoot: out.Result.StateRoot.Hex(),
 	}
+	if out.Record.Action == ActionWrite && len(out.Record.Data) >= 10 {
+		reply.Selector = out.Record.Data[:10]
+	}
 	if out.Err != nil {
 		reply.Reply = out.Err.Error()
 		reply.Error = out.Err.Error()
+		var ce *common.ContractError
+		if errors.As(out.Err, &ce) && len(ce.Data) > 0 {
+			reply.Revert = hexutil.Encode(ce.Data)
+		}
 	}
 	if out.Decision != nil {
 		n.cfg.Output.Decided(agent, contract, out.Record, *out.Decision)

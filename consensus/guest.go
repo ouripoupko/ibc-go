@@ -11,6 +11,7 @@ import (
 	"time"
 
 	ethcommon "github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 
 	"github.com/ouripoupko/ibc-go/common"
 	"github.com/ouripoupko/ibc-go/compiler"
@@ -149,9 +150,9 @@ func (r *Router) guestSubmit(agent ethcommon.Address, contract string, e executi
 }
 
 // Read runs a read for a guest: a host runs it on its copy of the
-// contract, as the guest. A contract's refusal (a revert) comes back as the
-// value, its message, as for a partner's read.
-func (r *Router) Read(ctx context.Context, agent, contract, method string, values map[string]any) (any, error) {
+// contract, as the guest. A contract's refusal (a revert) comes back as a
+// *common.ContractError, as for a partner's read.
+func (r *Router) Read(ctx context.Context, agent, contract string, to *ethcommon.Address, data []byte) ([]byte, error) {
 	addr, err := parseAgent(agent)
 	if err != nil {
 		return nil, err
@@ -163,38 +164,41 @@ func (r *Router) Read(ctx context.Context, agent, contract, method string, value
 	if !ok {
 		return nil, ErrNotGuest
 	}
-	body, err := r.toHost(ctx, contract, e, map[string]any{"type": "read", "guest": addr, "method": method, "values": values})
+	var call execution.Record
+	call.SetCall(to, data)
+	body, err := r.toHost(ctx, contract, e, map[string]any{"type": "read", "guest": addr, "to": call.To, "data": call.Data})
 	if err != nil {
 		return nil, err
 	}
 	var reply struct {
-		Value any    `json:"value"`
-		Error string `json:"error"`
+		Value  string `json:"value"`
+		Error  string `json:"error"`
+		Revert string `json:"revert"`
 	}
-	if err := execution.DecodeJSON(body, &reply); err != nil {
+	if err := json.Unmarshal(body, &reply); err != nil {
 		return nil, fmt.Errorf("host's read reply: %w", err)
 	}
 	if reply.Error != "" {
-		return map[string]any{"error": reply.Error}, nil // the contract's error, as a read answers it
+		revert, _ := hexutil.Decode(reply.Revert)
+		return nil, &common.ContractError{Err: errors.New(reply.Error), Data: revert}
 	}
-	return reply.Value, nil
+	return hexutil.Decode(reply.Value)
 }
 
 // hostRead serves a guest's read on a host: the guest's node must have sent
 // it, and it runs as the guest.
 func (r *Router) hostRead(agent ethcommon.Address, contract string, from ethcommon.Address, msg wireMessage) (any, error) {
-	if msg.Guest == nil || msg.Method == "" {
-		return nil, errors.New("read message needs guest and method")
+	if msg.Guest == nil || msg.Data == "" {
+		return nil, errors.New("read message needs guest and data")
 	}
 	if err := r.checkGuest(agent, contract, *msg.Guest, from); err != nil {
 		return nil, err
 	}
-	res, err := r.cfg.Execution.Read(agent.Hex(), msg.Guest.Hex(), execution.Record{Contract: contract,
-		Method: msg.Method, Message: execution.Message{Values: msg.Values}})
+	res, err := r.cfg.Execution.Read(agent.Hex(), msg.Guest.Hex(), execution.Record{Contract: contract, To: msg.To, Data: msg.Data})
 	if err != nil {
 		var ce *common.ContractError
-		if errors.As(err, &ce) || errors.Is(err, common.ErrNotImplemented) {
-			return map[string]any{"error": err.Error()}, nil
+		if errors.As(err, &ce) {
+			return map[string]any{"error": err.Error(), "revert": hexutil.Encode(ce.Data)}, nil
 		}
 		return nil, err
 	}

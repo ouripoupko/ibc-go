@@ -4,7 +4,9 @@
 //
 // Everything shown comes from the node or from contracts, so it is always
 // inserted as text (textContent), never as HTML.
-import { Ibc, IbcError, needsApproval } from './js/index.js';
+import { Ibc, IbcError, needsApproval, functionsOf, functionOf, signatureOf } from './js/index.js';
+
+export { functionsOf, functionOf, signatureOf };
 import {
   addressOf, choosePasskey, createPasskey, fromHex, newP256Key, nonce, passkeySigner, signBatch, sign, sourceHashOf, toHex,
 } from './js/index.js';
@@ -67,10 +69,21 @@ export async function connect(identity) {
 /** The hash of a contract's source: what joins and app permissions are for. */
 export { sourceHashOf };
 
-/** The ABI's functions that change state: those an app may have the node call silently. */
-export function writeFunctions(abi) {
-  return (typeof abi === 'string' ? parseAbi(abi) : (abi ?? []))
-    .filter((f) => f.type === 'function' && f.name && !isRead(f));
+/**
+ * The source's functions that change state, each once (see functionsOf):
+ * those an app may have the node call silently. Permissions name them by
+ * signature.
+ */
+export function writeFunctions(abis) {
+  return functionsOf(abis ?? {}).filter((f) => !isRead(f.item));
+}
+
+/** A contract's short name: "Name" for "path:Name". */
+export const contractName = (key) => String(key ?? '').split(':').pop();
+
+/** A function of the source, labelled with its signature and, if the source has several contracts, theirs. */
+export function functionLabel(f, abis) {
+  return Object.keys(abis ?? {}).length > 1 ? `${f.signature} (${f.contracts.map(contractName).join(', ')})` : f.signature;
 }
 
 /**
@@ -248,7 +261,7 @@ export function explained(signer) {
   return {
     ...signer,
     async signDigest(digest, about) {
-      const close = openSigningBox(explain(about?.type, about?.message ?? {}, about?.messages));
+      const close = openSigningBox(about?.label ? words(about.label) : explain(about?.type, about?.message ?? {}, about?.messages));
       try {
         return await signer.signDigest(digest, about);
       } finally {
@@ -317,7 +330,7 @@ function explain(type, m, batch) {
   if (type === 'Batch') {
     if (batch?.some((b) => b.type === 'Registration')) return words('create identity on', location.host);
     const tx = batch?.find((b) => b.type === 'Transaction');
-    if (tx) return explain('Transaction', tx.message);
+    if (tx) return tx.label ? words(tx.label) : explain('Transaction', tx.message);
     const consent = batch?.find((b) => b.type === 'Consent');
     if (consent) return explain('Consent', consent.message);
     const query = batch?.find((b) => b.type === 'Query');
@@ -336,8 +349,8 @@ function explain(type, m, batch) {
     case 'Grant:': return words('let your node call', m.functions.join(' '));
     case 'Query:contract_read': return words('read', body.method, values(body.values));
     case 'Query:revoke_app': return words('disconnect app');
-    case 'Transaction:deploy': return words('deploy', body.name, values(Object.hasOwn(body, 'constructor') ? body.constructor : {}));
-    case 'Transaction:call': return words(body.method, values(body.values));
+    case 'Transaction:deploy': return words('deploy', body.name);
+    case 'Transaction:call': return words('call', body.to ? short(body.to) : short(m.contract));
     case 'Transaction:join': return words(body.guest ? 'join as a guest' : 'join', short(m.contract));
     case 'Transaction:leave': return self ? words('leave', short(m.contract)) : words('remove', short(body.member));
     case 'Transaction:rotate_key': return words('move to', body.node);

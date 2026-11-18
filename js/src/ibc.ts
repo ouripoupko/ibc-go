@@ -57,6 +57,9 @@ export interface IbcEvent {
   action: string;
   /** The outcome: a function's result, true or false, or an error string. */
   reply: unknown;
+  /** For a call: its function's selector, and its revert data if it reverted (hex). */
+  selector?: Hex;
+  revert?: Hex;
   /**
    * Set, to the same text as reply, when the transaction failed: a revert, an
    * argument the function does not take, an unknown function. (A function
@@ -110,7 +113,10 @@ export interface ContractSummary {
   pid?: Address;
   address?: string;
   code?: Hex;
-  abi?: unknown;
+  /** The ABIs of the source's contracts, by name ("path:Name"); contract names the root one. */
+  abis?: ABIs;
+  /** The membership functions the root contract defines (approve_partner, ...). */
+  membership?: string[];
   /** The contract's Solidity source: its files, by path. */
   source?: Sources;
   compiler?: unknown;
@@ -137,15 +143,98 @@ export interface AppRecord {
   permissions: Record<Hex, { read: boolean; functions: string[]; grant?: unknown }>;
 }
 
+/** One function, constructor, event or error of an ABI. */
+export interface AbiItem {
+  type: string;
+  name?: string;
+  inputs?: AbiParam[];
+  outputs?: AbiParam[];
+  stateMutability?: string;
+  [field: string]: unknown;
+}
+
+export interface AbiParam {
+  name: string;
+  type: string;
+  components?: AbiParam[];
+  [field: string]: unknown;
+}
+
+/** The ABIs of a source's contracts, by name ("path:Name"). */
+export type ABIs = Record<string, AbiItem[]>;
+
 /** What the node compiled: the deploy needs it. */
 export interface Compiled {
-  /** The contract's name, as the compile named it ("Name" or "path:Name"). */
+  /** The contract to deploy, by its name in the source: "path:Name". */
   contract: string;
   code: Hex;
-  abi: unknown[];
+  /** Its ABI. */
+  abi: AbiItem[];
+  /** The ABIs of all the source's contracts, and the membership functions the contract defines. */
+  abis: ABIs;
+  membership: string[];
   /** sourceHashOf(the source). */
   sourceHash: Hex;
   compiler: { version: string; settings: unknown };
+}
+
+/** A parameter's canonical type, as signatures write it: tuples as (types). */
+function canonicalType(p: AbiParam): string {
+  return p.type.startsWith('tuple') ? `(${(p.components ?? []).map(canonicalType).join(',')})${p.type.slice(5)}` : p.type;
+}
+
+/** A call in words, for a page to show while it is signed: "increment 5". */
+export function describe(what: string, values: object = {}): string {
+  return [what, ...Object.values(values).map((v) => (typeof v === 'string' ? v : JSON.stringify(v)))].join(' ');
+}
+
+/** A function's signature, as grants and consents name it: "pay(address,uint256)". */
+export function signatureOf(item: AbiItem): string {
+  return `${item.name}(${(item.inputs ?? []).map(canonicalType).join(',')})`;
+}
+
+/** Whether a function only reads (view or pure). */
+export const isReadFunction = (item: AbiItem): boolean => item.stateMutability === 'view' || item.stateMutability === 'pure';
+
+/** A function of a source, and the contracts that have it. */
+export interface SourceFunction {
+  item: AbiItem;
+  signature: string;
+  contracts: string[];
+}
+
+/** The functions of a source, by signature: each once, with the contracts that have it. */
+export function functionsOf(abis: ABIs): SourceFunction[] {
+  const bySig = new Map<string, SourceFunction>();
+  for (const [name, abi] of Object.entries(abis ?? {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+    for (const item of abi ?? []) {
+      if (item.type !== 'function') continue;
+      const signature = signatureOf(item);
+      const f = bySig.get(signature);
+      if (f) f.contracts.push(name);
+      else bySig.set(signature, { item, signature, contracts: [name] });
+    }
+  }
+  return [...bySig.values()];
+}
+
+/**
+ * A function of a source by its signature ("pay(address,uint256)"), or by
+ * its name if only one function of the source has that name.
+ */
+export function functionOf(abis: ABIs, nameOrSignature: string): SourceFunction {
+  const all = functionsOf(abis);
+  const found = nameOrSignature.includes('(')
+    ? all.filter((f) => f.signature === nameOrSignature)
+    : all.filter((f) => f.item.name === nameOrSignature);
+  if (found.length === 1) return found[0];
+  if (found.length === 0) throw new IbcError(`unknown method "${nameOrSignature}"`);
+  throw new IbcError(`the source has several functions named ${nameOrSignature} (${found.map((f) => f.signature).join(', ')}): name it by its signature`);
+}
+
+/** Where a call goes: at, a contract in the agreement's world; default, the root contract. */
+export interface CallOptions {
+  at?: Address;
 }
 
 /**
@@ -165,11 +254,14 @@ function ctorOf(o: object): Record<string, unknown> {
  */
 export interface DeployInput {
   name: string;
-  /** The contract in the source, as compile() named it (Compiled.contract); default: name. */
-  contract?: string;
+  /** What compile() made of the source: the root contract, its code, the ABIs and membership functions. */
+  contract: string;
   code: Hex;
-  abi: unknown;
+  abis: ABIs;
+  membership: string[];
+  /** The constructor's arguments, by name (the node encodes them); or args, already encoded. */
   constructor?: ConstructorArgs;
+  args?: Hex;
   protocol?: string;
   source: Sources;
   compiler: unknown;
@@ -264,10 +356,11 @@ export class Ibc {
    * the function runs with msg.sender the zero address.
    */
   static async publicRead(url: string, agent: Address, contract: string, method: string,
-    values: Record<string, unknown> = {}): Promise<unknown> {
+    values: Record<string, unknown> = {}, { at }: CallOptions = {}): Promise<unknown> {
     const base = url.replace(/\/+$/, '');
     const path = [agent, contract, method].map(encodeURIComponent).join('/');
-    const res = await fetch(`${base}/ibc/app/${path}?action=public_read&values=${encodeURIComponent(JSON.stringify(values))}`);
+    const to = at ? `&to=${encodeURIComponent(at)}` : '';
+    const res = await fetch(`${base}/ibc/app/${path}?action=public_read&values=${encodeURIComponent(JSON.stringify(values))}${to}`);
     const reply = await res.json();
     if (reply && typeof reply === 'object' && !Array.isArray(reply) && 'message' in reply) {
       throw new IbcError(String(reply.message));
@@ -298,10 +391,11 @@ export class Ibc {
   }
 
   /** Signs a transaction with the root key. body is an object, sent as JSON text. */
-  async sign(kind: string, contract: string, body: unknown): Promise<SignedTx> {
+  /** Signs a transaction with the root key. label says what it does, for the page to show while signing. */
+  async sign(kind: string, contract: string, body: unknown, label?: string): Promise<SignedTx> {
     if (!this.root) throw new IbcError('no root key to sign with');
     const tx: Transaction = { contract, kind, agent: this.agent, nonce: nonce(), body: JSON.stringify(body) };
-    const { envelope } = await sign(this.root, 'Transaction', tx);
+    const { envelope } = await sign(this.root, 'Transaction', tx, label);
     return { tx, signature: envelope };
   }
 
@@ -540,13 +634,43 @@ export class Ibc {
     return this.request('POST', 'compile', { agent: '', body: { source, contract } });
   }
 
-  /** The deploy transaction's body, for a compiled contract. */
-  deployBody(input: DeployInput): Record<string, unknown> {
-    const { name, code, abi, source, compiler, ...rest } = input;
+  /**
+   * ABI-encodes values for one ABI item, on the node: a function's calldata,
+   * or a constructor's arguments.
+   */
+  async encode(item: AbiItem, values: Record<string, unknown> = {}): Promise<Hex> {
+    return (await this.request('POST', 'encode', { agent: '', body: { abi: item, values } })).data;
+  }
+
+  #abis = new Map<string, ABIs>(); // contract id -> the ABIs its deploy carries
+
+  /** The ABIs of a contract's source, as its deploy carries them. */
+  async abis(contract: string): Promise<ABIs> {
+    let abis = this.#abis.get(contract);
+    if (!abis) {
+      abis = (await this.contract(contract)).abis;
+      if (!abis) throw new IbcError(`no contract ${contract} here`);
+      this.#abis.set(contract, abis);
+    }
+    return abis;
+  }
+
+  /** The calldata of a call of method (a name or a signature) of a contract's source. */
+  async calldata(contract: string, method: string, values: Record<string, unknown> = {}): Promise<Hex> {
+    return this.encode(functionOf(await this.abis(contract), method).item, values);
+  }
+
+  /** The deploy transaction's body, for a compiled contract; the node encodes the constructor's arguments. */
+  async deployBody(input: DeployInput): Promise<Record<string, unknown>> {
+    const { name, contract, code, abis, membership, source, compiler, ...rest } = input;
     delete rest.constructor;
+    let args = rest.args;
+    if (args === undefined) {
+      const ctor = (abis[contract] ?? []).find((x) => x.type === 'constructor');
+      args = ctor ? await this.encode(ctor, ctorOf(input)) : '0x';
+    }
     return {
-      name, contract: name, default_app: '', profile: '', ...rest,
-      code: code.trim(), abi: typeof abi === 'string' ? JSON.parse(abi) : abi, constructor: ctorOf(input),
+      name, default_app: '', profile: '', ...rest, contract, code: code.trim(), args, abis, membership,
       node: this.url, nodeKey: this.nodeKey, source, compiler,
     };
   }
@@ -557,25 +681,29 @@ export class Ibc {
    */
   async deploy(contract: DeployInput | null, tx: SignedTx | null = null): Promise<string> {
     if (!tx && !contract) throw new IbcError('nothing to deploy');
-    const body = tx ?? await this.sign('deploy', '', this.deployBody(contract!));
+    const body = tx ?? await this.sign('deploy', '', await this.deployBody(contract!), describe(`deploy ${contract!.name}`, ctorOf(contract!)));
     const event = await this.submit('PUT', 'deploy_contract', { body });
     if (event.reply !== true) throw new IbcError(`deploy failed: ${String(event.reply)}`);
     return event.contract!;
   }
 
   /**
-   * A transaction signed by the root key: changes the contract's state.
-   * Resolves with the method's return value; rejects with the revert reason.
+   * A transaction signed by the root key: changes the agreement's state.
+   * method is a function of the contract's source, by name or signature; it
+   * runs on the root contract, or on the contract at `at`. Resolves with the
+   * function's return value; rejects with the revert reason.
    */
-  async write(contract: string, method: string, values: Record<string, unknown> = {}): Promise<unknown> {
+  async write(contract: string, method: string, values: Record<string, unknown> = {}, { at }: CallOptions = {}): Promise<unknown> {
+    const { item } = functionOf(await this.abis(contract), method);
+    const data = await this.encode(item, values);
     return this.#result(await this.submit('POST', 'contract_write',
-      { contract, method, body: await this.sign('call', contract, { method, values }) }));
+      { contract, body: await this.sign('call', contract, at ? { to: at, data } : { data }, describe(item.name ?? method, values)) }));
   }
 
   /** A call the node signs silently, if the user allowed this app this function. */
-  async writeSilently(contract: string, method: string, values: Record<string, unknown> = {}): Promise<unknown> {
-    const body = await this.query('contract_write', { contract, body: { method, values } });
-    return this.#result(await this.submit('POST', 'contract_write', { contract, method, body }));
+  async writeSilently(contract: string, method: string, values: Record<string, unknown> = {}, { at }: CallOptions = {}): Promise<unknown> {
+    const body = await this.query('contract_write', { contract, body: { method, values, ...(at ? { to: at } : {}) } });
+    return this.#result(await this.submit('POST', 'contract_write', { contract, body }));
   }
 
   #result(event: IbcEvent): unknown {
@@ -583,10 +711,14 @@ export class Ibc {
     return event.reply;
   }
 
-  /** A read of a view or pure function: returns its result, at once. */
-  async read(contract: string, method: string, values: Record<string, unknown> = {}, signer?: Signer): Promise<unknown> {
-    const body = await this.query('contract_read', { contract, body: { method, values }, signer });
-    return readValue(await this.request('POST', 'contract_read', { contract, method, body }));
+  /**
+   * A read of a view or pure function, on the root contract or on the
+   * contract at `at`: returns its result, at once.
+   */
+  async read(contract: string, method: string, values: Record<string, unknown> = {},
+    { at, signer }: CallOptions & { signer?: Signer } = {}): Promise<unknown> {
+    const body = await this.query('contract_read', { contract, body: { method, values, ...(at ? { to: at } : {}) }, signer });
+    return readValue(await this.request('POST', 'contract_read', { contract, body }));
   }
 
   /** This agent's contracts on the node (an app sees those it may read). */
@@ -684,8 +816,8 @@ export type ApprovalRequest =
   | { type: 'connect' }
   | { type: 'deploy'; source: Sources; contract?: string; name?: string; constructor?: ConstructorArgs; protocol?: string; public?: boolean }
   | { type: 'permit'; contract: string; public?: boolean }
-  | { type: 'call'; contract: string; method: string; values?: Record<string, unknown> }
-  | { type: 'read'; contract: string; method: string; values?: Record<string, unknown> }
+  | { type: 'call'; contract: string; method: string; values?: Record<string, unknown>; at?: Address }
+  | { type: 'read'; contract: string; method: string; values?: Record<string, unknown>; at?: Address }
   | { type: 'join'; contract: string; source: Sources; contractName?: string; memberNode: string; memberAgent: Address; guest?: boolean; public?: boolean };
 
 /** What the approval page answers: the agent, and the request's result. */
@@ -872,28 +1004,35 @@ export class IbcApp {
     })).request!;
   }
 
-  /** Reads silently if the user allowed it, and otherwise asks the user. */
-  async read(contract: string, method: string, values: Record<string, unknown> = {}): Promise<unknown> {
+  /**
+   * Reads silently if the user allowed it, and otherwise asks the user. at:
+   * a contract in the agreement's world (default: the root contract).
+   */
+  async read(contract: string, method: string, values: Record<string, unknown> = {}, { at }: CallOptions = {}): Promise<unknown> {
     if (this.ibc) {
       try {
-        return await this.ibc.read(contract, method, values);
+        return await this.ibc.read(contract, method, values, { at });
       } catch (err) {
         if (!needsApproval(err)) throw err;
       }
     }
-    return readValue((await this.#approve({ type: 'read', contract, method, values })).value);
+    return readValue((await this.#approve({ type: 'read', contract, method, values, ...(at ? { at } : {}) })).value);
   }
 
-  /** Writes silently if the user allowed this function, and otherwise asks the user. */
-  async write(contract: string, method: string, values: Record<string, unknown> = {}): Promise<unknown> {
+  /**
+   * Writes silently if the user allowed this function, and otherwise asks
+   * the user. at: a contract in the agreement's world (default: the root
+   * contract).
+   */
+  async write(contract: string, method: string, values: Record<string, unknown> = {}, { at }: CallOptions = {}): Promise<unknown> {
     if (this.ibc) {
       try {
-        return await this.ibc.writeSilently(contract, method, values);
+        return await this.ibc.writeSilently(contract, method, values, { at });
       } catch (err) {
         if (!needsApproval(err)) throw err;
       }
     }
-    const { reply, error } = await this.#approve({ type: 'call', contract, method, values });
+    const { reply, error } = await this.#approve({ type: 'call', contract, method, values, ...(at ? { at } : {}) });
     if (typeof error === 'string' && error) throw new IbcError(error);
     return reply;
   }

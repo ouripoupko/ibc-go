@@ -119,12 +119,19 @@ const ibc = await Ibc.connect('http://localhost:2611', { agent, root: p256Signer
 await ibc.register();
 
 const compiled = await ibc.compile(source);    // the node compiles; source: { 'Counter.sol': '…' }
-const counter = await ibc.deploy({ name: 'counter', contract: compiled.contract, code: compiled.code, abi: compiled.abi,
-  constructor: { start: 10 }, source, compiler: compiled.compiler });
+const counter = await ibc.deploy({ name: 'counter', ...compiled, constructor: { start: 10 }, source });
 await ibc.write(counter, 'increment', { amount: 5 });   // 15
 await ibc.read(counter, 'count');                       // 15
 ibc.close();
 ```
+
+A contract is an agreement with its own EVM world: the contract you deploy, and those it creates.
+`read` and `write` (of `Ibc` and `IbcApp`) take `{ at }`, the address of another contract of the
+agreement, to call it; a function is named by its name, or by its signature
+(`'pay(address,uint256)'`) if the source has several of that name. The client finds the function in
+the ABIs the deploy carries, the node encodes the call, and the root signs the calldata;
+`functionOf`, `functionsOf` and `signatureOf` do the finding, and permissions name functions by
+signature.
 
 The signing functions (EIP-712 digests, passkeys, WebCrypto keys, batches) are exported too, and
 from `@ouripoupko/ibc/keys` alone.

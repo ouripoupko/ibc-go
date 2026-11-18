@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	ethcommon "github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -43,6 +44,97 @@ var testSource = identity.Sources{"Test.sol": "// the test contract's source"}
 
 var testSourceHash = identity.SourceHash(testSource).Hex()
 
+// abisOf reads the ABI of a compiled test contract (path is its .abi file),
+// as the ABIs of a source of that one contract.
+func abisOf(t *testing.T, path, name string) *common.ABISet {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set, err := common.NewABISet(map[string]json.RawMessage{name: raw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return set
+}
+
+func registryABIs(t *testing.T) *common.ABISet {
+	return abisOf(t, "../testdata/Registry.abi", "Registry.sol:Registry")
+}
+
+// encode is the calldata of a call of method with values (JSON).
+func encode(t *testing.T, set *common.ABISet, method, values string) []byte {
+	t.Helper()
+	var v map[string]any
+	if err := DecodeJSON([]byte(values), &v); err != nil {
+		t.Fatal(err)
+	}
+	if v == nil {
+		v = map[string]any{}
+	}
+	f, err := set.Function(method)
+	if err != nil {
+		return []byte{0xde, 0xad, 0xbe, 0xef} // a function the contract does not have
+	}
+	data, err := f.Encode(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+// callBody is a call transaction's body.
+func callBody(t *testing.T, set *common.ABISet, method, values string) string {
+	t.Helper()
+	return fmt.Sprintf(`{"data":%q}`, hexutil.Encode(encode(t, set, method, values)))
+}
+
+// decoded decodes what method returned (hex).
+func decoded(t *testing.T, set *common.ABISet, method string, value any) any {
+	t.Helper()
+	f, err := set.Function(method)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ret, ok := value.(string)
+	if !ok {
+		t.Fatalf("%s returned %v (%T), want hex", method, value, value)
+	}
+	v, err := f.Decode(hexutil.MustDecode(ret))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return v
+}
+
+// constructorArgs encodes constructor arguments (JSON) with an ABI file.
+func constructorArgs(t *testing.T, path, values string) string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal(raw, &items); err != nil {
+		t.Fatal(err)
+	}
+	var v map[string]any
+	if err := DecodeJSON([]byte(values), &v); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range items {
+		if strings.Contains(string(item), `"type":"constructor"`) {
+			args, err := common.EncodeItem(item, v)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return hexutil.Encode(args)
+		}
+	}
+	return "0x"
+}
+
 // deployMessage is the deploy record's message, which the navigator stores
 // as the contract document.
 func deployMessage(t *testing.T) map[string]any {
@@ -51,18 +143,13 @@ func deployMessage(t *testing.T) map[string]any {
 	if err != nil {
 		t.Fatal(err)
 	}
-	abiJSON, err := os.ReadFile("../testdata/Registry.abi")
-	if err != nil {
-		t.Fatal(err)
-	}
 	return map[string]any{
-		common.KeyPID:         alice,
-		common.KeyAddress:     "http://alice.example",
-		common.KeyProfile:     map[string]any{"name": "Alice"},
-		common.KeyCode:        "0x" + strings.TrimSpace(string(bin)),
-		common.KeyABI:         string(abiJSON),
-		common.KeyConstructor: map[string]any{"initialName": "registry", "start": json.Number("7")},
-		KeySource:             testSource,
+		common.KeyPID:     alice,
+		common.KeyAddress: "http://alice.example",
+		common.KeyProfile: map[string]any{"name": "Alice"},
+		common.KeyCode:    "0x" + strings.TrimSpace(string(bin)),
+		common.KeyArgs:    constructorArgs(t, "../testdata/Registry.abi", `{"initialName": "registry", "start": 7}`),
+		KeySource:         testSource,
 	}
 }
 
@@ -95,24 +182,26 @@ func record(t *testing.T, raw string) Record {
 	return r
 }
 
+// writeRecord is a call of the Registry's method, as a record.
 func writeRecord(t *testing.T, agentID, method, values, timestamp string) Record {
 	return record(t, fmt.Sprintf(`{"type":"POST","action":"contract_write","contract":%q,
-		"agent":%q,"method":%q,"message":{"values":%s},"timestamp":%q,"hash_code":"h"}`,
-		contract, agentID, method, values, timestamp))
+		"agent":%q,"data":%q,"message":{},"timestamp":%q,"hash_code":"h"}`,
+		contract, agentID, hexutil.Encode(encode(t, registryABIs(t), method, values)), timestamp))
 }
 
 func viewRecord(t *testing.T, agentID, method, values string) Record {
-	return record(t, fmt.Sprintf(`{"agent":%q,"method":%q,"message":{"values":%s}}`,
-		agentID, method, values))
+	return record(t, fmt.Sprintf(`{"agent":%q,"data":%q,"message":{}}`,
+		agentID, hexutil.Encode(encode(t, registryABIs(t), method, values))))
 }
 
+// view reads the Registry's method, and decodes what it returns.
 func (a *agent) view(t *testing.T, method, values string) any {
 	t.Helper()
 	res, err := a.exec.Call(viewRecord(t, a.me, method, values), false)
 	if err != nil {
 		t.Fatalf("view %s: %v", method, err)
 	}
-	return res.Value
+	return decoded(t, registryABIs(t), method, res.Value)
 }
 
 func (a *agent) storedRoot(t *testing.T) ethcommon.Hash {
@@ -166,8 +255,8 @@ func TestWriteCallChangesStateAndRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Value != json.Number("8") {
-		t.Errorf("setValue returned %v, want 8", res.Value)
+	if v := decoded(t, registryABIs(t), "setValue", res.Value); v != json.Number("8") {
+		t.Errorf("setValue returned %v, want 8", v)
 	}
 	if res.StateRoot == before {
 		t.Error("root did not change")
@@ -212,9 +301,8 @@ func TestViewCallChangesNothing(t *testing.T) {
 	if got := a.view(t, "counter", `{}`); got != json.Number("8") {
 		t.Errorf("counter = %v, want 8", got)
 	}
-	// A state-changing method cannot be read: it is a transaction.
-	if _, err := a.exec.Call(viewRecord(t, bob, "setValue", `{"value": 99}`), false); err == nil ||
-		!strings.Contains(err.Error(), "changes state") {
+	// Even a state-changing function, run as a read, changes nothing.
+	if _, err := a.exec.Call(viewRecord(t, bob, "setValue", `{"value": 99}`), false); err != nil {
 		t.Errorf("read-only setValue: %v", err)
 	}
 
@@ -315,42 +403,6 @@ func TestDeterminismAcrossPartners(t *testing.T) {
 	}
 }
 
-// 6. The built-in stubs return "not implemented" and change nothing.
-func TestBuiltinStubsNotImplemented(t *testing.T) {
-	a := newAgent(t, alice)
-	root := a.exec.State().Root()
-	doc := a.doc.Snapshot()
-
-	for _, method := range []string{common.MethodGetPartners, common.MethodGetParameters} {
-		for _, shouldLog := range []bool{true, false} {
-			res, err := a.exec.Call(writeRecord(t, bob, method, `{}`, "20240102030500000000"), shouldLog)
-			if !errors.Is(err, common.ErrNotImplemented) {
-				t.Errorf("%s (log=%v): err = %v, want ErrNotImplemented", method, shouldLog, err)
-			}
-			if res.StateRoot != root {
-				t.Errorf("%s (log=%v): returned root %s, want %s", method, shouldLog, res.StateRoot, root)
-			}
-		}
-	}
-	if a.exec.State().Root() != root {
-		t.Error("root changed")
-	}
-	// The two logged calls are ledger records, so each advances the block
-	// number (the cursor); nothing else in the document changes.
-	after := a.doc.Snapshot()
-	if after[common.KeyBlockNumber] != uint64(3) {
-		t.Errorf("block_number = %v, want 3 (deploy + 2 logged stub calls)", after[common.KeyBlockNumber])
-	}
-	delete(after, common.KeyBlockNumber)
-	delete(doc, common.KeyBlockNumber)
-	if !reflect.DeepEqual(after, doc) {
-		t.Errorf("document changed: %v -> %v", doc, after)
-	}
-	if n := len(a.ledger.All()); n != 3 {
-		t.Errorf("ledger has %d records, want 3", n)
-	}
-}
-
 // signedRecord builds the record of a transaction signed by the agent's root
 // key, as consensus hands it to execution.
 func signedRecord(t *testing.T, key *ecdsa.PrivateKey, kind, contractID, body, timestamp string) Record {
@@ -367,11 +419,12 @@ func signedRecord(t *testing.T, key *ecdsa.PrivateKey, kind, contractID, body, t
 	rec := Record{Action: ActionForKind[kind], Contract: contractID, Agent: stx.Tx.Agent.Hex(),
 		HashCode: id.Hex(), Timestamp: timestamp, Tx: &stx}
 	if kind == identity.KindCall {
-		var call identity.CallBody
-		if err := DecodeJSON([]byte(body), &call); err != nil {
+		parsed, err := stx.Tx.ParseBody()
+		if err != nil {
 			t.Fatal(err)
 		}
-		rec.Method, rec.Message.Values = call.Method, call.Values
+		call := parsed.(*identity.CallBody)
+		rec.SetCall(call.To, call.Data)
 	}
 	return rec
 }
@@ -455,10 +508,11 @@ func TestMembershipDecisionsByDefault(t *testing.T) {
 func TestMembershipPolicies(t *testing.T) {
 	owner, bob, carol := newKey(t), newKey(t), newKey(t)
 	bin, _ := os.ReadFile("../testdata/Club.bin")
-	abiJSON, _ := os.ReadFile("../testdata/Club.abi")
+	club := abisOf(t, "../testdata/Club.abi", "Club.sol:Club")
 	doc := common.NewMemoryDocument(map[string]any{
 		common.KeyPID: identity.Address(owner).Hex(), common.KeyAddress: "http://owner.example",
-		common.KeyCode: strings.TrimSpace(string(bin)), common.KeyABI: string(abiJSON), KeySource: testSource,
+		common.KeyCode: strings.TrimSpace(string(bin)), KeySource: testSource,
+		common.KeyMembership: []any{identity.ApprovePartner, identity.ApproveRemoval},
 	})
 	a := &agent{me: alice, doc: doc, db: rawdb.NewMemoryDatabase(), ledger: &MemoryLedger{}}
 	a.exec = NewContractExecution(a.doc, contract, alice, a.db, a.ledger)
@@ -467,7 +521,7 @@ func TestMembershipPolicies(t *testing.T) {
 	}
 	ts := "20240102030500000000"
 	invite := signedRecord(t, owner, identity.KindCall, contract,
-		fmt.Sprintf(`{"method":"invite","values":{"who":%q}}`, identity.Address(bob).Hex()), ts)
+		callBody(t, club, "invite", fmt.Sprintf(`{"who":%q}`, identity.Address(bob).Hex())), ts)
 	if out := a.apply(t, invite); out.Err != nil {
 		t.Fatalf("invite: %v", out.Err)
 	}
@@ -510,7 +564,7 @@ func TestReloadAfterRestart(t *testing.T) {
 		t.Fatalf("root after reload = %s, want %s", reloaded.State().Root(), root)
 	}
 	res, err := reloaded.Call(viewRecord(t, alice, "counter", `{}`), false)
-	if err != nil || res.Value != json.Number("8") {
+	if err != nil || decoded(t, registryABIs(t), "counter", res.Value) != json.Number("8") {
 		t.Fatalf("counter after reload = %v, %v; want 8 (constructor must not rerun)", res.Value, err)
 	}
 }
@@ -530,7 +584,7 @@ func TestContractsDoNotShareState(t *testing.T) {
 		t.Fatal(err)
 	}
 	res, err := c2.Call(viewRecord(t, bob, "counter", `{}`), false)
-	if err != nil || res.Value != json.Number("7") {
+	if err != nil || decoded(t, registryABIs(t), "counter", res.Value) != json.Number("7") {
 		t.Fatalf("contract-2 counter = %v, %v; want 7", res.Value, err)
 	}
 	if c1.State().Root() == c2.State().Root() {
@@ -583,7 +637,7 @@ func TestPebbleEndToEndAcrossRestart(t *testing.T) {
 		t.Fatalf("after restart: root %s block %d, want %s block 3 (= ledger length)", c.State().Root(), c.State().BlockNumber(), root)
 	}
 	got, err := c.Call(viewRecord(t, bob, "getValue", fmt.Sprintf(`{"who": %q}`, common.AgentAddress(bob).Hex())), false)
-	if err != nil || got.Value != json.Number("12345678901234567890") {
+	if err != nil || decoded(t, registryABIs(t), "getValue", got.Value) != json.Number("12345678901234567890") {
 		t.Fatalf("getValue after restart = %v, %v", got.Value, err)
 	}
 	if ok, err := doc.GetSubCollection(PartnersCollection).Has(alice); err != nil || !ok {
@@ -603,11 +657,12 @@ func TestPebbleEndToEndAcrossRestart(t *testing.T) {
 func TestGuests(t *testing.T) {
 	owner, guest, stranger := newKey(t), newKey(t), newKey(t)
 	bin, _ := os.ReadFile("../examples/build/Chat.bin")
-	abiJSON, _ := os.ReadFile("../examples/build/Chat.abi")
+	chat := abisOf(t, "../examples/build/Chat.abi", "Chat.sol:Chat")
 	doc := common.NewMemoryDocument(map[string]any{
 		common.KeyPID: identity.Address(owner).Hex(), common.KeyAddress: "http://owner.example",
-		common.KeyCode: strings.TrimSpace(string(bin)), common.KeyABI: string(abiJSON), KeySource: testSource,
-		common.KeyConstructor: map[string]any{"initialTopic": "lunch"},
+		common.KeyCode: strings.TrimSpace(string(bin)), KeySource: testSource,
+		common.KeyArgs:       constructorArgs(t, "../examples/build/Chat.abi", `{"initialTopic": "lunch"}`),
+		common.KeyMembership: []any{identity.ApproveGuest},
 	})
 	a := &agent{me: alice, doc: doc, db: rawdb.NewMemoryDatabase(), ledger: &MemoryLedger{}}
 	a.exec = NewContractExecution(a.doc, contract, alice, a.db, a.ledger)
@@ -616,7 +671,7 @@ func TestGuests(t *testing.T) {
 	}
 	ts := "20240102030500000000"
 	post := func(key *ecdsa.PrivateKey) Outcome {
-		return a.apply(t, signedRecord(t, key, identity.KindCall, contract, `{"method":"post","values":{"text":"hi"}}`, ts))
+		return a.apply(t, signedRecord(t, key, identity.KindCall, contract, callBody(t, chat, "post", `{"text":"hi"}`), ts))
 	}
 	if out := post(stranger); !errors.Is(out.Err, ErrNotPartner) {
 		t.Fatalf("a stranger's call: %+v", out)
@@ -632,7 +687,7 @@ func TestGuests(t *testing.T) {
 	if p["role"] != RoleGuest || p["nodeKey"] != identity.Address(guestNode).Hex() {
 		t.Fatalf("guest = %v", p)
 	}
-	if out := post(guest); out.Err != nil || fmt.Sprint(out.Value) != "0" {
+	if out := post(guest); out.Err != nil || fmt.Sprint(decoded(t, chat, "post", out.Value)) != "0" {
 		t.Fatalf("the guest's call: %+v", out)
 	}
 	leave := signedRecord(t, guest, identity.KindLeave, contract, fmt.Sprintf(`{"member":%q}`, identity.Address(guest).Hex()), ts)

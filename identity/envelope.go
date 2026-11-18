@@ -60,7 +60,7 @@ type Grant struct {
 	Agent      ethcommon.Address `json:"agent"`
 	NodeKey    ethcommon.Address `json:"nodeKey"`    // the node that may sign
 	SourceHash ethcommon.Hash    `json:"sourceHash"` // SourceHash of the contract's Solidity source
-	Functions  []string          `json:"functions"`  // the functions it may call
+	Functions  []string          `json:"functions"`  // the functions it may call, by signature: "pay(address,uint256)"
 	Nonce      string            `json:"nonce"`
 }
 
@@ -176,12 +176,7 @@ func (g Grant) check() error {
 	if len(g.Functions) == 0 {
 		return errors.New("a grant names at least one function")
 	}
-	return nil
-}
-
-// Allows reports whether the grant lets the node call method.
-func (g Grant) Allows(method string) bool {
-	return slices.Contains(g.Functions, method)
+	return checkSignatures("grant", g.Functions)
 }
 
 // checkScheme verifies the signature of signed by the envelope's key, and

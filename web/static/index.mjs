@@ -137,8 +137,8 @@ $('#deploy').addEventListener('submit', (event) => {
     const constructor = ctorInputs.read();
     status($('#deploy-status'), 'Approve the deploy with your passkey, then wait for the node…');
     const id = await ibc.deploy({
-      name, contract: compiled.contract, code: compiled.code, abi: compiled.abi, constructor, protocol: $('#d-protocol').value,
-      source: deploySource, compiler: compiled.compiler,
+      name, contract: compiled.contract, code: compiled.code, abis: compiled.abis, membership: compiled.membership,
+      constructor, protocol: $('#d-protocol').value, source: deploySource, compiler: compiled.compiler,
     });
     addRow({ id, name, protocol: $('#d-protocol').value, block_number: 1 });
     const done = $('#deploy-status');

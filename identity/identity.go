@@ -199,8 +199,8 @@ func (s SignedTx) Verify() (ethcommon.Hash, error) {
 		if err != nil {
 			return ethcommon.Hash{}, err
 		}
-		if method := body.(*CallBody).Method; !g.Allows(method) {
-			return ethcommon.Hash{}, fmt.Errorf("the grant does not let the node call %s: it needs the root key", method)
+		if data := body.(*CallBody).Data; !g.Allows(data) {
+			return ethcommon.Hash{}, fmt.Errorf("the grant does not let the node call function %s: it needs the root key", hexutil.Encode(data[:4]))
 		}
 	}
 	return hash, nil
@@ -257,27 +257,41 @@ func (t Transaction) check() error {
 
 // Bodies of the transaction kinds.
 type (
+	// A deploy creates an agreement: its root contract, from the source.
 	DeployBody struct {
-		Name        string            `json:"name,omitempty"`
-		Contract    string            `json:"contract,omitempty"`
-		Protocol    string            `json:"protocol,omitempty"`
-		DefaultApp  string            `json:"default_app,omitempty"`
-		Profile     any               `json:"profile,omitempty"`
-		Code        string            `json:"code"`
-		ABI         json.RawMessage   `json:"abi"`
-		Constructor map[string]any    `json:"constructor,omitempty"`
-		Node        string            `json:"node"`
-		NodeKey     ethcommon.Address `json:"nodeKey"`
+		Name       string            `json:"name,omitempty"`
+		Protocol   string            `json:"protocol,omitempty"`
+		DefaultApp string            `json:"default_app,omitempty"`
+		Profile    any               `json:"profile,omitempty"`
+		Node       string            `json:"node"`
+		NodeKey    ethcommon.Address `json:"nodeKey"`
 		// The Solidity source, its files by path, and how the creator's node
-		// compiled Code from it (see package compiler): a joining node
-		// compiles it again and compares. Partners join, and grant, by the
-		// source's hash (SourceHash).
+		// compiled it (see package compiler). Partners join, and grant, by the
+		// source's hash (SourceHash); a joining node compiles the source again
+		// and checks Code, ABIs and Membership against it.
 		Source   Sources         `json:"source"`
 		Compiler json.RawMessage `json:"compiler"`
+		// Contract is the root contract's name in the source ("Name" or
+		// "path:Name"); Code is its creation bytecode (hex) and Args its
+		// ABI-encoded constructor arguments, appended to Code at creation.
+		Contract string        `json:"contract"`
+		Code     string        `json:"code"`
+		Args     hexutil.Bytes `json:"args,omitempty"`
+		// ABIs is the ABI of every contract in the source, by name: what the
+		// compiler made of it, for users' nodes to encode calls and decode
+		// results. Execution does not read it.
+		ABIs map[string]json.RawMessage `json:"abis"`
+		// Membership lists the membership functions (MembershipFunctions)
+		// the root contract defines: the agreement asks it to decide those
+		// changes, and applies the defaults for the others.
+		Membership []string `json:"membership,omitempty"`
 	}
+	// A call runs Data (calldata: a function's selector and its ABI-encoded
+	// arguments) on the contract at To in the agreement's world; no To: the
+	// root contract.
 	CallBody struct {
-		Method string         `json:"method"`
-		Values map[string]any `json:"values,omitempty"`
+		To   *ethcommon.Address `json:"to,omitempty"`
+		Data hexutil.Bytes      `json:"data"`
 	}
 	JoinBody struct {
 		Node    string            `json:"node"`
@@ -328,8 +342,14 @@ func (t Transaction) ParseBody() (any, error) {
 	}
 	switch b := body.(type) {
 	case *DeployBody:
-		if b.Code == "" || len(b.ABI) == 0 || b.NodeKey == (ethcommon.Address{}) {
-			return nil, errors.New("deploy body needs code, abi and nodeKey")
+		if b.Code == "" || b.Contract == "" || b.NodeKey == (ethcommon.Address{}) {
+			return nil, errors.New("deploy body needs contract, code and nodeKey")
+		}
+		if _, ok := b.ABIs[b.Contract]; !ok {
+			return nil, fmt.Errorf("deploy body needs the abis of the source's contracts, %s's among them", b.Contract)
+		}
+		if err := checkMembership(b.Membership); err != nil {
+			return nil, fmt.Errorf("deploy body: %w", err)
 		}
 		if len(b.Source) == 0 || len(b.Compiler) == 0 || string(b.Compiler) == "null" {
 			return nil, errors.New("deploy body needs the source and the compiler that compiled it")
@@ -338,8 +358,8 @@ func (t Transaction) ParseBody() (any, error) {
 			return nil, fmt.Errorf("deploy body: %w", err)
 		}
 	case *CallBody:
-		if b.Method == "" {
-			return nil, errors.New("call body needs a method")
+		if len(b.Data) < 4 {
+			return nil, errors.New("call body needs data: a function's selector and its arguments")
 		}
 	case *JoinBody:
 		if b.NodeKey == (ethcommon.Address{}) || b.Node == "" {

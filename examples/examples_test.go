@@ -43,7 +43,7 @@ func newClient(t *testing.T) *client {
 	t.Helper()
 	// No compiler in the tests: a joined contract's source counts as checked.
 	n, err := node.New(node.Config{DB: rawdb.NewMemoryDatabase(),
-		CheckSource: func(context.Context, identity.Sources, json.RawMessage, string) (string, string) {
+		CheckSource: func(context.Context, identity.Sources, json.RawMessage, compiler.Claim) (string, string) {
 			return compiler.Verified, ""
 		}})
 	if err != nil {
@@ -186,18 +186,73 @@ func (c *client) deploy(name string, ctor map[string]any) (string, any) {
 	if err != nil {
 		c.t.Fatal(err)
 	}
+	var items []map[string]any
+	if err := json.Unmarshal(abiJSON, &items); err != nil {
+		c.t.Fatal(err)
+	}
+	// The constructor's arguments, encoded by the node; and the membership
+	// functions the contract defines.
+	args, membership := "0x", []string{}
+	for _, item := range items {
+		if item["type"] == "constructor" {
+			enc, ok := c.request("POST", "encode", "", "", map[string]any{"abi": item, "values": ctor}).(map[string]any)
+			if !ok || enc["data"] == nil {
+				c.t.Fatalf("encode the constructor: %v", enc)
+			}
+			args = enc["data"].(string)
+		}
+		for _, f := range identity.MembershipFunctions {
+			if item["type"] == "function" && item["name"] == f {
+				membership = append(membership, f)
+			}
+		}
+	}
 	ev := c.await(c.request("PUT", "deploy_contract", "", "", c.sign(identity.KindDeploy, "", map[string]any{
-		"name": name, "contract": name + ".sol", "default_app": "", "profile": "",
-		"code": strings.TrimSpace(string(bin)), "abi": json.RawMessage(abiJSON), "constructor": ctor,
+		"name": name, "contract": name + ".sol:" + name, "default_app": "", "profile": "",
+		"code": strings.TrimSpace(string(bin)), "args": args,
+		"abis": map[string]json.RawMessage{name + ".sol:" + name: abiJSON}, "membership": membership,
 		"node": c.url, "nodeKey": c.nodeKey, "source": source(c.t, name),
 		"compiler": map[string]any{"version": "0.8.38+commit.1835d247.Emscripten.clang", "settings": compiler.Settings},
 	})))
 	return ev["contract"].(string), ev["reply"]
 }
 
+// encode returns the calldata of a call of method, as a client makes it: the
+// function from the contract's ABIs, encoded by the node. If the node cannot
+// encode it, encode returns its message instead.
+func (c *client) encode(contract, method string, values map[string]any) (string, any) {
+	c.t.Helper()
+	abis, _ := c.getContract(contract)["abis"].(map[string]any)
+	var item any
+	for _, a := range abis {
+		for _, x := range a.([]any) {
+			if f := x.(map[string]any); f["type"] == "function" && f["name"] == method {
+				item = f
+			}
+		}
+	}
+	if item == nil {
+		return "", map[string]any{"message": fmt.Sprintf("unknown method %q", method)}
+	}
+	if values == nil {
+		values = map[string]any{}
+	}
+	enc, _ := c.request("POST", "encode", "", "", map[string]any{"abi": item, "values": values}).(map[string]any)
+	if data, ok := enc["data"].(string); ok {
+		return data, nil
+	}
+	return "", enc
+}
+
+// write sends a transaction calling method, signed by the root, and returns
+// its outcome's reply; or the node's message if it cannot encode the call.
 func (c *client) write(contract, method string, values map[string]any) any {
 	c.t.Helper()
-	stx := c.sign(identity.KindCall, contract, map[string]any{"method": method, "values": values})
+	data, refused := c.encode(contract, method, values)
+	if refused != nil {
+		return refused
+	}
+	stx := c.sign(identity.KindCall, contract, map[string]any{"data": data})
 	return c.await(c.request("POST", "contract_write", contract, method, stx))["reply"]
 }
 
@@ -284,17 +339,18 @@ func TestCounter(t *testing.T) {
 	// A read-only call of a write method changes nothing.
 	// A read runs only view and pure functions.
 	expect(t, "read increment", c.read(counter, "increment", map[string]any{"amount": 100}),
-		`{"error":"increment changes state: send it as a transaction (contract_write)"}`)
+		`{"message":"increment changes state: send it as a transaction (contract_write)"}`)
 	expect(t, "count after read", c.read(counter, "count", nil), `15`)
 	expect(t, "reset", c.write(counter, "reset", nil), `null`)
 	expect(t, "count after reset", c.read(counter, "count", nil), `0`)
-	expect(t, "missing argument", c.write(counter, "increment", nil), `"increment: missing argument \"amount\""`)
+	expect(t, "missing argument", c.write(counter, "increment", nil), `{"message":"increment: missing argument \"amount\""}`)
 	// An event says when a call failed: a function may return a string too.
-	stx := c.sign(identity.KindCall, counter, map[string]any{"method": "incremnt", "values": map[string]any{}})
-	if ev := c.await(c.request("POST", "contract_write", counter, "", stx)); ev["error"] != `unknown method "incremnt"` {
-		t.Errorf("event of an unknown method = %v", ev)
+	stx := c.sign(identity.KindCall, counter, map[string]any{"data": "0x12345678"})
+	if ev := c.await(c.request("POST", "contract_write", counter, "", stx)); ev["error"] != "execution reverted" {
+		t.Errorf("event of calldata no function answers = %v", ev)
 	}
-	stx = c.sign(identity.KindCall, counter, map[string]any{"method": "increment", "values": map[string]any{"amount": 1}})
+	data, _ := c.encode(counter, "increment", map[string]any{"amount": 1})
+	stx = c.sign(identity.KindCall, counter, map[string]any{"data": data})
 	if ev := c.await(c.request("POST", "contract_write", counter, "", stx)); ev["error"] != nil {
 		t.Errorf("event of a call that worked = %v", ev)
 	}
@@ -356,25 +412,25 @@ func TestChat(t *testing.T) {
 	if got := c.appRead(app, chat, "topic", nil); !strings.Contains(fmt.Sprint(got), "not agent") {
 		t.Errorf("read by an unknown app: %v", got)
 	}
-	expect(t, "connect the app", c.connectApp(app, chatCode, true, "post", "like"), `true`)
+	expect(t, "connect the app", c.connectApp(app, chatCode, true, "post(string)", "like(uint256)"), `true`)
 
 	expect(t, "silent post", c.appWrite(app, chat, "post", map[string]any{"text": "hi"}), `0`)
 	expect(t, "silent like", c.appWrite(app, chat, "like", map[string]any{"id": 0}), `1`)
 	expect(t, "silent read", c.appRead(app, chat, "topic", nil), `"lunch"`)
 	expect(t, "silent setTopic", c.appWrite(app, chat, "setTopic", map[string]any{"newTopic": "dinner"}),
-		`{"message":"calling setTopic needs your approval on your node's page"}`)
+		`{"message":"calling setTopic(string) needs your approval on your node's page"}`)
 	expect(t, "setTopic signed by the root", c.write(chat, "setTopic", map[string]any{"newTopic": "dinner"}), `null`)
 	expect(t, "topic", c.read(chat, "topic", nil), `"dinner"`)
 
 	// The app's permissions are for Chat's code: other contracts need approval.
 	counter, _ := c.deploy("Counter", map[string]any{"start": 1})
 	expect(t, "app writes to Counter", c.appWrite(app, counter, "increment", map[string]any{"amount": 1}),
-		`{"message":"calling increment needs your approval on your node's page"}`)
+		`{"message":"calling increment(uint256) needs your approval on your node's page"}`)
 	expect(t, "app reads Counter", c.appRead(app, counter, "count", nil),
 		`{"message":"reading this contract needs your approval on your node's page"}`)
 
 	// Without silent reads, reading asks too.
-	expect(t, "reads off", c.connectApp(app, chatCode, false, "post"), `true`)
+	expect(t, "reads off", c.connectApp(app, chatCode, false, "post(string)"), `true`)
 	expect(t, "read with reads off", c.appRead(app, chat, "topic", nil),
 		`{"message":"reading this contract needs your approval on your node's page"}`)
 	expect(t, "post still silent", c.appWrite(app, chat, "post", map[string]any{"text": "again"}), `1`)
@@ -383,9 +439,9 @@ func TestChat(t *testing.T) {
 	bad, _ := identity.NewP256Key()
 	agent := identity.Address(c.key)
 	consent, _ := identity.SignConsent(identity.Consent{Agent: agent, App: "https://app.example", AppKey: identity.PublicKey(bad),
-		SourceHash: chatCode, Read: true, Functions: []string{"post"}, Nonce: "n"}, c.writer)
+		SourceHash: chatCode, Read: true, Functions: []string{"post(string)"}, Nonce: "n"}, c.writer)
 	grant, _ := identity.CertifyGrant(identity.Grant{Agent: agent, NodeKey: ethcommon.HexToAddress(c.nodeKey),
-		SourceHash: chatCode, Functions: []string{"post", "setTopic"}, Nonce: "n"}, c.writer)
+		SourceHash: chatCode, Functions: []string{"post(string)", "setTopic(string)"}, Nonce: "n"}, c.writer)
 	got := c.request("PUT", "register_app", "", "", map[string]any{"consent": consent, "grant": grant})
 	if !strings.Contains(fmt.Sprint(got), "does not match") {
 		t.Errorf("mismatched grant: %v", got)
@@ -452,17 +508,18 @@ func TestChatGuest(t *testing.T) {
 	if latest["author"] != bob.agent || latest["text"] != "hello from a guest" {
 		t.Errorf("latest = %v", latest)
 	}
-	expect(t, "a guest's revert", bob.read(chat, "latest", map[string]any{}), `{"error":"latest: missing argument \"limit\""}`)
+	expect(t, "a guest's bad argument", bob.read(chat, "latest", map[string]any{}), `{"message":"latest: missing argument \"limit\""}`)
 
 	// Bob hears alice's posts.
-	stx := alice.sign(identity.KindCall, chat, map[string]any{"method": "post", "values": map[string]any{"text": "welcome"}})
+	data, _ := alice.encode(chat, "post", map[string]any{"text": "welcome"})
+	stx := alice.sign(identity.KindCall, chat, map[string]any{"data": data})
 	id := alice.request("POST", "contract_write", chat, "post", stx)
 	expect(t, "bob hears alice's post", bob.await(id)["reply"], `2`)
 
 	// Bob's app posts silently: bob's node signs, under bob's grant.
 	chatCode := identity.SourceHash(source(t, "Chat"))
 	app, _ := identity.NewP256Key()
-	expect(t, "connect bob's app", bob.connectApp(app, chatCode, true, "post"), `true`)
+	expect(t, "connect bob's app", bob.connectApp(app, chatCode, true, "post(string)"), `true`)
 	expect(t, "silent post by a guest", bob.appWrite(app, chat, "post", map[string]any{"text": "from the app"}), `3`)
 	expect(t, "the app reads", bob.appRead(app, chat, "count", nil), `4`)
 
@@ -525,7 +582,7 @@ func TestChatPublic(t *testing.T) {
 	expect(t, "but not the messages", publicRead(t, alice.url, alice.agent, chat, "latest", map[string]any{"limit": 1}),
 		`{"error":"execution reverted: sign in to read the messages"}`)
 	expect(t, "nor posts", publicRead(t, alice.url, alice.agent, chat, "post", map[string]any{"text": "spam"}),
-		`{"error":"post changes state: send it as a transaction (contract_write)"}`)
+		`{"message":"post changes state: a public read runs only view and pure functions"}`)
 	if latest := alice.read(chat, "latest", map[string]any{"limit": 1}).([]any); len(latest) != 1 {
 		t.Errorf("alice's signed read of latest = %v", latest)
 	}

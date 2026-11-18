@@ -82,7 +82,13 @@ func registerRecord(t *testing.T, hash string) Record {
 
 func deployRecord(t *testing.T, ctor string) Record {
 	msg := deployMessage(t)
-	msg[common.KeyConstructor] = json.RawMessage(ctor)
+	// Arguments the constructor cannot take (not both of its two) give no
+	// arguments: the constructor then reverts.
+	msg[common.KeyArgs] = "0x"
+	var v map[string]any
+	if DecodeJSON([]byte(ctor), &v) == nil && len(v) == 2 {
+		msg[common.KeyArgs] = constructorArgs(t, "../testdata/Registry.abi", ctor)
+	}
 	msg["name"] = "registry"
 	msg["protocol"] = "BFT"
 	raw, err := json.Marshal(map[string]any{
@@ -145,7 +151,7 @@ func TestNavigatorAppliesRecordsInOrder(t *testing.T) {
 	}
 	replies := out.wait(t, 22)
 	for i, r := range replies[2:] {
-		if want := json.Number(fmt.Sprint(8 + i)); r.Reply != want {
+		if want := json.Number(fmt.Sprint(8 + i)); decoded(t, registryABIs(t), "setValue", r.Reply) != want {
 			t.Fatalf("write #%d replied %v, want %v (records applied out of order?)", i+2, r.Reply, want)
 		}
 		if r.Request != fmt.Sprintf("h%d", i+2) || r.StateRoot == "" {
@@ -180,7 +186,7 @@ func TestNavigatorIgnoresRedeliveryAndRejectsGaps(t *testing.T) {
 	if got := out.wait(t, 4); len(got) != 4 {
 		t.Fatalf("%d replies, want 4: %+v", len(got), got)
 	}
-	if replies[2].Reply != json.Number("8") || replies[3].Reply != json.Number("9") {
+	if decoded(t, registryABIs(t), "setValue", replies[2].Reply) != json.Number("8") || decoded(t, registryABIs(t), "setValue", replies[3].Reply) != json.Number("9") {
 		t.Fatalf("replies = %+v", replies[2:])
 	}
 }
@@ -242,10 +248,10 @@ func TestNavigatorFailedDeployIsStoredAndNotRetried(t *testing.T) {
 	out := newRecordingOutput()
 	n := NewNavigator(Config{DB: db, Output: out})
 	mustSubmit(t, n, registerRecord(t, "reg"))
-	mustSubmit(t, n, deployRecord(t, `{"initialName":"registry"}`)) // missing "start"
+	mustSubmit(t, n, deployRecord(t, `{"initialName":"registry"}`)) // missing "start": no arguments
 	mustSubmit(t, n, indexed(writeRecord(t, bob, "setValue", `{"value": 1}`, createdAt), 2))
 	replies := out.wait(t, 3)
-	if s, _ := replies[1].Reply.(string); !strings.Contains(s, `missing argument "start"`) {
+	if s, _ := replies[1].Reply.(string); !strings.Contains(s, "execution reverted") {
 		t.Fatalf("deploy reply = %v", replies[1].Reply)
 	}
 	if s, _ := replies[2].Reply.(string); !strings.Contains(s, "contract deployment failed") {
@@ -325,10 +331,10 @@ func TestNavigatorRecoverAfterCrash(t *testing.T) {
 		t.Fatal(err)
 	}
 	replies = out.wait(t, 2)
-	if replies[0].Request != "h3" || replies[0].StateRoot != wantRoot || replies[0].Reply != json.Number("9") {
+	if replies[0].Request != "h3" || replies[0].StateRoot != wantRoot || decoded(t, registryABIs(t), "setValue", replies[0].Reply) != json.Number("9") {
 		t.Fatalf("re-applied #3 = %+v, want root %s and reply 9", replies[0], wantRoot)
 	}
-	if replies[1].Request != "h4" || replies[1].Reply != json.Number("10") {
+	if replies[1].Request != "h4" || decoded(t, registryABIs(t), "setValue", replies[1].Reply) != json.Number("10") {
 		t.Fatalf("applied #4 = %+v", replies[1])
 	}
 	fields, _ := contractDoc(db).Fields()
@@ -352,7 +358,7 @@ func TestNavigatorClosesIdleContracts(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	mustSubmit(t, n, indexed(writeRecord(t, bob, "setValue", `{"value": 1}`, "20240102030500000000"), 2))
-	if r := out.wait(t, 3)[2]; r.Reply != json.Number("8") {
+	if r := out.wait(t, 3)[2]; decoded(t, registryABIs(t), "setValue", r.Reply) != json.Number("8") {
 		t.Fatalf("after reopening: reply %v, want 8", r.Reply)
 	}
 }

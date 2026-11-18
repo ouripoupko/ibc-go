@@ -33,9 +33,10 @@ import (
 // join: the contract is not what its source says.
 
 // CheckSource compiles a deploy's source with the compiler it names, and
-// compares the result with the deploy's code: compiler.Verified,
-// compiler.Mismatch, or compiler.Unchecked with the reason.
-type CheckSource func(ctx context.Context, source identity.Sources, compiler json.RawMessage, code string) (check, reason string)
+// compares the result with what the deploy claims (its code, ABIs and
+// membership functions): compiler.Verified, compiler.Mismatch, or
+// compiler.Unchecked with the reason.
+type CheckSource func(ctx context.Context, source identity.Sources, compiler json.RawMessage, claim compiler.Claim) (check, reason string)
 
 // welcomeNote is one member's welcome of this node.
 type welcomeNote struct {
@@ -279,14 +280,40 @@ func (r *Router) checkSource(deploy execution.Record) (string, string) {
 	if err != nil {
 		return compiler.Mismatch, "the deploy's source cannot be read: " + err.Error()
 	}
-	code, _ := fields["code"].(string)
 	info, err := json.Marshal(fields["compiler"])
 	if err != nil {
 		return compiler.Mismatch, "the deploy's compiler cannot be read"
 	}
+	claim, err := claimOf(fields)
+	if err != nil {
+		return compiler.Mismatch, err.Error()
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	return r.cfg.CheckSource(ctx, source, info, code)
+	return r.cfg.CheckSource(ctx, source, info, claim)
+}
+
+// claimOf reads what a deploy record's fields claim the source compiles to.
+func claimOf(fields map[string]any) (compiler.Claim, error) {
+	var c compiler.Claim
+	c.Contract, _ = fields["contract"].(string)
+	c.Code, _ = fields["code"].(string)
+	abis, _ := fields["abis"].(map[string]any)
+	c.ABIs = make(map[string]json.RawMessage, len(abis))
+	for name, a := range abis {
+		raw, err := json.Marshal(a)
+		if err != nil {
+			return c, fmt.Errorf("the deploy's abis cannot be read: %w", err)
+		}
+		c.ABIs[name] = raw
+	}
+	if m, ok := fields["membership"].([]any); ok {
+		for _, x := range m {
+			name, _ := x.(string)
+			c.Membership = append(c.Membership, name)
+		}
+	}
+	return c, nil
 }
 
 // keep stores a checked history in the agent's ledger, which execution runs,

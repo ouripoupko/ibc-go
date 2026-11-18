@@ -22,6 +22,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/crypto"
 
+	"github.com/ouripoupko/ibc-go/common"
 	"github.com/ouripoupko/ibc-go/compiler"
 	"github.com/ouripoupko/ibc-go/consensus"
 	"github.com/ouripoupko/ibc-go/identity"
@@ -29,7 +30,7 @@ import (
 
 // checkSource stands in for compiling a joined contract's source.
 func checkSource(check, reason string) consensus.CheckSource {
-	return func(context.Context, identity.Sources, json.RawMessage, string) (string, string) {
+	return func(context.Context, identity.Sources, json.RawMessage, compiler.Claim) (string, string) {
 		return check, reason
 	}
 }
@@ -338,17 +339,97 @@ func readSource(t *testing.T, name string) identity.Sources {
 	return identity.Sources{name + ".sol": string(src)}
 }
 
-func readTestdata(t *testing.T, name string) (code, abi string) {
+// compiled is a compiled test contract, as a deploy carries it.
+type compiled struct {
+	key        string // its name in the source: "Name.sol:Name"
+	code       string
+	abis       map[string]json.RawMessage
+	set        *common.ABISet
+	membership []string
+}
+
+func readTestdata(t *testing.T, name string) compiled {
 	t.Helper()
 	bin, err := os.ReadFile("../testdata/" + name + ".bin")
 	if err != nil {
 		t.Fatal(err)
 	}
-	abiJSON, err := os.ReadFile("../testdata/" + name + ".abi")
+	c := compiled{key: name + ".sol:" + name, code: strings.TrimSpace(string(bin))}
+	if raw, err := os.ReadFile("../testdata/" + name + ".abis.json"); err == nil {
+		// A source of several contracts: their ABIs, by name.
+		if err := json.Unmarshal(raw, &c.abis); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		abiJSON, err := os.ReadFile("../testdata/" + name + ".abi")
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.abis = map[string]json.RawMessage{c.key: abiJSON}
+	}
+	if c.set, err = common.NewABISet(c.abis); err != nil {
+		t.Fatal(err)
+	}
+	root, _ := c.set.Contract(c.key)
+	for _, f := range identity.MembershipFunctions {
+		for _, m := range root.Methods {
+			if m.Sig == identity.MembershipSignature(f) {
+				c.membership = append(c.membership, f)
+			}
+		}
+	}
+	return c
+}
+
+// args encodes the root contract's constructor arguments.
+func (c compiled) args(t *testing.T, values map[string]any) string {
+	t.Helper()
+	if values == nil {
+		values = map[string]any{}
+	}
+	item, _ := json.Marshal(abiItem(t, c, "constructor"))
+	packed, err := common.EncodeItem(item, values)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return strings.TrimSpace(string(bin)), string(abiJSON)
+	return hexutil.Encode(packed)
+}
+
+// abiItem is the first item of the root contract's ABI of this type.
+func abiItem(t *testing.T, c compiled, typ string) map[string]any {
+	t.Helper()
+	var items []map[string]any
+	if err := json.Unmarshal(c.abis[c.key], &items); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range items {
+		if item["type"] == typ {
+			return item
+		}
+	}
+	return map[string]any{"type": typ, "inputs": []any{}}
+}
+
+// calldata is the calldata of a call of a test contract's function.
+func calldata(t *testing.T, name, method string, values map[string]any) string {
+	t.Helper()
+	f, err := readTestdata(t, name).set.Function(method)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if values == nil {
+		values = map[string]any{}
+	}
+	data, err := f.Encode(values)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return hexutil.Encode(data)
+}
+
+// callTx is a Registry call transaction's body.
+func callTx(t *testing.T, method string, values map[string]any) map[string]any {
+	return map[string]any{"data": calldata(t, "Registry", method, values)}
 }
 
 // deploy deploys a test contract from u on n and waits until it is live.
@@ -360,10 +441,10 @@ func (u *user) deploy(t *testing.T, n *testNode, events *stream, name, protocol 
 // deployWith deploys a test contract's code, saying its source is source.
 func (u *user) deployWith(t *testing.T, n *testNode, events *stream, name string, source identity.Sources, protocol string, ctor map[string]any) string {
 	t.Helper()
-	code, abi := readTestdata(t, name)
+	c := readTestdata(t, name)
 	stx := u.sign(t, identity.KindDeploy, "", map[string]any{
-		"name": "my-" + name, "contract": name + ".sol", "protocol": protocol, "default_app": "https://app.example",
-		"profile": "", "code": code, "abi": json.RawMessage(abi), "constructor": ctor,
+		"name": "my-" + name, "contract": c.key, "protocol": protocol, "default_app": "https://app.example",
+		"profile": "", "code": c.code, "args": c.args(t, ctor), "abis": c.abis, "membership": c.membership,
 		"node": n.URL, "nodeKey": n.NodeKey(), "source": source, "compiler": testCompiler,
 	})
 	id := call(t, n.URL, "PUT", u.id, "deploy_contract", "", "", stx)
@@ -377,10 +458,10 @@ func (u *user) deployWith(t *testing.T, n *testNode, events *stream, name string
 	return contractID
 }
 
-// write sends a call and returns its outcome event.
+// write sends a call of a Registry function and returns its outcome event.
 func (u *user) write(t *testing.T, n *testNode, events *stream, contract, method string, values map[string]any) map[string]any {
 	t.Helper()
-	stx := u.sign(t, identity.KindCall, contract, map[string]any{"method": method, "values": values})
+	stx := u.sign(t, identity.KindCall, contract, callTx(t, method, values))
 	id := call(t, n.URL, "POST", u.id, "contract_write", contract, method, stx)
 	if _, ok := id.(string); !ok {
 		t.Fatalf("contract_write replied %v", id)
@@ -448,13 +529,13 @@ func TestClientAPI(t *testing.T) {
 	}
 
 	// A forged transaction and a transaction sent as someone else are refused.
-	forged := alice.sign(t, identity.KindCall, cid, map[string]any{"method": "setValue", "values": map[string]any{"value": 1}})
+	forged := alice.sign(t, identity.KindCall, cid, callTx(t, "setValue", map[string]any{"value": 1}))
 	forged.Tx.Nonce = "changed"
 	if got := call(t, a.URL, "POST", alice.id, "contract_write", cid, "setValue", forged); !strings.Contains(fmt.Sprint(got), "signature") {
 		t.Fatalf("forged transaction: %v", got)
 	}
 	mallory := newUser(t)
-	honest := alice.sign(t, identity.KindCall, cid, map[string]any{"method": "setValue", "values": map[string]any{"value": 1}})
+	honest := alice.sign(t, identity.KindCall, cid, callTx(t, "setValue", map[string]any{"value": 1}))
 	if got := call(t, a.URL, "POST", mallory.id, "contract_write", cid, "setValue", honest); !strings.Contains(fmt.Sprint(got), "sent as") {
 		t.Fatalf("transaction sent as another agent: %v", got)
 	}
@@ -467,9 +548,9 @@ func TestClientAPI(t *testing.T) {
 		t.Fatalf("get_contracts = %v", list)
 	}
 	// An unregistered agent cannot deploy.
-	code, abi := readTestdata(t, "Registry")
-	deploy := mallory.sign(t, identity.KindDeploy, "", map[string]any{"code": code, "abi": json.RawMessage(abi),
-		"constructor": map[string]any{"initialName": "x", "start": 0}, "node": a.URL, "nodeKey": a.NodeKey(),
+	reg := readTestdata(t, "Registry")
+	deploy := mallory.sign(t, identity.KindDeploy, "", map[string]any{"contract": reg.key, "code": reg.code, "abis": reg.abis,
+		"args": reg.args(t, map[string]any{"initialName": "x", "start": 0}), "node": a.URL, "nodeKey": a.NodeKey(),
 		"source": readSource(t, "Registry"), "compiler": testCompiler})
 	if got := call(t, a.URL, "PUT", mallory.id, "deploy_contract", "", "", deploy); !strings.Contains(fmt.Sprint(got), "unknown agent") {
 		t.Fatalf("deploy by an unregistered agent: %v", got)
@@ -664,7 +745,7 @@ func TestApps(t *testing.T) {
 	}
 
 	refused("an app alice did not connect", write(7), "nor an app it connected")
-	if got := alice.connectApp(t, a, app, codeHash, true, "setValue"); got != true {
+	if got := alice.connectApp(t, a, app, codeHash, true, "setValue(uint256)"); got != true {
 		t.Fatalf("connect = %v", got)
 	}
 	// The node signs the app's call silently, under alice's grant; bob's node,
@@ -694,9 +775,9 @@ func TestApps(t *testing.T) {
 	// execution (the call is recorded, and changes nothing).
 	otherCode := identity.SourceHash(identity.Sources{"Other.sol": "another source"})
 	wrong, _ := identity.CertifyGrant(identity.Grant{Agent: alice.addr, NodeKey: identity.Address(a.nodeKey),
-		SourceHash: otherCode, Functions: []string{"setValue"}, Nonce: "n"}, alice.root)
+		SourceHash: otherCode, Functions: []string{"setValue(uint256)"}, Nonce: "n"}, alice.root)
 	stx, _ := identity.SignTx(identity.Transaction{Contract: cid, Kind: identity.KindCall, Agent: alice.addr, Nonce: "w",
-		Body: `{"method":"setValue","values":{"value":99}}`}, identity.Secp256k1Signer{Key: a.nodeKey, Cert: wrong})
+		Body: `{"data":"` + calldata(t, "Registry", "setValue", map[string]any{"value": 99}) + `"}`}, identity.Secp256k1Signer{Key: a.nodeKey, Cert: wrong})
 	wid := call(t, a.URL, "POST", alice.id, "contract_write", cid, "setValue", stx)
 	if ev := ea.waitFor(t, wid); ev["reply"] != "the node's grant does not apply: it is for another source" {
 		t.Fatalf("call under a grant for other code = %v", ev)
@@ -762,9 +843,9 @@ func TestApps(t *testing.T) {
 	// A grant must name this node; the root key alone registers.
 	other, _ := identity.NewP256Key()
 	consent, _ := identity.SignConsent(identity.Consent{Agent: alice.addr, App: "https://x", AppKey: identity.PublicKey(other),
-		SourceHash: codeHash, Functions: []string{"setValue"}, Nonce: "n"}, alice.root)
+		SourceHash: codeHash, Functions: []string{"setValue(uint256)"}, Nonce: "n"}, alice.root)
 	grant, _ := identity.CertifyGrant(identity.Grant{Agent: alice.addr, NodeKey: ethcommon.HexToAddress(b.NodeKey()),
-		SourceHash: codeHash, Functions: []string{"setValue"}, Nonce: "n"}, alice.root)
+		SourceHash: codeHash, Functions: []string{"setValue(uint256)"}, Nonce: "n"}, alice.root)
 	refused("a grant for another node", call(t, a.URL, "PUT", alice.id, "register_app", "", "",
 		map[string]any{"consent": consent, "grant": grant}), "names another node")
 	byApp, _ := identity.SignConsent(consent.Consent, identity.P256Signer{Key: other})

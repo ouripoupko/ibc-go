@@ -69,7 +69,10 @@ func (d *Dispatcher) setPublic(record execution.Record, body []byte) (any, error
 	return p.Public, nil
 }
 
-// publicRead serves an unsigned read of a public contract.
+// publicRead serves an unsigned read of a public contract:
+// /ibc/app/<agent>/<contract>/<method>?values=<JSON>&to=<address>, or with
+// data=<calldata> in place of the method and values. Only view and pure
+// functions; it runs with msg.sender the zero address.
 func (d *Dispatcher) publicRead(record execution.Record, query url.Values) (any, error) {
 	public, err := d.navigator.IsPublic(record.Agent, record.Contract)
 	if err != nil {
@@ -78,28 +81,38 @@ func (d *Dispatcher) publicRead(record execution.Record, query url.Values) (any,
 	if !public {
 		return nil, errNotPublic(record.Agent, record.Contract)
 	}
-	if record.Method == "" {
+	req := callRequest{To: query.Get("to"), Data: query.Get("data"), Method: record.Method}
+	if req.Method == "" && req.Data == "" {
 		return nil, errors.New("public_read needs a method: /ibc/app/<agent>/<contract>/<method>")
 	}
-	var values map[string]any
 	if raw := query.Get("values"); raw != "" {
-		if err := execution.DecodeJSON([]byte(raw), &values); err != nil {
+		if err := execution.DecodeJSON([]byte(raw), &req.Values); err != nil {
 			return nil, fmt.Errorf("public_read values: %w", err)
 		}
 	}
-	record.Message = execution.Message{Values: values}
+	c, err := d.resolve(record.Agent, record.Contract, req)
+	if errors.Is(err, execution.ErrUnknownContract) {
+		return nil, errNotPublic(record.Agent, record.Contract)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if c.fn != nil && !c.fn.IsConstant() {
+		return nil, fmt.Errorf("%s changes state: a public read runs only view and pure functions", c.fn.RawName)
+	}
+	record.SetCall(c.to, c.data)
 	result, err := d.navigator.PublicRead(record.Agent, record)
 	if errors.Is(err, execution.ErrUnknownContract) {
 		return nil, errNotPublic(record.Agent, record.Contract)
 	}
 	if err != nil {
 		var ce *common.ContractError
-		if errors.As(err, &ce) || errors.Is(err, common.ErrNotImplemented) {
-			return readError(err), nil
+		if errors.As(err, &ce) {
+			return map[string]any{"error": errorText(c.abis, err)}, nil
 		}
 		return nil, err
 	}
-	return result.Value, nil
+	return c.decode(result.Value), nil
 }
 
 // limiter bounds anonymous reads: a token bucket per client address, and a

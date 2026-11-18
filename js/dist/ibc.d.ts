@@ -20,6 +20,9 @@ export interface IbcEvent {
     action: string;
     /** The outcome: a function's result, true or false, or an error string. */
     reply: unknown;
+    /** For a call: its function's selector, and its revert data if it reverted (hex). */
+    selector?: Hex;
+    revert?: Hex;
     /**
      * Set, to the same text as reply, when the transaction failed: a revert, an
      * argument the function does not take, an unknown function. (A function
@@ -67,7 +70,10 @@ export interface ContractSummary {
     pid?: Address;
     address?: string;
     code?: Hex;
-    abi?: unknown;
+    /** The ABIs of the source's contracts, by name ("path:Name"); contract names the root one. */
+    abis?: ABIs;
+    /** The membership functions the root contract defines (approve_partner, ...). */
+    membership?: string[];
     /** The contract's Solidity source: its files, by path. */
     source?: Sources;
     compiler?: unknown;
@@ -100,18 +106,62 @@ export interface AppRecord {
         grant?: unknown;
     }>;
 }
+/** One function, constructor, event or error of an ABI. */
+export interface AbiItem {
+    type: string;
+    name?: string;
+    inputs?: AbiParam[];
+    outputs?: AbiParam[];
+    stateMutability?: string;
+    [field: string]: unknown;
+}
+export interface AbiParam {
+    name: string;
+    type: string;
+    components?: AbiParam[];
+    [field: string]: unknown;
+}
+/** The ABIs of a source's contracts, by name ("path:Name"). */
+export type ABIs = Record<string, AbiItem[]>;
 /** What the node compiled: the deploy needs it. */
 export interface Compiled {
-    /** The contract's name, as the compile named it ("Name" or "path:Name"). */
+    /** The contract to deploy, by its name in the source: "path:Name". */
     contract: string;
     code: Hex;
-    abi: unknown[];
+    /** Its ABI. */
+    abi: AbiItem[];
+    /** The ABIs of all the source's contracts, and the membership functions the contract defines. */
+    abis: ABIs;
+    membership: string[];
     /** sourceHashOf(the source). */
     sourceHash: Hex;
     compiler: {
         version: string;
         settings: unknown;
     };
+}
+/** A call in words, for a page to show while it is signed: "increment 5". */
+export declare function describe(what: string, values?: object): string;
+/** A function's signature, as grants and consents name it: "pay(address,uint256)". */
+export declare function signatureOf(item: AbiItem): string;
+/** Whether a function only reads (view or pure). */
+export declare const isReadFunction: (item: AbiItem) => boolean;
+/** A function of a source, and the contracts that have it. */
+export interface SourceFunction {
+    item: AbiItem;
+    signature: string;
+    contracts: string[];
+}
+/** The functions of a source, by signature: each once, with the contracts that have it. */
+export declare function functionsOf(abis: ABIs): SourceFunction[];
+/**
+ * A function of a source by its signature ("pay(address,uint256)"), or by
+ * its name if only one function of the source has that name.
+ */
+export declare function functionOf(abis: ABIs, nameOrSignature: string): SourceFunction;
+/** Where a call goes: at, a contract in the agreement's world; default, the root contract. */
+export interface CallOptions {
+    at?: Address;
 }
 /**
  * The constructor's arguments, by name. (Typed as object: every object
@@ -124,11 +174,14 @@ export type ConstructorArgs = object;
  */
 export interface DeployInput {
     name: string;
-    /** The contract in the source, as compile() named it (Compiled.contract); default: name. */
-    contract?: string;
+    /** What compile() made of the source: the root contract, its code, the ABIs and membership functions. */
+    contract: string;
     code: Hex;
-    abi: unknown;
+    abis: ABIs;
+    membership: string[];
+    /** The constructor's arguments, by name (the node encodes them); or args, already encoded. */
     constructor?: ConstructorArgs;
+    args?: Hex;
     protocol?: string;
     source: Sources;
     compiler: unknown;
@@ -194,12 +247,13 @@ export declare class Ibc {
      * agent's copy, if the agent lets anyone read it. No key and no signature;
      * the function runs with msg.sender the zero address.
      */
-    static publicRead(url: string, agent: Address, contract: string, method: string, values?: Record<string, unknown>): Promise<unknown>;
+    static publicRead(url: string, agent: Address, contract: string, method: string, values?: Record<string, unknown>, { at }?: CallOptions): Promise<unknown>;
     constructor(url: string, agent: Address);
     /** One request to /ibc/app. Returns the decoded JSON reply. auth is a signed query for the URL. */
     request(verb: string, action: string, { agent, contract, method, body, auth }?: RequestOptions): Promise<any>;
     /** Signs a transaction with the root key. body is an object, sent as JSON text. */
-    sign(kind: string, contract: string, body: unknown): Promise<SignedTx>;
+    /** Signs a transaction with the root key. label says what it does, for the page to show while signing. */
+    sign(kind: string, contract: string, body: unknown, label?: string): Promise<SignedTx>;
     /**
      * Signs a query to the node, with the app key (silently) or else the root.
      * A query is accepted once, within a minute of signing.
@@ -243,22 +297,38 @@ export declare class Ibc {
      * source has only one deployable contract.
      */
     compile(source: Sources, contract?: string): Promise<Compiled>;
-    /** The deploy transaction's body, for a compiled contract. */
-    deployBody(input: DeployInput): Record<string, unknown>;
+    /**
+     * ABI-encodes values for one ABI item, on the node: a function's calldata,
+     * or a constructor's arguments.
+     */
+    encode(item: AbiItem, values?: Record<string, unknown>): Promise<Hex>;
+    /** The ABIs of a contract's source, as its deploy carries them. */
+    abis(contract: string): Promise<ABIs>;
+    /** The calldata of a call of method (a name or a signature) of a contract's source. */
+    calldata(contract: string, method: string, values?: Record<string, unknown>): Promise<Hex>;
+    /** The deploy transaction's body, for a compiled contract; the node encodes the constructor's arguments. */
+    deployBody(input: DeployInput): Promise<Record<string, unknown>>;
     /**
      * Deploys a contract and returns its id once it is live. tx: the deploy
      * transaction, if signed already (in a batch); otherwise the root signs it.
      */
     deploy(contract: DeployInput | null, tx?: SignedTx | null): Promise<string>;
     /**
-     * A transaction signed by the root key: changes the contract's state.
-     * Resolves with the method's return value; rejects with the revert reason.
+     * A transaction signed by the root key: changes the agreement's state.
+     * method is a function of the contract's source, by name or signature; it
+     * runs on the root contract, or on the contract at `at`. Resolves with the
+     * function's return value; rejects with the revert reason.
      */
-    write(contract: string, method: string, values?: Record<string, unknown>): Promise<unknown>;
+    write(contract: string, method: string, values?: Record<string, unknown>, { at }?: CallOptions): Promise<unknown>;
     /** A call the node signs silently, if the user allowed this app this function. */
-    writeSilently(contract: string, method: string, values?: Record<string, unknown>): Promise<unknown>;
-    /** A read of a view or pure function: returns its result, at once. */
-    read(contract: string, method: string, values?: Record<string, unknown>, signer?: Signer): Promise<unknown>;
+    writeSilently(contract: string, method: string, values?: Record<string, unknown>, { at }?: CallOptions): Promise<unknown>;
+    /**
+     * A read of a view or pure function, on the root contract or on the
+     * contract at `at`: returns its result, at once.
+     */
+    read(contract: string, method: string, values?: Record<string, unknown>, { at, signer }?: CallOptions & {
+        signer?: Signer;
+    }): Promise<unknown>;
     /** This agent's contracts on the node (an app sees those it may read). */
     contracts(): Promise<ContractSummary[]>;
     /** One of this agent's contracts: its summary ({} if the agent has no such contract). */
@@ -330,11 +400,13 @@ export type ApprovalRequest = {
     contract: string;
     method: string;
     values?: Record<string, unknown>;
+    at?: Address;
 } | {
     type: 'read';
     contract: string;
     method: string;
     values?: Record<string, unknown>;
+    at?: Address;
 } | {
     type: 'join';
     contract: string;
@@ -434,10 +506,17 @@ export declare class IbcApp {
         guest?: boolean;
         public?: boolean;
     }): Promise<string>;
-    /** Reads silently if the user allowed it, and otherwise asks the user. */
-    read(contract: string, method: string, values?: Record<string, unknown>): Promise<unknown>;
-    /** Writes silently if the user allowed this function, and otherwise asks the user. */
-    write(contract: string, method: string, values?: Record<string, unknown>): Promise<unknown>;
+    /**
+     * Reads silently if the user allowed it, and otherwise asks the user. at:
+     * a contract in the agreement's world (default: the root contract).
+     */
+    read(contract: string, method: string, values?: Record<string, unknown>, { at }?: CallOptions): Promise<unknown>;
+    /**
+     * Writes silently if the user allowed this function, and otherwise asks
+     * the user. at: a contract in the agreement's world (default: the root
+     * contract).
+     */
+    write(contract: string, method: string, values?: Record<string, unknown>, { at }?: CallOptions): Promise<unknown>;
     /**
      * Calls fn(event) for every event of the contracts the app may read, and
      * opens the event stream, which then stays open (it reconnects by itself).

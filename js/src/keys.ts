@@ -112,7 +112,10 @@ export interface Messages {
 }
 
 /** One message to sign, with its type. */
-export type Item = { [T in MessageType]: { type: T; message: Messages[T] } }[MessageType];
+export type Item = { [T in MessageType]: { type: T; message: Messages[T]; label?: string } }[MessageType];
+// label, if set, says in words what the message is, for a page to show while
+// it is signed (a call's function and values, which its calldata does not
+// show); it is not signed.
 
 /** A signature, with the public key and what the node needs to check it. */
 export interface Envelope {
@@ -196,6 +199,9 @@ export function sourceHashOf(source: Sources): Hex {
   });
   return toHex(keccak256(all));
 }
+
+/** A function signature's selector ("pay(address,uint256)" -> 4 bytes, hex): how calldata starts. */
+export const selectorOf = (signature: string): Hex => toHex(keccak256(new TextEncoder().encode(signature)).slice(0, 4));
 
 /** A random nonce, as hex without 0x. */
 export function nonce(): string {
@@ -354,10 +360,10 @@ export function passkeySigner({ credentialId, publicKey, rpId = location.hostnam
 }
 
 /** Signs a message of one of TYPES. Returns its digest and envelope. */
-export async function sign<T extends MessageType>(signer: Signer, type: T, message: Messages[T]):
+export async function sign<T extends MessageType>(signer: Signer, type: T, message: Messages[T], label?: string):
   Promise<{ digest: Uint8Array; envelope: Envelope }> {
   const digest = digestOf(type, message);
-  return { digest, envelope: await signer.signDigest(digest, { type, message } as Item) };
+  return { digest, envelope: await signer.signDigest(digest, { type, message, ...(label ? { label } : {}) } as Item) };
 }
 
 /**

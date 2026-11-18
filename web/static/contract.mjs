@@ -1,7 +1,8 @@
 // The contract page: details, an invite, and a form for each ABI function.
 import {
-  $, el, status, busy, errorText, connect, parseAbi, functionForm, isRead, encodeInvite, pretty, short,
+  $, el, status, busy, errorText, connect, functionForm, isRead, encodeInvite, pretty, short,
   loadIdentity, sourceHashOf, sourcePaths, showSource, writeFunctions, permissionItems, registerPermission,
+  functionLabel, contractName, signatureOf,
 } from './app.mjs';
 import { signBatch } from './js/index.js';
 
@@ -46,7 +47,8 @@ function show(c) {
     ['Transactions', guest ? undefined : (c.block_number ?? 0)],
     ['State root', c.state_root],
     ['EVM address', c.evm_address],
-    ['Contract in the source', c.contract],
+    ['Root contract', c.contract],
+    ['Who may join', (c.membership ?? []).includes('approve_partner') ? 'whom the contract approves' : 'anyone a member invites'],
     ['Source files', c.source ? sourcePaths(c.source).join(', ') : undefined],
     ['Deployment error', c.deploy_error],
     ['Source', c.source_check === 'verified' ? 'checked: it compiles to the deployed code' : undefined],
@@ -100,17 +102,37 @@ function show(c) {
     status($('#public-status'), '');
   }));
 
-  let abi = [];
-  try {
-    abi = typeof c.abi === 'string' ? parseAbi(c.abi) : (c.abi ?? []);
-  } catch {
-    // shown below as "no functions"
-  }
-  const fns = abi.filter((x) => x.type === 'function' && x.name);
-  const reads = fns.filter(isRead);
-  const writes = fns.filter((f) => !isRead(f));
-  $('#reads').replaceChildren(...reads.map((f) => functionForm(f, 'Read', (values) => ibc.read(c.id, f.name, values))));
-  $('#writes').replaceChildren(...writes.map((f) => functionForm(f, 'Send', (values) => ibc.write(c.id, f.name, values))));
+  // The forms of the chosen contract: the root contract, or another of the
+  // source's at an address in the agreement's world.
+  const showFunctions = () => {
+    const name = $('#target-contract').value || c.contract;
+    const at = name === c.contract ? undefined : $('#target-address').value.trim();
+    const fns = (c.abis?.[name] ?? []).filter((x) => x.type === 'function' && x.name);
+    const reads = fns.filter(isRead);
+    const writes = fns.filter((f) => !isRead(f));
+    const run = (op) => (f) => (values) => {
+      if (name !== c.contract && !/^0x[0-9a-fA-F]{40}$/.test(at)) throw new Error('give the contract\'s address');
+      return ibc[op](c.id, signatureOf(f), values, { at });
+    };
+    $('#reads').replaceChildren(...reads.map((f) => functionForm(f, 'Read', run('read')(f))));
+    $('#writes').replaceChildren(...writes.map((f) => functionForm(f, 'Send', run('write')(f))));
+    if (!reads.length) $('#reads').append(el('p', { class: 'hint' }, 'No read functions.'));
+    if (!writes.length) $('#writes').append(el('p', { class: 'hint' }, 'No transaction functions.'));
+  };
+  const deployable = Object.keys(c.abis ?? {}).filter((name) => (c.abis[name] ?? []).some((x) => x.type === 'function'));
+  $('#target-contract').replaceChildren(...[c.contract, ...deployable.filter((n) => n !== c.contract)].map((name) =>
+    el('option', { value: name }, name === c.contract ? `${contractName(name)} (root)` : contractName(name))));
+  $('#target-address').value = c.evm_address ?? '';
+  $('#target-address').disabled = true;
+  $('#target-contract').addEventListener('change', () => {
+    const root = $('#target-contract').value === c.contract;
+    $('#target-address').disabled = root;
+    $('#target-address').value = root ? (c.evm_address ?? '') : '';
+    showFunctions();
+  });
+  $('#target-address').addEventListener('change', showFunctions);
+  $('#target-card').classList.toggle('hidden', deployable.length < 2);
+  showFunctions();
   if (c.source) {
     showSource($('#code'), c.source);
     $('#code-toggle').classList.remove('hidden');
@@ -119,8 +141,6 @@ function show(c) {
       $('#show-code').textContent = shown ? 'Show the code' : 'Hide the code';
     });
   }
-  if (!reads.length) $('#reads').append(el('p', { class: 'hint' }, 'No read functions in the ABI.'));
-  if (!writes.length) $('#writes').append(el('p', { class: 'hint' }, 'No transaction functions in the ABI.'));
 
   ibc.onEvent((event) => {
     if (event.contract !== c.id) return;
@@ -146,18 +166,18 @@ function show(c) {
 async function showApps(c) {
   if (!c.source) return;
   const sourceHash = sourceHashOf(c.source);
-  const writes = writeFunctions(c.abi);
+  const writes = writeFunctions(c.abis);
   const apps = (await ibc.apps()).filter((a) => !a.permissions[`0x${'0'.repeat(64)}`]); // not this page's own keys
   $('#app-perms').replaceChildren(...apps.map((a) => {
     const now = a.permissions[sourceHash] ?? { read: false, functions: [] };
     const read = el('input', { type: 'checkbox', checked: now.read });
-    const boxes = writes.map((f) => el('input', { type: 'checkbox', value: f.name, checked: now.functions.includes(f.name) }));
+    const boxes = writes.map((f) => el('input', { type: 'checkbox', value: f.signature, checked: now.functions.includes(f.signature) }));
     const save = el('button', { class: 'secondary' }, 'Save');
     const box = el('div', { class: 'app-perm', 'data-app': a.app },
       el('h3', {}, new URL(a.app).host),
       el('label', { class: 'check' }, read, 'Read this contract'),
       writes.length ? el('p', { class: 'hint' }, 'Call these functions (your node signs them for you):') : null,
-      ...writes.map((f, i) => el('label', { class: 'check' }, boxes[i], f.name)),
+      ...writes.map((f, i) => el('label', { class: 'check' }, boxes[i], functionLabel(f, c.abis))),
       save);
     save.addEventListener('click', () => busy(save, $('#apps-status'), async () => {
       status($('#apps-status'), 'Approve with your passkey…');

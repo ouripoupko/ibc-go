@@ -44,10 +44,10 @@ A transaction reaches partners in one of two forms, and they accept nothing else
   | `agent` | The agent |
   | `nodeKey` | The node that may sign |
   | `sourceHash` | The contracts it is for: the hash of their Solidity source, all its files ([source hash](api.md#transactions)) |
-  | `functions` | The functions the node may call silently |
+  | `functions` | The functions the node may call silently, by signature: `post(string)` |
 
   Every partner checks the grant's signature (`identity.Verify`), that the node signed, that the
-  function is listed, and, in execution, that the contract's source is the grant's and that the node
+  call's calldata starts with the selector of a listed function, and, in execution, that the contract's source is the grant's and that the node
   is still the agent's node in this contract. A grant therefore stops working when the agent moves to
   another node.
 
@@ -115,15 +115,20 @@ could already show it.
 Apps send Solidity **source**, not bytecode: the contract's files, by path, which import each
 other by those paths and are all the compiler gets. The user's node compiles it (with the compiler version
 this release of ibc pins, and fixed settings), shows it to the user on request, and packages the
-deploy transaction: bytecode, ABI, source, and the compiler's version and settings. The user signs
-that with the root key. An app cannot slip in code the user was not shown.
+deploy transaction: the root contract's bytecode and constructor arguments, the ABIs of the
+source's contracts, the membership functions, the source, and the compiler's version and settings.
+The user signs that with the root key. An app cannot slip in code the user was not shown.
+
+A **call** is calldata: the user's node shows the function and its values, from the source's ABIs,
+and the user signs the encoded call. In a source, a selector means one function (the node refuses a
+source where it does not), so what the page shows is what partners run.
 
 A user who **joins** reads the source too, every file of it, and signs the join, which names the
 source's hash (over all the files and their paths), with
 the app's permissions and the public choice, in one approval. The members refuse a join for another
 source. Once the members accept it, the joiner's node compiles the deploy's source with the deploy's
-compiler, downloading that version if it does not have it, and compares it with the deployed code:
-if they differ, it does not join. If it cannot get that compiler, it joins and warns the user: the
+compiler, downloading that version if it does not have it, and compares it with the deploy's code,
+ABIs and membership functions: if they differ, it does not join. If it cannot get that compiler, it joins and warns the user: the
 contract is marked "source not checked" on the node's page, and its summary has
 `source_check: "unchecked"` with the reason ([API](api.md#join_contract)).
 
@@ -177,8 +182,8 @@ with it:
    | `connect` | none | Connecting the app: it learns the agent id, with no permissions |
    | `deploy` | `source` (files by path), `contract` (`Name` or `path:Name`, optional), `name`, `constructor`, `protocol`, `public` | The deploy, compiled by the node; and the app's permissions for this source, the first time |
    | `permit` | `contract`, `public` | The app's permissions for an existing contract's source |
-   | `call` | `contract`, `method`, `values` | A transaction, signed by the root |
-   | `read` | `contract`, `method`, `values` | A read, signed by the root |
+   | `call` | `contract`, `method` (a function of the source, by name or signature), `values`, `at` (optional: the contract's address in the agreement; default the root contract) | A transaction, signed by the root: the page shows the function and its values, encodes the call, and signs the calldata |
+   | `read` | `contract`, `method`, `values`, `at` | A read, signed by the root |
    | `join` | `contract`, `source` (files by path), `contractName` (optional, as for a deploy), `memberNode`, `memberAgent`, `guest`, `public` | Joining a contract, of the source shown; and the app's permissions for this source, the first time. The page answers `{request}` (the join's id) once the join is sent, and closes: the outcome reaches the app as a `join_contract` event for that id |
 
    `public` (optional, `true` or `false`) is what the app proposes for "Anyone may read this
@@ -202,7 +207,7 @@ opens the page when the node says the user must approve.
 ```sh
 ibc key new alice.key                                 # a root key (secp256k1); prints the agent id
 ibc sign registration -key alice.key -node URL -node-key 0x57E3…
-ibc sign tx -key alice.key -kind call -contract ID -body '{"method": "increment"}'
+ibc sign tx -key alice.key -kind call -contract ID -body '{"data": "0xd09de08a"}'   # calldata: increment()
 ibc sign query -key alice.key -action get_contracts
 ibc sign publish -key alice.key -contract ID -public=true   # let anyone read your copy (set_public)
 ```

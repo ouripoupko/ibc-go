@@ -50,9 +50,9 @@ func TestVectors(t *testing.T) {
 	q := Query{Agent: agent, Action: "contract_read", Target: agent.Hex(), Contract: "0xabc",
 		Body: `{"method":"count","values":{}}`, Time: 1789000000, Nonce: "n2"}
 	grant := Grant{Agent: agent, NodeKey: node, SourceHash: crypto.Keccak256Hash([]byte("code")),
-		Functions: []string{"post", "like"}, Nonce: "n3"}
+		Functions: []string{"post(string)", "like(uint256)"}, Nonce: "n3"}
 	consent := Consent{Agent: agent, App: "https://app.example", AppKey: PublicKey(p256),
-		SourceHash: crypto.Keccak256Hash([]byte("code")), Read: true, Functions: []string{"post"}, Nonce: "n4"}
+		SourceHash: crypto.Keccak256Hash([]byte("code")), Read: true, Functions: []string{"post(string)"}, Nonce: "n4"}
 	everything := Consent{Agent: agent, App: "https://ibc.example.com", AppKey: PublicKey(p256), Read: true,
 		Functions: []string{}, Nonce: "n5"}
 

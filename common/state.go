@@ -3,17 +3,13 @@
 package common
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
 	"math"
 	"math/big"
-	"reflect"
 	"slices"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -34,16 +30,17 @@ import (
 // Contract document keys.
 const (
 	// Written by the deployer (the deploy record's message).
-	KeyPID         = "pid"         // agent id of the creator
-	KeyAddress     = "address"     // network address of the creator's agent (not an EVM address)
-	KeyProfile     = "profile"     // profile of the creator
-	KeyCode        = "code"        // init bytecode, hex string
-	KeyABI         = "abi"         // contract ABI, JSON (string or decoded array)
-	KeyConstructor = "constructor" // constructor arguments, keyed by name
-	KeyTimestamp   = "timestamp"   // creation timestamp (set by ContractExecution.Create)
+	KeyPID        = "pid"        // agent id of the creator
+	KeyAddress    = "address"    // network address of the creator's agent (not an EVM address)
+	KeyProfile    = "profile"    // profile of the creator
+	KeyCode       = "code"       // the root contract's creation bytecode, hex string
+	KeyArgs       = "args"       // its ABI-encoded constructor arguments, hex string
+	KeyABIs       = "abis"       // the ABIs of the source's contracts, by name (for users' nodes; execution does not read them)
+	KeyMembership = "membership" // the membership functions the root contract defines
+	KeyTimestamp  = "timestamp"  // creation timestamp (set by ContractExecution.Create)
 
 	// Written by State.
-	KeyEVMAddress    = "evm_address"    // address the contract was deployed at
+	KeyEVMAddress    = "evm_address"    // address the root contract was deployed at
 	KeyStateRoot     = "state_root"     // world state root after the last write
 	KeyBlockNumber   = "block_number"   // number of ledger records applied so far
 	KeyLastTimestamp = "last_timestamp" // timestamp of the last write transaction
@@ -51,18 +48,6 @@ const (
 	// KeyDecisionPrefix + a transaction id holds the decision on a
 	// membership change, written together with the cursor.
 	KeyDecisionPrefix = "decision:"
-)
-
-// Built-in method names that the Python State answered itself.
-const (
-	MethodGetPartners   = "get_partners"
-	MethodGetParameters = "get_parameters"
-	// Contract functions that decide membership changes, if a contract
-	// defines them: approve_partner(address), approve_guest(address) and
-	// approve_removal(address), all returning bool.
-	MethodApprovePartner = "approve_partner"
-	MethodApproveGuest   = "approve_guest"
-	MethodApproveRemoval = "approve_removal"
 )
 
 const (
@@ -79,9 +64,6 @@ const (
 )
 
 var (
-	// ErrNotImplemented is returned by the built-in methods that have not
-	// been defined for Solidity contracts yet.
-	ErrNotImplemented = errors.New("not implemented")
 	// ErrNotRunning is returned when the contract has not been deployed or
 	// loaded with Run.
 	ErrNotRunning = errors.New("contract is not running")
@@ -90,14 +72,14 @@ var (
 	ErrDeployFailed = errors.New("contract deployment failed")
 )
 
-// ContractError is a deterministic, contract-level failure: an unknown
-// method, bad arguments, a revert, or running out of gas. Every partner sees
-// the same ContractError for the same record. It is the counterpart of the
-// str(e) that Python returned from a failing method. Other errors from State
-// are infrastructure failures (storage, commit) that are local to one agent.
+// ContractError is a deterministic, contract-level failure: a revert, or
+// running out of gas. Every partner sees the same ContractError for the same
+// record. Other errors from State are infrastructure failures (storage,
+// commit) that are local to one agent.
 type ContractError struct {
 	Err    error  // underlying cause, e.g. vm.ErrExecutionReverted
-	Reason string // decoded revert reason, if any
+	Reason string // the revert reason: Error(string)'s or Panic's, or else the revert data as hex
+	Data   []byte // the revert data, if any (a user's node decodes custom errors with the source's ABIs)
 }
 
 func (e *ContractError) Error() string {
@@ -111,7 +93,9 @@ func (e *ContractError) Unwrap() error { return e.Err }
 
 // Result is the outcome of a call.
 type Result struct {
-	// Value is the decoded return value, JSON-serialisable.
+	// Value is what the call returned: for a call, its return data as hex
+	// (a user's node decodes it with the source's ABIs); for a membership
+	// decision, the decision.
 	Value any `json:"value"`
 	// StateRoot is the contract's world state root after the call. A
 	// read-only or failed call leaves it unchanged.
@@ -195,7 +179,7 @@ type State struct {
 
 	running       bool
 	failed        *ContractError // set when the deployment failed; then running is false
-	abi           abi.ABI
+	membership    []string       // the membership functions the root contract defines
 	address       ethcommon.Address
 	root          ethcommon.Hash
 	blockNumber   uint64
@@ -248,10 +232,10 @@ func (s *State) Run(caller, timestamp string) error {
 		s.failed = &ContractError{Err: ErrDeployFailed, Reason: reason}
 		return s.failed
 	}
+	if s.membership, err = membershipOf(fields[KeyMembership]); err != nil {
+		return err
+	}
 	if fields[KeyEVMAddress] != nil {
-		if s.abi, err = loadABI(fields[KeyABI]); err != nil {
-			return err
-		}
 		return s.reload(fields)
 	}
 
@@ -316,32 +300,16 @@ func (s *State) reload(fields map[string]any) error {
 }
 
 func (s *State) deploy(fields map[string]any, caller, timestamp string) error {
-	contractABI, err := loadABI(fields[KeyABI])
+	code, err := hexField(fields, KeyCode)
 	if err != nil {
 		return err
-	}
-	s.abi = contractABI
-	var code []byte
-	switch c := fields[KeyCode].(type) {
-	case string:
-		var err error
-		if code, err = decodeHex(c); err != nil {
-			return &ContractError{Err: fmt.Errorf("invalid %s: %w", KeyCode, err)}
-		}
-	case []byte:
-		code = c
 	}
 	if len(code) == 0 {
 		return &ContractError{Err: fmt.Errorf("contract document has no %s", KeyCode)}
 	}
-	ctorValue := fields[KeyConstructor]
-	ctorArgs, ok := ctorValue.(map[string]any)
-	if !ok && ctorValue != nil {
-		return &ContractError{Err: fmt.Errorf("%s must be an object, got %T", KeyConstructor, ctorValue)}
-	}
-	packed, err := packArguments(s.abi.Constructor.Inputs, ctorArgs)
+	args, err := hexField(fields, KeyArgs)
 	if err != nil {
-		return &ContractError{Err: fmt.Errorf("constructor: %w", err)}
+		return err
 	}
 	unixTime, err := ParseTimestamp(timestamp)
 	if err != nil {
@@ -358,9 +326,9 @@ func (s *State) deploy(fields map[string]any, caller, timestamp string) error {
 	from := AgentAddress(caller)
 	statedb.Prepare(rules, from, ethcommon.Address{}, nil, vm.ActivePrecompiles(rules), nil)
 	evm.SetTxContext(vm.TxContext{Origin: from, GasPrice: new(uint256.Int)})
-	ret, address, _, err := evm.Create(from, append(code, packed...), vm.NewGasBudget(GasLimit, 0), new(uint256.Int))
+	ret, address, _, err := evm.Create(from, append(code, args...), vm.NewGasBudget(GasLimit, 0), new(uint256.Int))
 	if err != nil {
-		return s.contractError(err, ret)
+		return contractError(err, ret)
 	}
 	root, err := s.commit(statedb, rules, blockNumber)
 	if err != nil {
@@ -382,18 +350,19 @@ func (s *State) deploy(fields map[string]any, caller, timestamp string) error {
 	return nil
 }
 
-// Call executes a write transaction from the agent caller, like Python's
-// call(). method and values are ABI-encoded by name. On success the new
-// state root is committed, stored in the contract document and returned.
+// Call executes a write transaction from the agent caller: data (calldata)
+// on the contract at to, or on the root contract if to is nil. On success
+// the new state root is committed, stored in the contract document and
+// returned, with the return data (hex) as the value.
 //
 // Each Call applies one logged record, so it always advances the block
 // number exactly once, even when it fails: the block number is the index of
 // the last applied ledger record. On failure the EVM state is rolled back
-// completely and the returned error is a *ContractError carrying the decoded
-// revert reason; the Result still holds the unchanged state root. Only an
+// completely and the returned error is a *ContractError carrying the revert
+// reason; the Result still holds the unchanged state root. Only an
 // infrastructure error (storage) leaves the block number unchanged, so the
 // record is applied again later.
-func (s *State) Call(caller, method string, values map[string]any, timestamp string) (Result, error) {
+func (s *State) Call(caller string, to *ethcommon.Address, data []byte, timestamp string) (Result, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -403,13 +372,10 @@ func (s *State) Call(caller, method string, values map[string]any, timestamp str
 	if !s.running {
 		return Result{}, ErrNotRunning
 	}
-	if handled, err := s.builtin(method); handled {
-		return s.advance(err)
-	}
 	blockNumber := s.blockNumber
 	result := Result{StateRoot: s.root, BlockNumber: blockNumber}
 
-	value, statedb, rules, callErr := s.execute(caller, method, values, timestamp, blockNumber, GasLimit)
+	ret, statedb, rules, callErr := s.execute(caller, to, data, timestamp, blockNumber, GasLimit)
 	var contractErr *ContractError
 	if callErr != nil && !errors.As(callErr, &contractErr) {
 		return result, callErr // infrastructure failure: nothing is recorded
@@ -432,7 +398,7 @@ func (s *State) Call(caller, method string, values map[string]any, timestamp str
 	s.root = root
 	s.lastTimestamp = timestamp
 	result.StateRoot = root
-	result.Value = value
+	result.Value = hexutil.Encode(ret)
 	return result, nil
 }
 
@@ -464,13 +430,14 @@ func (s *State) advance(callErr error, extra ...map[string]any) (Result, error) 
 	return result, callErr
 }
 
-// Decide applies the record of a membership change. If the contract defines
-// method (approve_partner or approve_removal) as a function of one address
-// returning bool, it is called as caller with subject, and its answer is the
-// decision; a revert means no. Otherwise the decision is def. The decision
-// is stored in the contract document under KeyDecisionPrefix+id, in the same
-// update that advances the cursor, so a crash cannot lose it.
-func (s *State) Decide(caller, method string, subject ethcommon.Address, timestamp, id string, def bool) (bool, Result, error) {
+// Decide applies the record of a membership change. If the root contract
+// defines function (a membership function: approve_partner, approve_guest or
+// approve_removal), it is called as caller with subject, and decides: true
+// approves, anything else (false, a revert) refuses. Otherwise the decision
+// is def. An empty function also means def. The decision is stored in the
+// contract document under KeyDecisionPrefix+id, in the same update that
+// advances the cursor, so a crash cannot lose it.
+func (s *State) Decide(caller, function string, subject ethcommon.Address, timestamp, id string, def bool) (bool, Result, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key := KeyDecisionPrefix + id
@@ -481,16 +448,14 @@ func (s *State) Decide(caller, method string, subject ethcommon.Address, timesta
 	if !s.running {
 		return false, Result{}, ErrNotRunning
 	}
-	m, ok := s.abi.Methods[method]
-	if !ok || len(m.Inputs) != 1 || m.Inputs[0].Type.T != abi.AddressTy ||
-		len(m.Outputs) != 1 || m.Outputs[0].Type.T != abi.BoolTy {
+	if function == "" || !slices.Contains(s.membership, function) {
 		r, err := s.advance(nil, map[string]any{key: def})
 		return def, r, err
 	}
 	blockNumber := s.blockNumber
 	result := Result{StateRoot: s.root, BlockNumber: blockNumber}
-	values := map[string]any{argumentKey(m.Inputs[0], 0): subject.Hex()}
-	value, statedb, rules, callErr := s.execute(caller, method, values, timestamp, blockNumber, GasLimit)
+	data := append(crypto.Keccak256([]byte(function + "(address)"))[:4], ethcommon.LeftPadBytes(subject.Bytes(), 32)...)
+	ret, statedb, rules, callErr := s.execute(caller, nil, data, timestamp, blockNumber, GasLimit)
 	var contractErr *ContractError
 	if callErr != nil && !errors.As(callErr, &contractErr) {
 		return false, result, callErr
@@ -499,7 +464,8 @@ func (s *State) Decide(caller, method string, subject ethcommon.Address, timesta
 		r, err := s.advance(nil, map[string]any{key: false})
 		return false, r, err
 	}
-	approved, _ := value.(bool)
+	// The ABI encoding of true: one word, 1.
+	approved := len(ret) == 32 && new(big.Int).SetBytes(ret).Cmp(big.NewInt(1)) == 0
 	root, err := s.commit(statedb, rules, blockNumber)
 	if err != nil {
 		return false, result, err
@@ -520,17 +486,17 @@ func (s *State) Decide(caller, method string, subject ethcommon.Address, timesta
 	return approved, result, nil
 }
 
-// View executes a read-only call, the equivalent of eth_call: it runs on a
-// fresh copy of the current state that is then discarded, so neither the
-// state, the root nor the contract document changes. It serves Python's
-// call with should_log=False and dispatcher/contract_view.py. If timestamp
-// is empty, the timestamp of the last write is used.
-func (s *State) View(caller, method string, values map[string]any, timestamp string) (Result, error) {
-	return s.ViewGas(caller, method, values, timestamp, GasLimit)
+// View executes a read-only call, the equivalent of eth_call: data on the
+// contract at to (nil: the root contract), on a fresh copy of the current
+// state that is then discarded, so neither the state, the root nor the
+// contract document changes. The value is the return data, as hex. If
+// timestamp is empty, the timestamp of the last write is used.
+func (s *State) View(caller string, to *ethcommon.Address, data []byte, timestamp string) (Result, error) {
+	return s.ViewGas(caller, to, data, timestamp, GasLimit)
 }
 
 // ViewGas is View with a gas limit.
-func (s *State) ViewGas(caller, method string, values map[string]any, timestamp string, gas uint64) (Result, error) {
+func (s *State) ViewGas(caller string, to *ethcommon.Address, data []byte, timestamp string, gas uint64) (Result, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -541,19 +507,13 @@ func (s *State) ViewGas(caller, method string, values map[string]any, timestamp 
 	if !s.running {
 		return Result{}, ErrNotRunning
 	}
-	if handled, err := s.builtin(method); handled {
-		return result, err
-	}
-	// A read runs only view and pure functions: a function that may change
-	// the state is a transaction, ordered by consensus.
-	if m, ok := s.abi.Methods[method]; ok && !m.IsConstant() {
-		return result, &ContractError{Err: fmt.Errorf("%s changes state: send it as a transaction (contract_write)", method)}
-	}
 	if timestamp == "" {
 		timestamp = s.lastTimestamp
 	}
-	value, _, _, err := s.execute(caller, method, values, timestamp, s.blockNumber, gas)
-	result.Value = value
+	ret, _, _, err := s.execute(caller, to, data, timestamp, s.blockNumber, gas)
+	if err == nil {
+		result.Value = hexutil.Encode(ret)
+	}
 	return result, err
 }
 
@@ -578,20 +538,17 @@ func (s *State) BlockNumber() uint64 {
 	return s.blockNumber
 }
 
-// execute runs method on a fresh StateDB opened at the current root. The
-// caller decides whether to commit the returned StateDB.
-func (s *State) execute(caller, method string, values map[string]any, timestamp string, blockNumber, gas uint64) (any, *state.StateDB, params.Rules, error) {
-	m, ok := s.abi.Methods[method]
-	if !ok {
-		return nil, nil, params.Rules{}, &ContractError{Err: fmt.Errorf("unknown method %q", method)}
-	}
-	args, err := packArguments(m.Inputs, values)
-	if err != nil {
-		return nil, nil, params.Rules{}, &ContractError{Err: fmt.Errorf("%s: %w", method, err)}
-	}
+// execute runs data on the contract at to (nil: the root contract), on a
+// fresh StateDB opened at the current root. The caller decides whether to
+// commit the returned StateDB.
+func (s *State) execute(caller string, to *ethcommon.Address, data []byte, timestamp string, blockNumber, gas uint64) ([]byte, *state.StateDB, params.Rules, error) {
 	unixTime, err := ParseTimestamp(timestamp)
 	if err != nil {
 		return nil, nil, params.Rules{}, &ContractError{Err: err}
+	}
+	target := s.address
+	if to != nil {
+		target = *to
 	}
 	statedb, err := state.New(s.root, s.stateDB)
 	if err != nil {
@@ -600,20 +557,16 @@ func (s *State) execute(caller, method string, values map[string]any, timestamp 
 	evm, rules := newEVM(statedb, blockNumber, unixTime)
 	defer evm.Release()
 	from := AgentAddress(caller)
-	statedb.Prepare(rules, from, ethcommon.Address{}, &s.address, vm.ActivePrecompiles(rules), nil)
+	statedb.Prepare(rules, from, ethcommon.Address{}, &target, vm.ActivePrecompiles(rules), nil)
 	evm.SetTxContext(vm.TxContext{Origin: from, GasPrice: new(uint256.Int)})
-	ret, _, err := evm.Call(from, s.address, append(slices.Clone(m.ID), args...), vm.NewGasBudget(gas, 0), new(uint256.Int))
+	ret, _, err := evm.Call(from, target, slices.Clone(data), vm.NewGasBudget(gas, 0), new(uint256.Int))
 	if err != nil {
-		return nil, nil, rules, s.contractError(err, ret)
+		return nil, nil, rules, contractError(err, ret)
 	}
 	if err := statedb.Error(); err != nil {
 		return nil, nil, rules, err
 	}
-	value, err := unpackOutputs(m.Outputs, ret)
-	if err != nil {
-		return nil, nil, rules, &ContractError{Err: fmt.Errorf("%s: decode output: %w", method, err)}
-	}
-	return value, statedb, rules, nil
+	return ret, statedb, rules, nil
 }
 
 // commit writes the StateDB's changes and flushes the trie nodes to the
@@ -629,84 +582,58 @@ func (s *State) commit(statedb *state.StateDB, rules params.Rules, blockNumber u
 	return root, nil
 }
 
-// contractError builds a ContractError from an EVM error, decoding the revert
-// reason from the return data: Error(string), Panic(uint256), or a custom
-// error declared in the contract's ABI.
-func (s *State) contractError(err error, ret []byte) *ContractError {
+// contractError builds a ContractError from an EVM error: the reason of a
+// revert with Error(string) or Panic(uint256), or else its data as hex.
+func contractError(err error, ret []byte) *ContractError {
 	ce := &ContractError{Err: err}
 	if !errors.Is(err, vm.ErrExecutionReverted) || len(ret) == 0 {
 		return ce
 	}
+	ce.Data = slices.Clone(ret)
 	if reason, uerr := abi.UnpackRevert(ret); uerr == nil {
 		ce.Reason = reason
 		return ce
-	}
-	if len(ret) >= 4 {
-		for _, e := range s.abi.Errors {
-			if !bytes.Equal(ret[:4], e.ID[:4]) {
-				continue
-			}
-			if values, uerr := e.Inputs.Unpack(ret[4:]); uerr == nil {
-				args := make([]string, len(values))
-				for i, v := range values {
-					b, _ := json.Marshal(toJSON(e.Inputs[i].Type, reflect.ValueOf(v)))
-					args[i] = string(b)
-				}
-				ce.Reason = e.Name + "(" + strings.Join(args, ", ") + ")"
-				return ce
-			}
-		}
 	}
 	ce.Reason = hexutil.Encode(ret)
 	return ce
 }
 
-// builtin handles the method names that Python's State answered itself.
-func (s *State) builtin(method string) (bool, error) {
-	switch method {
-	case MethodGetPartners:
-		return true, s.getPartners()
-	case MethodGetParameters:
-		return true, s.getParameters()
-	}
-	return false, nil
-}
-
-// TODO: define get_partners for Solidity contracts. In Python it returned
-// the partners collection (address, profile, agent) unless the contract
-// class overrode it.
-func (s *State) getPartners() error {
-	return fmt.Errorf("%s: %w", MethodGetPartners, ErrNotImplemented)
-}
-
-// TODO: define get_parameters for Solidity contracts. In Python it returned
-// the caller's submitted parameters and the consensus medians.
-func (s *State) getParameters() error {
-	return fmt.Errorf("%s: %w", MethodGetParameters, ErrNotImplemented)
-}
-
-func loadABI(v any) (abi.ABI, error) {
-	if v == nil {
-		return abi.ABI{}, &ContractError{Err: fmt.Errorf("contract document has no %s", KeyABI)}
-	}
-	var text string
-	switch a := v.(type) {
-	case string:
-		text = a
+// hexField reads a hex field of the contract document.
+func hexField(fields map[string]any, key string) ([]byte, error) {
+	switch v := fields[key].(type) {
+	case nil:
+		return nil, nil
 	case []byte:
-		text = string(a)
-	default:
-		b, err := json.Marshal(a)
+		return v, nil
+	case string:
+		b, err := decodeHex(v)
 		if err != nil {
-			return abi.ABI{}, &ContractError{Err: fmt.Errorf("invalid %s: %w", KeyABI, err)}
+			return nil, &ContractError{Err: fmt.Errorf("invalid %s: %w", key, err)}
 		}
-		text = string(b)
+		return b, nil
 	}
-	parsed, err := abi.JSON(strings.NewReader(text))
-	if err != nil {
-		return abi.ABI{}, &ContractError{Err: fmt.Errorf("invalid %s: %w", KeyABI, err)}
+	return nil, &ContractError{Err: fmt.Errorf("invalid %s: %T", key, fields[key])}
+}
+
+// membershipOf reads the membership functions of the contract document.
+func membershipOf(v any) ([]string, error) {
+	switch m := v.(type) {
+	case nil:
+		return nil, nil
+	case []string:
+		return m, nil
+	case []any:
+		out := make([]string, len(m))
+		for i, x := range m {
+			name, ok := x.(string)
+			if !ok {
+				return nil, fmt.Errorf("contract document: invalid %s %v", KeyMembership, v)
+			}
+			out[i] = name
+		}
+		return out, nil
 	}
-	return parsed, nil
+	return nil, fmt.Errorf("contract document: invalid %s %v", KeyMembership, v)
 }
 
 // newEVM builds an EVM whose block context depends only on the record

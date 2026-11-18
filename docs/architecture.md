@@ -125,12 +125,12 @@ The dispatcher checks a signature on every call that changes or shows an agent's
   public (above).
 - **Every signature** is checked by one function, `identity.Verify`
   ([`identity/envelope.go`](../identity/envelope.go)): the scheme (secp256k1, P-256 or WebAuthn),
-  and, for a call the node signed, the grant the agent's root signed (its functions; execution also
-  checks its source hash and node). Inside consensus it uses no clock. The dispatcher, the miners and a
+  and, for a call the node signed, the grant the agent's root signed (its functions, by the selector
+  the calldata starts with; execution also checks its source hash and node). Inside consensus it uses no clock. The dispatcher, the miners and a
   joining node's ledger replay all call it. See [Identity and keys](keys.md).
 - **Apps** ([`dispatcher/apps.go`](../dispatcher/apps.go)): the node keeps, per agent and app key,
-  what the user allowed per contract source: reading, and the functions the node may call silently,
-  with the grant. The dispatcher answers an app's reads and signs its silent calls accordingly.
+  what the user allowed per contract source: reading, and the functions (by signature) the node may
+  call silently, with the grant. The dispatcher answers an app's reads and signs its silent calls accordingly.
 - **Node-to-node messages** are signed with the sending node's key when they are sent, not when
   they are queued, so the outbox's retries stay fresh ([`consensus/a2a.go`](../consensus/a2a.go)).
   Requests for blocks or the ledger are answered only for the nodes of the contract's members.
@@ -165,10 +165,16 @@ write-ahead log and data files, and only one process can open it at a time.
 
 ### State
 
-Every contract instance has its own world state: its own `state.StateDB` and trie. There is no
-state shared between contracts. After every successful write, the state root is stored in the
-contract document and reported in the event. Partners that processed the same records have the
-same root, which is what a consensus protocol can compare.
+An agreement (an ibc contract: one deploy, one group of partners) has its own EVM world state: its
+own `state.StateDB` and trie. The deploy creates its root contract, which may create others; a call
+runs calldata on the root contract or on another contract of that world, by address, and contracts
+call each other as on Ethereum. No state is shared between agreements. After every successful
+write, the state root is stored in the contract document and reported in the event. Partners that
+processed the same records have the same root, which is what a consensus protocol can compare.
+
+Execution needs no ABI: a transaction is calldata, as on Ethereum. The ABIs travel with the deploy
+(`abis`, checked on join against the source) for users' nodes, which encode calls given by name and
+decode results ([`common/abiset.go`](../common/abiset.go)).
 
 ### Identity
 
@@ -195,20 +201,23 @@ development in go-ethereum and stay off.
 
 ### Arguments and results
 
+The node's API takes functions by name and JSON values, and returns JSON. `common.ABISet` holds the
+ABIs of an agreement's source, refusing a source in which a selector means two functions, and
 [`common/abi_codec.go`](../common/abi_codec.go) converts between JSON values and the Go types of
-go-ethereum's `accounts/abi`. The rules are in the [API reference](api.md#values). Revert data is
-decoded as `Error(string)`, `Panic(uint256)`, or a custom error from the contract's ABI.
+go-ethereum's `accounts/abi`. The rules are in the [API reference](api.md#values). Execution keeps a
+revert's data; the node decodes it as `Error(string)`, `Panic(uint256)`, or a custom error of the
+source.
 
 ### Differences from the Python contract model
 
-- Contracts are EVM bytecode with an ABI, not Python classes.
+- Contracts are EVM bytecode, called with calldata, not Python classes called by method name.
 - A failed call rolls back completely. In Python, writes made before an exception stayed.
 - A read runs on a copy of the state. In Python, a read could change state.
 - Dropped: `read()` between contracts, governance `parameters` and medians, `random`, `hashcode`,
   `elapsed_time`, and `Storage(name)`.
-- Membership is decided by the contract's own `approve_partner(address)` and
-  `approve_removal(address)` functions, if it defines them.
-- The built-in methods `get_partners` and `get_parameters` are stubs that answer `not implemented`.
+- Membership is decided by the root contract's own `approve_partner(address)`, `approve_guest(address)`
+  and `approve_removal(address)` functions, if it defines them (the deploy lists them).
+- The built-in methods `get_partners` and `get_parameters` are gone.
 
 ## Development
 
@@ -274,6 +283,9 @@ mv out/Registry_sol_Registry.abi testdata/Registry.abi
 
 [`testdata/Precompiles.sol`](../testdata/Precompiles.sol) calls the precompiles, for
 `common/precompiles_test.go`; its `.bin` and `.abi` are committed and rebuilt the same way.
+[`testdata/World.sol`](../testdata/World.sol) is an agreement of two contracts (a root that creates
+a Tally, and decides joins): `World.bin` is the root's code, and `World.abis.json` the ABIs of both,
+by name, as a deploy carries them.
 
 The example contracts are rebuilt with `examples/scripts/compile.sh`.
 
@@ -291,7 +303,6 @@ upgrade together.
 - **Recovering an identity** whose passkey is lost: future work, through trusted friends.
 - **A native app for the root key.** The root passkey belongs to the node's web address for now.
 - **Contract events.** Logs emitted by contracts are discarded.
-- **Built-in methods.** `get_partners` and `get_parameters` answer "not implemented".
 - **Guests' trust in hosts.** A guest's node takes a host's answer to a read as it is, and is not
   told when the guest is removed (it learns at its next call). See
   [guests](consensus.md#11-guests).

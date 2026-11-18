@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"errors"
 
+	ethcommon "github.com/ethereum/go-ethereum/common"
+
 	"github.com/ouripoupko/ibc-go/common"
 	"github.com/ouripoupko/ibc-go/execution"
 	"github.com/ouripoupko/ibc-go/identity"
@@ -40,8 +42,10 @@ type Protocol interface {
 		publish *identity.SignedPublish) (string, error)
 	// Receive handles a message from another node; the result is the reply.
 	Receive(ctx context.Context, agent, contract string, body []byte) (any, error)
-	// Read runs a read of a contract agent is a guest of, on a host.
-	Read(ctx context.Context, agent, contract, method string, values map[string]any) (any, error)
+	// Read runs a read of a contract agent is a guest of, on a host: data
+	// on the contract at to (nil: the root contract). It returns the return
+	// data, or the contract's refusal as a *common.ContractError.
+	Read(ctx context.Context, agent, contract string, to *ethcommon.Address, data []byte) ([]byte, error)
 	// Decided, Applied and Published are execution's reports.
 	Decided(agent, contract string, record execution.Record, approved bool)
 	Applied(agent, contract string, index uint64, stateRoot string)

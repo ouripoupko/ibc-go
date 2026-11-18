@@ -336,11 +336,11 @@ type wireMessage struct {
 	Index     uint64 `json:"index,omitempty"`
 	StateRoot string `json:"stateRoot,omitempty"`
 	History   string `json:"history,omitempty"` // the hash of the record ids up to it
-	// A guest's read, the deploy record in a guest's welcome, and a reply
-	// a host sends to a guest's node.
+	// A guest's read (its call: to and data), the deploy record in a
+	// guest's welcome, and a reply a host sends to a guest's node.
 	Guest  *ethcommon.Address `json:"guest,omitempty"`
-	Method string             `json:"method,omitempty"`
-	Values map[string]any     `json:"values,omitempty"`
+	To     string             `json:"to,omitempty"`
+	Data   string             `json:"data,omitempty"`
 	Record json.RawMessage    `json:"record,omitempty"`
 	Reply  *execution.Reply   `json:"reply,omitempty"`
 }
@@ -654,11 +654,12 @@ func recordFor(contract string, index uint64, id ethcommon.Hash, stx identity.Si
 		fields["address"] = fields["node"]
 		rec.Message.Fields = fields
 	case identity.KindCall:
-		rec.Method, _ = fields["method"].(string)
-		rec.Message.Values, _ = fields["values"].(map[string]any)
-		if rec.Message.Values == nil {
-			rec.Message.Values = map[string]any{}
+		body, err := tx.ParseBody()
+		if err != nil {
+			return rec, err
 		}
+		call := body.(*identity.CallBody)
+		rec.SetCall(call.To, call.Data)
 	default:
 		rec.Message.Fields = fields
 	}

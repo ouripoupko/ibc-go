@@ -7,12 +7,14 @@
 //   { type: 'connect', appKey }            who the user is: connects the app, with no permissions
 //   { type: 'deploy', source, contract, name, constructor, protocol, public, appKey }
 //   { type: 'permit', contract, public, appKey }   permissions on an existing contract
-//   { type: 'call', contract, method, values, appKey }
-//   { type: 'read', contract, method, values, appKey }
+//   { type: 'call', contract, method, values, at, appKey }
+//   { type: 'read', contract, method, values, at, appKey }
 //   { type: 'join', contract, source, contractName, memberNode, memberAgent, guest, public, appKey }
 // A source is the contract's Solidity files, by path ({ "Main.sol": "…" }).
 // contractName names the contract in it ("Name" or "path:Name") if it has
-// several. A join carries the contract's source: the user reads it here, all
+// several. method names a function of the source, by name or signature;
+// at, the address of the contract it runs on (default: the root contract).
+// A join carries the contract's source: the user reads it here, all
 // its files, and signs the
 // join (which names the source's hash), the app's permissions and the
 // public choice at once. The page answers as soon as the join is sent; its
@@ -26,8 +28,9 @@
 import {
   $, el, status, errorText, loadIdentity, connect, rootSigner, signIn, createIdentity, isKnown, reregister,
   pretty, short, sourceHashOf, sourcePaths, showSource, writeFunctions, permissionItems, registerPermission,
+  functionOf, functionLabel, contractName,
 } from './app.mjs';
-import { API_VERSION, digestOf, nonce, now, signBatch, toHex } from './js/index.js';
+import { API_VERSION, describe, digestOf, nonce, now, signBatch, toHex } from './js/index.js';
 
 const opener = window.opener;
 let origin;
@@ -52,6 +55,7 @@ function valid(r) {
   if (r.type === 'connect') return true;
   if ((r.type === 'join' || r.type === 'deploy') && !isSource(r.source)) return false;
   if (r.type === 'join' && r.contractName !== undefined && typeof r.contractName !== 'string') return false;
+  if ((r.type === 'call' || r.type === 'read') && (typeof r.method !== 'string' || (r.at !== undefined && !/^0x[0-9a-fA-F]{40}$/.test(r.at)))) return false;
   return r.type === 'deploy' || typeof r.contract === 'string';
 }
 
@@ -215,11 +219,11 @@ const registerPublish = (ibc, item, signature) => ibc.setPublic(item.message.con
   { publish: item.message, signature });
 
 /** Shows the permissions form for the contract's functions; returns a reader of the choices. */
-function permissionsForm(abi, current = null) {
-  const writes = writeFunctions(abi);
-  const boxes = writes.map((f) => el('input', { type: 'checkbox', value: f.name, checked: current?.functions?.includes(f.name) }));
+function permissionsForm(abis, current = null) {
+  const writes = writeFunctions(abis);
+  const boxes = writes.map((f) => el('input', { type: 'checkbox', value: f.signature, checked: current?.functions?.includes(f.signature) }));
   if (current) $('#perm-read').checked = current.read;
-  $('#perm-writes').replaceChildren(...writes.map((f, i) => el('label', { class: 'check' }, boxes[i], f.name)));
+  $('#perm-writes').replaceChildren(...writes.map((f, i) => el('label', { class: 'check' }, boxes[i], functionLabel(f, abis))));
   if (!writes.length) $('#perm-writes-hint').classList.add('hidden');
   $('#permissions').classList.remove('hidden');
   return () => ({ read: $('#perm-read').checked, functions: boxes.filter((b) => b.checked).map((b) => b.value) });
@@ -249,26 +253,24 @@ async function showDeploy(ibc, identity, host) {
   status($('#status'), 'Compiling the code on your node…');
   const compiled = await ibc.compile(request.source, request.contract ?? '');
   status($('#status'), '');
-  const name = request.name || compiled.contract;
-  $('#what').textContent = `A new ${compiled.contract} contract, which you will own.`;
+  const name = request.name || contractName(compiled.contract);
+  $('#what').textContent = `A new ${contractName(compiled.contract)} contract, which you will own.`;
   details([['Contract', name], ['Arguments', Object.entries(ctor).map(([k, v]) => `${k}: ${pretty(v)}`).join(', ')],
-    filesRow(request.source)]);
+    ['Who may join', admission(compiled.membership)], filesRow(request.source)]);
   showCode(request.source);
   const app = await siteOf(ibc);
-  const choose = app.site?.permissions?.[compiled.sourceHash] ? null : permissionsForm(compiled.abi);
+  const choose = app.site?.permissions?.[compiled.sourceHash] ? null : permissionsForm(compiled.abis);
   const isPublic = publicForm();
+  const body = await ibc.deployBody({
+    name, contract: compiled.contract, code: compiled.code, abis: compiled.abis, membership: compiled.membership,
+    constructor: ctor, protocol: request.protocol, source: request.source, compiler: compiled.compiler,
+  });
   return async () => {
     const items = choose ? permissionMessages(ibc, identity, compiled.sourceHash, choose()) : deviceItems(identity, app);
-    const tx = {
-      contract: '', kind: 'deploy', agent: identity.agent, nonce: nonce(),
-      body: JSON.stringify(ibc.deployBody({
-        name, contract: compiled.contract, code: compiled.code, abi: compiled.abi, constructor: ctor,
-        protocol: request.protocol, source: request.source, compiler: compiled.compiler,
-      })),
-    };
+    const tx = { contract: '', kind: 'deploy', agent: identity.agent, nonce: nonce(), body: JSON.stringify(body) };
     // The contract's id is its deploy transaction's digest: the publish names it before it exists.
     const publish = isPublic() ? [publishItem(ibc, toHex(digestOf('Transaction', tx)), true)] : [];
-    const envs = await signBatch(rootSigner(identity), [...items, ...publish, { type: 'Transaction', message: tx }]);
+    const envs = await signBatch(rootSigner(identity), [...items, ...publish, { type: 'Transaction', message: tx, label: describe(`deploy ${name}`, ctor) }]);
     await registerSigned(ibc, items, envs);
     const contract = await ibc.deploy(null, { tx, signature: envs[envs.length - 1] });
     if (publish.length) await registerPublish(ibc, publish[0], envs[items.length]);
@@ -286,7 +288,7 @@ async function showPermit(ibc, identity, host) {
   details([['Contract', c.name], ['Id', short(c.id)], filesRow(c.source)]);
   showCode(c.source);
   const app = await siteOf(ibc);
-  const choose = permissionsForm(c.abi, app.site?.permissions?.[sourceHash]);
+  const choose = permissionsForm(c.abis, app.site?.permissions?.[sourceHash]);
   const isPublic = c.role === 'guest' ? null : publicForm(c.public === true);
   return async () => {
     const items = permissionMessages(ibc, identity, sourceHash, choose());
@@ -309,38 +311,59 @@ async function signWithDevice(ibc, identity, app, item) {
   return envs[envs.length - 1];
 }
 
+/**
+ * A call's function, found in the contract's ABIs, and what to show of it:
+ * the contract it runs on (at an address, or the root contract) and the
+ * contracts of the source that have the function.
+ */
+function callDetails(c, f) {
+  const at = request.at ? `${request.at}` : `${contractName(c.contract)} (the root contract)`;
+  return [['Contract', c.name || short(request.contract)], ['Function', `${f.signature} — in ${f.contracts.map(contractName).join(', ')}`],
+    ['Runs on', at], ['Arguments', Object.entries(request.values ?? {}).map(([k, v]) => `${k}: ${pretty(v)}`).join(', ')]];
+}
+
 async function showCall(ibc, identity, host) {
   const c = await ibc.contract(request.contract);
-  $('#title').textContent = `${host} wants to: ${request.method}`;
+  if (!c?.id) throw new Error('You have no such contract on this node.');
+  const f = functionOf(c.abis ?? {}, request.method);
+  $('#title').textContent = `${host} wants to: ${f.item.name}`;
   $('#what').textContent = 'A transaction in your name, applied by all the contract\'s members.';
-  details([['Contract', c?.name || short(request.contract)], ['Arguments', Object.entries(request.values ?? {})
-    .map(([k, v]) => `${k}: ${pretty(v)}`).join(', ')]]);
+  details(callDetails(c, f));
+  const data = await ibc.encode(f.item, request.values ?? {});
   const app = await siteOf(ibc);
   return async () => {
     const tx = {
       contract: request.contract, kind: 'call', agent: identity.agent, nonce: nonce(),
-      body: JSON.stringify({ method: request.method, values: request.values ?? {} }),
+      body: JSON.stringify(request.at ? { to: request.at, data } : { data }),
     };
-    const signature = await signWithDevice(ibc, identity, app, { type: 'Transaction', message: tx });
-    const event = await ibc.submit('POST', 'contract_write', { contract: request.contract, method: request.method, body: { tx, signature } });
+    const signature = await signWithDevice(ibc, identity, app, { type: 'Transaction', message: tx, label: describe(f.item.name, request.values ?? {}) });
+    const event = await ibc.submit('POST', 'contract_write', { contract: request.contract, body: { tx, signature } });
     return { reply: event.reply, ...(event.error ? { error: event.error } : {}) };
   };
 }
 
 async function showRead(ibc, identity, host) {
   const c = await ibc.contract(request.contract);
-  $('#title').textContent = `${host} wants to read: ${request.method}`;
+  if (!c?.id) throw new Error('You have no such contract on this node.');
+  const f = functionOf(c.abis ?? {}, request.method);
+  $('#title').textContent = `${host} wants to read: ${f.item.name}`;
   $('#what').textContent = 'It reads, and changes nothing.';
-  details([['Contract', c?.name || short(request.contract)]]);
+  details(callDetails(c, f));
   const app = await siteOf(ibc);
   return async () => {
     const query = {
       agent: identity.agent, action: 'contract_read', target: identity.agent, contract: request.contract,
-      body: JSON.stringify({ method: request.method, values: request.values ?? {} }), time: now(), nonce: nonce(),
+      body: JSON.stringify({ method: f.signature, values: request.values ?? {}, ...(request.at ? { to: request.at } : {}) }),
+      time: now(), nonce: nonce(),
     };
     const signature = await signWithDevice(ibc, identity, app, { type: 'Query', message: query });
-    return { value: await ibc.request('POST', 'contract_read', { contract: request.contract, method: request.method, body: { query, signature } }) };
+    return { value: await ibc.request('POST', 'contract_read', { contract: request.contract, body: { query, signature } }) };
   };
+}
+
+/** Who may join, by the membership functions the contract defines. */
+function admission(membership = []) {
+  return membership.includes('approve_partner') ? 'whom the contract approves' : 'anyone a member invites';
 }
 
 async function showJoin(ibc, identity, host) {
@@ -359,7 +382,7 @@ async function showJoin(ibc, identity, host) {
   showCode(request.source);
   const sourceHash = sourceHashOf(request.source);
   const app = await siteOf(ibc);
-  const choose = app.site?.permissions?.[sourceHash] ? null : permissionsForm(compiled.abi);
+  const choose = app.site?.permissions?.[sourceHash] ? null : permissionsForm(compiled.abis);
   const isPublic = guest ? () => false : publicForm(); // a guest keeps no copy to show
   return async () => {
     const tx = {

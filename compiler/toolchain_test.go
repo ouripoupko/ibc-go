@@ -69,30 +69,33 @@ func TestToolchain(t *testing.T) {
 		t.Fatalf("compile = %+v, %v", r, err)
 	}
 	info, _ := json.Marshal(r.Compiler)
-	if got, why := tc.Check(ctx, one("contract A {}"), info, "0x6001"); got != Verified {
+	claim := func(code string) Claim {
+		return Claim{Contract: "A.sol:A", Code: code, ABIs: map[string]json.RawMessage{"A.sol:A": json.RawMessage("[]")}, Membership: []string{}}
+	}
+	if got, why := tc.Check(ctx, one("contract A {}"), info, claim("0x6001")); got != Verified {
 		t.Errorf("check of the same code = %s (%s)", got, why)
 	}
-	if got, _ := tc.Check(ctx, one("contract A {}"), info, "0x6002"); got != Mismatch {
+	if got, _ := tc.Check(ctx, one("contract A {}"), info, claim("0x6002")); got != Mismatch {
 		t.Errorf("check of other code = %s", got)
 	}
-	if got, _ := tc.Check(ctx, one("broken"), info, "0x6001"); got != Mismatch {
+	if got, _ := tc.Check(ctx, one("broken"), info, claim("0x6001")); got != Mismatch {
 		t.Errorf("check of a source that does not compile = %s", got)
 	}
 	other, _ := json.Marshal(Info{Version: "0.8.37+commit.11111111.Linux.g++"})
-	if got, why := tc.Check(ctx, one("contract A {}"), other, "0x6001"); got != Unchecked || !strings.Contains(why, "0.8.37") {
+	if got, why := tc.Check(ctx, one("contract A {}"), other, claim("0x6001")); got != Unchecked || !strings.Contains(why, "0.8.37") {
 		t.Errorf("check with a version not to be found = %s (%s)", got, why)
 	}
-	if got, _ := tc.Check(ctx, one("contract A {}"), []byte(`{}`), "0x6001"); got != Mismatch {
+	if got, _ := tc.Check(ctx, one("contract A {}"), []byte(`{}`), claim("0x6001")); got != Mismatch {
 		t.Errorf("check without a compiler = %s", got)
 	}
 
 	// Several files go to the compiler together; one it read from elsewhere
 	// fails the compilation.
 	two := identity.Sources{"A.sol": "import './lib/B.sol'; contract A {}", "lib/B.sol": "library B {}"}
-	if r, err := tc.Compile(ctx, two, ""); err != nil || r.Contract != "A" || r.SourceHash != identity.SourceHash(two).Hex() {
+	if r, err := tc.Compile(ctx, two, ""); err != nil || r.Contract != "A.sol:A" || r.SourceHash != identity.SourceHash(two).Hex() {
 		t.Errorf("compile of two files = %+v, %v", r, err)
 	}
-	if got, why := tc.Check(ctx, two, info, "0x6001"); got != Verified {
+	if got, why := tc.Check(ctx, two, info, claim("0x6001")); got != Verified {
 		t.Errorf("check of two files = %s (%s)", got, why)
 	}
 	if _, err := tc.Compile(ctx, one("reads"), ""); !IsSourceError(err) || !strings.Contains(err.Error(), "elsewhere.sol") {
@@ -140,7 +143,7 @@ func TestRealDownload(t *testing.T) {
 		t.Fatal(err)
 	}
 	info, _ := json.Marshal(r.Compiler)
-	if got, why := tc.Check(context.Background(), identity.Sources{"Counter.sol": string(src)}, info, r.Code); got != Verified {
+	if got, why := tc.Check(context.Background(), identity.Sources{"Counter.sol": string(src)}, info, claimOf(r)); got != Verified {
 		t.Fatalf("check = %s (%s)", got, why)
 	}
 	t.Logf("compiled with %s", r.Compiler.Version)

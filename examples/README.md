@@ -13,8 +13,10 @@ Example contracts and clients for ibc. The [usage guide](../docs/usage.md) walks
 
 The node compiles a contract from its source when you deploy it (`ibc.sh deploy`, the web
 interface, apps): the deploy carries the source, and whoever joins reads it. A source is files by
-path, which import each other: `ibc.sh deploy NAME` deploys `contracts/NAME.sol`, or the contract
-`NAME` of the files in a folder `contracts/NAME/` (by their paths in it). Joining from the shell
+path, which import each other: `ibc.sh deploy NAME` deploys the contract `NAME` of
+`contracts/NAME.sol`, or of the files in a folder `contracts/NAME/` (by their paths in it). A
+contract may create others; `ibc.sh write` and `ibc.sh read` take their address as a fourth
+argument. Joining from the shell
 names the source: `ibc.sh join CONTRACT MEMBER_URL MEMBER_ID contracts/Chat.sol` (or the folder, or
 a `.json` of the files, as a contract's page copies them).
 

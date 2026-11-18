@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"testing"
 
@@ -42,7 +43,7 @@ func TestCompile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Contract != "Counter" || len(r.Code) < 100 || !strings.Contains(string(r.ABI), "increment") || r.Compiler.Version == "" {
+	if r.Contract != "Counter.sol:Counter" || len(r.Code) < 100 || !strings.Contains(string(r.ABI), "increment") || r.Compiler.Version == "" {
 		t.Fatalf("compile = %+v", r)
 	}
 	if r.SourceHash != identity.SourceHash(src).Hex() {
@@ -88,7 +89,7 @@ func TestCompileImport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Contract != "Calc" || !strings.Contains(string(r.ABI), "offer") || r.SourceHash != identity.SourceHash(withImport).Hex() {
+	if r.Contract != "Calc.sol:Calc" || len(r.ABIs) != 2 || len(r.Membership) != 0 || !strings.Contains(string(r.ABI), "offer") || r.SourceHash != identity.SourceHash(withImport).Hex() {
 		t.Fatalf("compile = %+v", r)
 	}
 }
@@ -145,7 +146,7 @@ func TestCompileInheritance(t *testing.T) {
 	if other, err := s.Compile(ctx, withInheritance, "other/Vault.sol:Vault"); err != nil || other.Code == r.Code {
 		t.Fatalf("the other Vault: %v", err)
 	}
-	if owned, err := s.Compile(ctx, withInheritance, "Owned"); err != nil || owned.Contract != "Owned" {
+	if owned, err := s.Compile(ctx, withInheritance, "Owned"); err != nil || owned.Contract != "base/Owned.sol:Owned" {
 		t.Fatalf("Owned: %v", err)
 	}
 }
@@ -184,7 +185,7 @@ func TestCheckFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	info, _ := json.Marshal(r.Compiler)
-	if got, why := tc.Check(ctx, withImport, info, r.Code); got != Verified {
+	if got, why := tc.Check(ctx, withImport, info, claimOf(r)); got != Verified {
 		t.Fatalf("check = %s (%s)", got, why)
 	}
 	changed := identity.Sources{}
@@ -192,12 +193,78 @@ func TestCheckFiles(t *testing.T) {
 		changed[p] = c
 	}
 	changed["lib/Math.sol"] = strings.Replace(changed["lib/Math.sol"], "a > b", "a >= b", 1)
-	if got, _ := tc.Check(ctx, changed, info, r.Code); got != Mismatch {
+	if got, _ := tc.Check(ctx, changed, info, claimOf(r)); got != Mismatch {
 		t.Fatalf("check of a changed file = %s", got)
 	}
 	// The paths are part of what is compiled.
 	moved := identity.Sources{"Calc.sol": strings.Replace(withImport["Calc.sol"], "./lib/", "./util/", 1), "util/Math.sol": withImport["lib/Math.sol"]}
-	if got, _ := tc.Check(ctx, moved, info, r.Code); got != Mismatch {
+	if got, _ := tc.Check(ctx, moved, info, claimOf(r)); got != Mismatch {
 		t.Fatalf("check of moved files = %s", got)
+	}
+}
+
+// claimOf is what a deploy of r claims.
+func claimOf(r Result) Claim {
+	return Claim{Contract: r.Contract, Code: r.Code, ABIs: r.ABIs, Membership: r.Membership}
+}
+
+// A deploy carries the ABIs and the membership functions: the check compares
+// them too.
+func TestCheckClaim(t *testing.T) {
+	s := testCompiler(t)
+	ctx := context.Background()
+	version, err := s.Version(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ShortVersion(version) != PinnedVersion {
+		t.Skipf("the test compiler is %s, not %s", version, PinnedVersion)
+	}
+	club := identity.Sources{"Club.sol": `// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+contract Club {
+    mapping(address => bool) public invited;
+    constructor() { invited[msg.sender] = true; }
+    function approve_partner(address who) external view returns (bool) { return invited[who]; }
+    function approve_removal(address) external pure returns (bool) { return true; }
+}
+`}
+	tc := &Toolchain{Native: s}
+	r, err := tc.Compile(ctx, club, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(r.Membership, []string{"approve_partner", "approve_removal"}) {
+		t.Fatalf("membership = %v", r.Membership)
+	}
+	info, _ := json.Marshal(r.Compiler)
+	if got, why := tc.Check(ctx, club, info, claimOf(r)); got != Verified {
+		t.Fatalf("check = %s (%s)", got, why)
+	}
+	lies := map[string]func(*Claim){
+		"another contract": func(c *Claim) { c.Contract = "Club.sol:Other" },
+		"fewer membership": func(c *Claim) { c.Membership = []string{"approve_partner"} },
+		"more membership":  func(c *Claim) { c.Membership = append(c.Membership, "approve_guest") },
+		"another ABI":      func(c *Claim) { c.ABIs = map[string]json.RawMessage{"Club.sol:Club": json.RawMessage("[]")} },
+		"an ABI too many": func(c *Claim) {
+			c.ABIs = map[string]json.RawMessage{"Club.sol:Club": r.ABI, "X.sol:X": json.RawMessage("[]")}
+		},
+	}
+	for name, lie := range lies {
+		c := claimOf(r)
+		lie(&c)
+		if got, _ := tc.Check(ctx, club, info, c); got != Mismatch {
+			t.Errorf("%s: %s", name, got)
+		}
+	}
+	// A membership function must return bool.
+	bad := identity.Sources{"Bad.sol": "pragma solidity ^0.8.0;\ncontract Bad { function approve_guest(address) external pure returns (uint256) { return 1; } }\n"}
+	if _, err := tc.Compile(ctx, bad, ""); !IsSourceError(err) || !strings.Contains(err.Error(), "must return bool") {
+		t.Errorf("approve_guest returning uint256: %v", err)
+	}
+	// In a source, a signature means one function.
+	clash := identity.Sources{"A.sol": "pragma solidity ^0.8.0;\ncontract A { function get() external pure returns (uint256) { return 1; } }\ncontract B { function get() external pure returns (string memory) { return \"b\"; } }\n"}
+	if _, err := tc.Compile(ctx, clash, "A"); !IsSourceError(err) || !strings.Contains(err.Error(), "get()") {
+		t.Errorf("get() returning uint256 and string: %v", err)
 	}
 }

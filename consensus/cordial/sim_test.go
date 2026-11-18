@@ -224,7 +224,7 @@ func (s *sim) tx(a *simAgent, kind, body string) identity.SignedTx {
 // call submits a call by a to the miner of via.
 func (s *sim) call(a, via *simAgent) {
 	a.seq++
-	stx := s.tx(a, identity.KindCall, fmt.Sprintf(`{"method":"m","values":{"n":%d}}`, a.seq))
+	stx := s.tx(a, identity.KindCall, fmt.Sprintf(`{"data":"0x12345678%064x"}`, a.seq))
 	s.submit(a, via, stx)
 }
 

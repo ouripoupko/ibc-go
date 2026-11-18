@@ -50,14 +50,14 @@
       "message": {
         "agent": "0x2c7536e3605d9c16a7a3d7b1898e529396a65c23",
         "functions": [
-          "post",
-          "like"
+          "post(string)",
+          "like(uint256)"
         ],
         "nodeKey": "0x57e3339b18e36035656375139a5e66b19dc7d60d",
         "nonce": "n3",
         "sourceHash": "0x2dc081a8d6d4714c79b5abd2e9b08c3a33b4ef1dcf946ef8b8cf6c495014f47b"
       },
-      "digest": "0x823a05c792de67b7d0ffeedc8b01c62c7d7478a3d4feb0c0cc407774ea217526"
+      "digest": "0x520ff18f636de49cb0ed89c71f0fae153c6cf7ba57ca272ae793878f2f9ddcd2"
     },
     {
       "type": "Consent",
@@ -66,13 +66,13 @@
         "app": "https://app.example",
         "appKey": "0x0426efcebd0ee9e34a669187e18b3a9122b2f733945b649cc9f9f921e9f9dad81290238bde9cc7bb330d150c67704dd25ae7055205744b6f31bf4070745872d0e6",
         "functions": [
-          "post"
+          "post(string)"
         ],
         "nonce": "n4",
         "read": true,
         "sourceHash": "0x2dc081a8d6d4714c79b5abd2e9b08c3a33b4ef1dcf946ef8b8cf6c495014f47b"
       },
-      "digest": "0x34dcda62e7b9155d9d5846211697f02f7df25328678e2875976eb9ef59412818"
+      "digest": "0xe8d6727f8cd607821b3ec1a1460be165496fbc4f7798abca07f7f44380d86bdd"
     },
     {
       "type": "Consent",

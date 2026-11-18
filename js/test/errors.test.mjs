@@ -19,16 +19,23 @@ async function fakeNode() {
     let body = '';
     req.on('data', (c) => { body += c; });
     req.on('end', () => {
-      const method = url.pathname.split('/').at(-1);
+      const action = url.searchParams.get('action');
       const json = (v) => res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(v));
-      if (url.searchParams.get('action') === 'contract_read') {
+      const fn = (name) => ({ type: 'function', name, inputs: [], outputs: [{ name: '', type: 'string' }], stateMutability: 'nonpayable' });
+      if (action === 'get_contract') return json({ id: '0xc', abis: { 'C.sol:C': [fn('good'), fn('bad')] } });
+      // The function's name stands for its calldata.
+      if (action === 'encode') return json({ data: `0x${Buffer.from(JSON.parse(body).abi.name).toString('hex')}` });
+      if (action === 'contract_read') {
+        const { method } = JSON.parse(JSON.parse(body).query.body);
         return json(method === 'bad' ? { error: 'bad: unexpected argument "x"' } : 'a string result');
       }
       // contract_write: the id now, the outcome on the stream.
+      const { data } = JSON.parse(JSON.parse(body).tx.body);
+      const method = Buffer.from(data.slice(2), 'hex').toString();
       const id = `0x${method}`;
       json(id);
       const event = method === 'bad'
-        ? { request: id, contract: '0xc', action: 'contract_write', reply: 'unknown method "bad"', error: 'unknown method "bad"' }
+        ? { request: id, contract: '0xc', action: 'contract_write', reply: 'execution reverted: bad', error: 'execution reverted: bad' }
         : { request: id, contract: '0xc', action: 'contract_write', reply: 'a string result' };
       setTimeout(() => { for (const s of streams) s.write(`data: ${JSON.stringify(event)}\n\n`); }, 20);
     });
@@ -48,7 +55,8 @@ test('a failed call throws; a string result does not', async () => {
   assert.equal(await ibc.read('0xc', 'good'), 'a string result');
   await assert.rejects(ibc.read('0xc', 'bad'), /unexpected argument/);
   assert.equal(await ibc.write('0xc', 'good'), 'a string result');
-  await assert.rejects(ibc.write('0xc', 'bad'), /unknown method/);
+  await assert.rejects(ibc.write('0xc', 'bad'), /execution reverted: bad/);
+  await assert.rejects(ibc.write('0xc', 'nope'), /unknown method "nope"/);
   ibc.close();
   await node.close();
 });

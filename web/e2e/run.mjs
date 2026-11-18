@@ -260,7 +260,7 @@ try {
   await pApp.waitForFunction(() => window.appReady === true);
   const approveAs = { from: pa, credential: alice.root.credentialId };
 
-  let a = { ...approveAs, check: ['post'], shot: 'approve-deploy' };
+  let a = { ...approveAs, check: ['post(string)'], shot: 'approve-deploy' };
   let line = await appClick(pApp, 'deploy', { approve: a });
   check('the app deployed a chat, approved on the node', /^deploy "0x/.test(line) && /wants to create a contract/.test(a.seen.title) && a.seen.permissions,
     `${line} · ${a.seen.title}`);
@@ -333,15 +333,15 @@ try {
   await pa.goto(`${A}/contract.html?id=${chat}`);
   await pa.waitForSelector('#apps-card:not(.hidden)', { timeout: 30000 });
   const perm = (fn) => `.app-perm[data-app="http://localhost:${APP_PORT}"] input[value="${fn}"]`;
-  check('the contract page shows the app\'s permissions', await pa.$eval(perm('post'), (b) => b.checked)
-    && !(await pa.$eval(perm('setTopic'), (b) => b.checked)));
+  check('the contract page shows the app\'s permissions', await pa.$eval(perm('post(string)'), (b) => b.checked)
+    && !(await pa.$eval(perm('setTopic(string)'), (b) => b.checked)));
   const savePerm = async () => {
     await pa.$eval('#apps-status', (e) => { e.textContent = ''; });
     await pa.click(`.app-perm[data-app="http://localhost:${APP_PORT}"] button`);
     await waitText(pa, '#apps-status', /Saved|rror/);
   };
   n = boxes.length;
-  await pa.click(perm('post'));
+  await pa.click(perm('post(string)'));
   await savePerm();
   check('unticked post, one approval', since(n).join() === 'Sign request: allow localhost:2799', since(n).join(' | '));
   let postPopup = newPopup();
@@ -352,7 +352,7 @@ try {
   await pApp.bringToFront(); // a background page does not poll
   await waitText(pApp, '#out', /post error/);
   await pa.bringToFront();
-  await pa.click(perm('post'));
+  await pa.click(perm('post(string)'));
   await savePerm();
   line = await appClick(pApp, 'post');
   check('ticked again: the app posts silently', /^post \d+$/.test(line), line);
@@ -393,7 +393,7 @@ try {
   await pApp3.goto(`http://localhost:${APP_PORT}/app.html?node=${encodeURIComponent(A)}&chat=${chat}`
     + `&member=${alice.agent}&memberNode=${encodeURIComponent(A)}`);
   await pApp3.waitForFunction(() => window.appReady === true);
-  a = { from: pApp3, check: ['post'] };
+  a = { from: pApp3, check: ['post(string)'] };
   line = await appClick(pApp3, 'join', { approve: a });
   check('carol joins through the app, with its permissions, in one approval', line === 'join "true verified"'
     && a.seen.permissions && /asks you to join/.test(a.seen.title), `${line} · ${a.seen.title}`);
@@ -444,6 +444,36 @@ try {
     && await pa.$$eval('#code .file-path', (els) => els.map((e) => e.textContent).join()) === 'Sum.sol,Tally.sol', await text(pa, '#details'));
   r = await runFn(pa, '#writes', 'count', [7]);
   check('count(7) -> 7, through the imported library', r.text === '7', r.text);
+
+  // An agreement of two contracts: World creates a Tally. The page reads the
+  // Tally's address from World, then calls the Tally at it.
+  await pa.goto(`${A}/`);
+  await pa.waitForSelector('#agent-area:not(.hidden)', { timeout: 30000 });
+  await (await pa.$('#d-source .source-files')).uploadFile(new URL('../../testdata/World.sol', import.meta.url).pathname);
+  await pa.waitForFunction(() => /World\.sol/.test(document.querySelector('#d-source ul.files')?.textContent ?? ''));
+  await pa.type('#d-contract', 'World');
+  await pa.click('#d-compile');
+  await waitText(pa, '#compile-status', /Compiled|error|not/, 90000);
+  await pa.$eval('#d-name', (e) => { e.value = 'world'; });
+  await pa.click('#d-submit');
+  await waitText(pa, '#deploy-status', /Deployed|rror/);
+  await pa.click('#deploy-status a');
+  await pa.waitForSelector('#contract-area:not(.hidden)');
+  check('the page offers the agreement\'s contracts', !(await pa.$eval('#target-card', (c) => c.classList.contains('hidden')))
+    && /Who may joinwhom the contract approves/.test(await text(pa, '#details')), await text(pa, '#details'));
+  r = await runFn(pa, '#reads', 'tally', []);
+  const tallyAt = r.text.trim();
+  check('World says where its Tally is', /^0x[0-9a-fA-F]{40}$/.test(tallyAt), r.text);
+  await pa.select('#target-contract', 'World.sol:Tally');
+  await pa.type('#target-address', tallyAt);
+  await pa.keyboard.press('Tab'); // the address is in: the page shows the Tally's functions
+  await pa.waitForFunction(() => document.querySelector('#writes form.fn[data-fn="add"]'));
+  r = await runFn(pa, '#writes', 'add', [3]);
+  check('add(3) on the Tally, at its address -> 3', r.text === '3', r.text);
+  r = await runFn(pa, '#writes', 'add', [101]);
+  check('a custom error, decoded', r.cls.includes('bad') && /TooMuch\(101\)/.test(r.text), r.text);
+  r = await runFn(pa, '#reads', 'last', []);
+  check('the Tally saw alice as msg.sender', r.text.trim() === alice.agent, r.text);
 
   check('message boxes closed', await pa.$eval('body', () => !document.querySelector('dialog.signing')?.open));
   console.log('passkey requests:', boxes.length);

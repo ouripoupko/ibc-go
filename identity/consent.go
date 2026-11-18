@@ -18,7 +18,7 @@ type Consent struct {
 	AppKey     hexutil.Bytes     `json:"appKey"`     // the app's key in the browser, P-256, uncompressed
 	SourceHash ethcommon.Hash    `json:"sourceHash"` // the contract's source (SourceHash); zero: every contract (the node's own page)
 	Read       bool              `json:"read"`       // may read without asking
-	Functions  []string          `json:"functions"`  // may have the node call these without asking
+	Functions  []string          `json:"functions"`  // may have the node call these without asking, by signature
 	Nonce      string            `json:"nonce"`
 }
 
@@ -66,6 +66,9 @@ func (c Consent) Hash() (ethcommon.Hash, error) {
 func (s SignedConsent) Verify() error {
 	if s.Signature.Certificate != nil {
 		return errors.New("a consent is signed by the root key")
+	}
+	if err := checkSignatures("consent", s.Consent.Functions); err != nil {
+		return err
 	}
 	if _, err := AddressOf(s.Consent.AppKey); err != nil {
 		return errors.New("consent: the app key must be a public key, 65 bytes uncompressed")

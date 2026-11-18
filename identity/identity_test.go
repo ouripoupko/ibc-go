@@ -45,8 +45,9 @@ func TestTransactionChecks(t *testing.T) {
 	cases := map[string]Transaction{
 		"unknown kind":          {Kind: "mint", Contract: "c", Agent: agent, Body: "{}"},
 		"deploy with contract":  {Kind: KindDeploy, Contract: "c", Agent: agent, Body: `{"code":"60","abi":[],"node":"u","nodeKey":"0x0000000000000000000000000000000000000001"}`},
-		"call without contract": {Kind: KindCall, Agent: agent, Body: `{"method":"m"}`},
-		"call without method":   {Kind: KindCall, Contract: "c", Agent: agent, Body: `{}`},
+		"call without contract": {Kind: KindCall, Agent: agent, Body: `{"data":"0x12345678"}`},
+		"call without data":     {Kind: KindCall, Contract: "c", Agent: agent, Body: `{}`},
+		"call with short data":  {Kind: KindCall, Contract: "c", Agent: agent, Body: `{"data":"0x1234"}`},
 		"join without key":      {Kind: KindJoin, Contract: "c", Agent: agent, Body: `{"node":"u"}`},
 		"join without source":   {Kind: KindJoin, Contract: "c", Agent: agent, Body: `{"node":"u","nodeKey":"0x0000000000000000000000000000000000000001"}`},
 		"deploy without source": {Kind: KindDeploy, Agent: agent, Body: `{"code":"60","abi":[],"node":"u","nodeKey":"0x0000000000000000000000000000000000000001"}`},
@@ -62,14 +63,14 @@ func TestTransactionChecks(t *testing.T) {
 		}
 	}
 	ok := Transaction{Kind: KindCall, Contract: "c", Agent: agent, Nonce: NewNonce(),
-		Body: `{"method":"increment","values":{"amount":5}}`}
+		Body: `{"to":"0x00000000000000000000000000000000000000aa","data":"0x7cf5dab00000000000000000000000000000000000000000000000000000000000000005"}`}
 	stx, _ := SignTx(ok, write)
 	if _, err := stx.Verify(); err != nil {
 		t.Fatal(err)
 	}
 	body, _ := ok.ParseBody()
-	if v := body.(*CallBody).Values["amount"]; v.(interface{ String() string }).String() != "5" {
-		t.Fatalf("amount = %v (%T)", v, v)
+	if c := body.(*CallBody); c.To == nil || *c.To != ethcommon.HexToAddress("0xaa") || len(c.Data) != 36 {
+		t.Fatalf("call = %+v", c)
 	}
 }
 
@@ -90,7 +91,7 @@ func TestRegistration(t *testing.T) {
 	}
 	// Only the root key registers: not the node, even under a grant.
 	cert, _ := CertifyGrant(Grant{Agent: reg.Agent, NodeKey: Address(node), SourceHash: ethcommon.HexToHash("0x01"),
-		Functions: []string{"m"}, Nonce: "n"}, Secp256k1Signer{Key: key})
+		Functions: []string{"m()"}, Nonce: "n"}, Secp256k1Signer{Key: key})
 	byNode, _ := SignRegistration(reg, Secp256k1Signer{Key: node, Cert: cert})
 	if _, _, err := byNode.Verify(); err == nil || !strings.Contains(err.Error(), "signed by the root key") {
 		t.Fatalf("registration by the node: %v", err)

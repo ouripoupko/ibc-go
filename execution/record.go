@@ -3,7 +3,11 @@ package execution
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"maps"
+
+	ethcommon "github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 
 	"github.com/ouripoupko/ibc-go/identity"
 )
@@ -31,11 +35,17 @@ var ActionForKind = map[string]string{
 // Record is a request record: what the dispatcher builds from an HTTP
 // request, and what consensus hands to execution for each transaction.
 type Record struct {
-	Type      string  `json:"type,omitempty"`
-	Action    string  `json:"action,omitempty"`
-	Contract  string  `json:"contract,omitempty"`
-	Agent     string  `json:"agent,omitempty"`
-	Method    string  `json:"method,omitempty"`
+	Type     string `json:"type,omitempty"`
+	Action   string `json:"action,omitempty"`
+	Contract string `json:"contract,omitempty"`
+	Agent    string `json:"agent,omitempty"`
+	// Method is the function a request names, in the API (a URL's last
+	// part); execution does not read it.
+	Method string `json:"method,omitempty"`
+	// To and Data are a call's target, a contract in the agreement's world
+	// (empty: the root contract), and its calldata, hex.
+	To        string  `json:"to,omitempty"`
+	Data      string  `json:"data,omitempty"`
 	Message   Message `json:"message"`
 	Timestamp string  `json:"timestamp,omitempty"`
 	HashCode  string  `json:"hash_code,omitempty"`
@@ -45,6 +55,33 @@ type Record struct {
 	// Tx is the signed transaction the record executes, if any. The ledger
 	// keeps it, so every record can be checked against its agent's signature.
 	Tx *identity.SignedTx `json:"tx,omitempty"`
+}
+
+// Call returns the record's call: its target (nil: the root contract) and
+// its calldata.
+func (r Record) Call() (*ethcommon.Address, []byte, error) {
+	var to *ethcommon.Address
+	if r.To != "" {
+		if !ethcommon.IsHexAddress(r.To) {
+			return nil, nil, fmt.Errorf("invalid call target %q", r.To)
+		}
+		a := ethcommon.HexToAddress(r.To)
+		to = &a
+	}
+	data, err := hexutil.Decode(r.Data)
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid call data: %w", err)
+	}
+	return to, data, nil
+}
+
+// SetCall sets a record's call.
+func (r *Record) SetCall(to *ethcommon.Address, data []byte) {
+	r.To = ""
+	if to != nil {
+		r.To = to.Hex()
+	}
+	r.Data = hexutil.Encode(data)
 }
 
 // Message is a record's message. Values is what the code reads; Fields keeps

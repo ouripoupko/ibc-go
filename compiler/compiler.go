@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ouripoupko/ibc-go/common"
 	"github.com/ouripoupko/ibc-go/identity"
 )
 
@@ -37,11 +38,16 @@ var Settings = map[string]any{
 
 // Result is a compiled contract.
 type Result struct {
-	Contract   string          `json:"contract"` // the contract's name in the source ("Name" or "path:Name")
-	Code       string          `json:"code"`     // the creation bytecode, hex
-	ABI        json.RawMessage `json:"abi"`
-	SourceHash string          `json:"sourceHash"` // identity.SourceHash of the source
-	Compiler   Info            `json:"compiler"`
+	Contract string          `json:"contract"` // the contract's name in the source: "path:Name"
+	Code     string          `json:"code"`     // its creation bytecode, hex
+	ABI      json.RawMessage `json:"abi"`      // its ABI
+	// ABIs is the ABI of every contract in the source, by name ("path:Name"),
+	// and Membership the membership functions the contract defines: with
+	// Code, what a deploy carries, and a joining node checks.
+	ABIs       map[string]json.RawMessage `json:"abis"`
+	Membership []string                   `json:"membership"`
+	SourceHash string                     `json:"sourceHash"` // identity.SourceHash of the source
+	Compiler   Info                       `json:"compiler"`
 }
 
 // Info says how the code was compiled.
@@ -151,22 +157,52 @@ func standardJSON(ctx context.Context, run runner, source identity.Sources, sett
 	contracts := map[string]contract{}
 	for path, cs := range res.Contracts {
 		for n, c := range cs {
-			if c.EVM.Bytecode.Object != "" { // skip interfaces and abstract contracts
-				contracts[path+":"+n] = contract{ABI: c.ABI, Code: c.EVM.Bytecode.Object}
-			}
+			// Interfaces and abstract contracts have no code, but an ABI.
+			contracts[path+":"+n] = contract{ABI: c.ABI, Code: c.EVM.Bytecode.Object}
 		}
 	}
 	return contracts, nil
 }
 
-// pick returns the contract that name names: "path:Name", or "Name" if only
-// one file has a contract of that name; or the only contract, if name is
-// empty. It returns the contract's name as name gave it ("Name" for an empty
-// name).
+// describe returns what a deploy of the contract key carries besides its
+// code: the ABIs of all the source's contracts, and the membership functions
+// the contract defines. It refuses a source in which a selector means two
+// functions (see common.ABISet), and a membership function that does not
+// return bool.
+func describe(contracts map[string]contract, key string) (map[string]json.RawMessage, []string, error) {
+	abis := make(map[string]json.RawMessage, len(contracts))
+	for k, c := range contracts {
+		abis[k] = c.ABI
+	}
+	set, err := common.NewABISet(abis)
+	if err != nil {
+		return nil, nil, errSource{[]string{err.Error()}}
+	}
+	root, _ := set.Contract(key)
+	membership := []string{}
+	for _, name := range identity.MembershipFunctions {
+		for _, m := range root.Methods {
+			if m.Sig != identity.MembershipSignature(name) {
+				continue
+			}
+			if len(m.Outputs) != 1 || m.Outputs[0].Type.String() != "bool" {
+				return nil, nil, errSource{[]string{fmt.Sprintf("%s must return bool: it decides a membership change", m.Sig)}}
+			}
+			membership = append(membership, name)
+		}
+	}
+	return abis, membership, nil
+}
+
+// pick returns the deployable contract that name names: "path:Name", or
+// "Name" if only one file has a contract of that name; or the only one, if
+// name is empty. It returns the contract's key, "path:Name".
 func pick(contracts map[string]contract, name string) (string, contract, error) {
 	keys := make([]string, 0, len(contracts))
-	for k := range contracts {
-		keys = append(keys, k)
+	for k, c := range contracts {
+		if c.Code != "" {
+			keys = append(keys, k)
+		}
 	}
 	sort.Strings(keys)
 	shortName := func(key string) string { return key[strings.LastIndex(key, ":")+1:] }
@@ -174,9 +210,9 @@ func pick(contracts map[string]contract, name string) (string, contract, error) 
 		if len(keys) != 1 {
 			return "", contract{}, fmt.Errorf("the source has %d deployable contracts (%s): say which one", len(keys), strings.Join(keys, ", "))
 		}
-		return shortName(keys[0]), contracts[keys[0]], nil
+		return keys[0], contracts[keys[0]], nil
 	}
-	if c, ok := contracts[name]; ok {
+	if c, ok := contracts[name]; ok && c.Code != "" {
 		return name, c, nil
 	}
 	var found []string
@@ -187,7 +223,7 @@ func pick(contracts map[string]contract, name string) (string, contract, error) 
 	}
 	switch len(found) {
 	case 1:
-		return name, contracts[found[0]], nil
+		return found[0], contracts[found[0]], nil
 	case 0:
 		return "", contract{}, fmt.Errorf("no deployable contract %q in the source (it has: %s)", name, strings.Join(keys, ", "))
 	default:
@@ -280,15 +316,19 @@ func compileResult(ctx context.Context, run runner, version string, source ident
 	if err != nil {
 		return Result{}, err
 	}
-	name, c, err := pick(contracts, name)
+	key, c, err := pick(contracts, name)
 	if err != nil {
 		return Result{}, err
 	}
 	if _, err := identity.CodeHash(c.Code); err != nil {
 		return Result{}, err
 	}
-	return Result{Contract: name, Code: c.Code, ABI: c.ABI, SourceHash: identity.SourceHash(source).Hex(),
-		Compiler: Info{Version: version, Settings: Settings}}, nil
+	abis, membership, err := describe(contracts, key)
+	if err != nil {
+		return Result{}, err
+	}
+	return Result{Contract: key, Code: c.Code, ABI: c.ABI, ABIs: abis, Membership: membership,
+		SourceHash: identity.SourceHash(source).Hex(), Compiler: Info{Version: version, Settings: Settings}}, nil
 }
 
 func (s *Solc) run(ctx context.Context, stdin []byte, args ...string) ([]byte, error) {

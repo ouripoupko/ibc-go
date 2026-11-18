@@ -110,6 +110,8 @@ export function sourceHashOf(source) {
     });
     return toHex(keccak256(all));
 }
+/** A function signature's selector ("pay(address,uint256)" -> 4 bytes, hex): how calldata starts. */
+export const selectorOf = (signature) => toHex(keccak256(new TextEncoder().encode(signature)).slice(0, 4));
 /** A random nonce, as hex without 0x. */
 export function nonce() {
     const bytes = new Uint8Array(16);
@@ -247,9 +249,9 @@ export function passkeySigner({ credentialId, publicKey, rpId = location.hostnam
     };
 }
 /** Signs a message of one of TYPES. Returns its digest and envelope. */
-export async function sign(signer, type, message) {
+export async function sign(signer, type, message, label) {
     const digest = digestOf(type, message);
-    return { digest, envelope: await signer.signDigest(digest, { type, message }) };
+    return { digest, envelope: await signer.signDigest(digest, { type, message, ...(label ? { label } : {}) }) };
 }
 /**
  * Signs several messages with one signature: one envelope for each, in

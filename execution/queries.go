@@ -12,10 +12,11 @@ import (
 // contract_view.py). None of these change anything.
 
 // SummaryFields are the contract document fields returned by
-// get_contracts / get_contract: Python's list, plus abi and the EVM fields.
+// get_contracts / get_contract: the deploy's labels, source and what the
+// compiler made of it, and the EVM fields.
 var SummaryFields = []string{
 	"id", "name", "contract", "code", "protocol", "default_app", "pid", "address", "profile", KeySource, "compiler", KeyRole, KeyHosts, KeyPublic, KeySourceCheck, KeySourceCheckReason,
-	common.KeyABI, common.KeyEVMAddress, common.KeyStateRoot, common.KeyBlockNumber, common.KeyDeployError,
+	common.KeyABIs, common.KeyMembership, common.KeyEVMAddress, common.KeyStateRoot, common.KeyBlockNumber, common.KeyDeployError,
 }
 
 // AgentFields are what a registration stores about an agent: its node's URL
@@ -148,5 +149,9 @@ func (n *Navigator) read(agent, caller string, record Record, gas uint64) (commo
 	if err := st.Run("", ""); err != nil && !isDeterministic(err) {
 		return common.Result{}, err
 	}
-	return st.ViewGas(caller, record.Method, record.Message.Values, record.Timestamp, gas)
+	to, data, err := record.Call()
+	if err != nil {
+		return common.Result{}, &common.ContractError{Err: err}
+	}
+	return st.ViewGas(caller, to, data, record.Timestamp, gas)
 }

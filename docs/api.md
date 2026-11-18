@@ -9,7 +9,7 @@ The complete HTTP interface of an ibc node. For a guided introduction with examp
 - [The node](#the-node): `node_info`
 - [Agents](#agents): `register_agent`, `is_exist_agent`, `agent_info`
 - [Apps](#apps): `register_app`, `get_apps`, `revoke_app`
-- [Contracts](#contracts): `compile`, `deploy_contract`, `get_contracts`, `get_contract`
+- [Contracts](#contracts): `compile`, `encode`, `deploy_contract`, `get_contracts`, `get_contract`
 - [Calling a contract](#calling-a-contract): `contract_write`, `contract_read`
 - [Public contracts](#public-contracts): `set_public`, `public_read`
 - [Membership](#membership): `join_contract`, `leave_contract`, `rotate_key`
@@ -191,11 +191,12 @@ A signature is sent as an envelope that carries everything needed to check it:
 | `batch` | For a batch signature: the digests of all the messages signed at once. The key signed the `Batch` digest, and this message's digest must be in the list |
 
 A transaction is accepted if the agent's root key signed it, or if the agent's node signed it under
-a grant the root signed, for a `call` to a function the grant names. Execution then also checks the
+a grant the root signed, for a `call` whose calldata starts with the selector of a function the
+grant names. Execution then also checks the
 grant's `sourceHash` against the hash of the contract's source, and its `nodeKey` against the agent's
 node in this contract; otherwise the call is recorded with the result `"the node's grant does not
 apply: it is for another source"` (or `for another node`) and changes nothing. Errors include: `signature does not match
-the agent`; `the grant does not let the node call setTopic: it needs the root key`; `a node signs only
+the agent`; `the grant does not let the node call function 0x…: it needs the root key`; `a node signs only
 calls: this transaction needs the root key`; `grant: not signed by the agent's root key`; `signature:
 not by the node the grant names`; `webauthn: the user did not approve`; `webauthn: the signature is
 for another message`; `signature: the message is not in its batch`.
@@ -229,8 +230,8 @@ FILE|DIR...`; `ibc source` prints the files as JSON). The bodies, by kind:
 
 | Kind | Body |
 |---|---|
-| `deploy` | `{"name", "contract", "protocol", "default_app", "profile", "code", "abi", "constructor", "node", "nodeKey", "source", "compiler"}`: see [deploy_contract](#deploy_contract) |
-| `call` | `{"method": "increment", "values": {"amount": 5}}` |
+| `deploy` | `{"name", "protocol", "default_app", "profile", "node", "nodeKey", "source", "compiler", "contract", "code", "args", "abis", "membership"}`: see [deploy_contract](#deploy_contract) |
+| `call` | `{"to": "0x…", "data": "0x7cf5dab0…"}`: calldata, a function's selector and its ABI-encoded arguments, for the contract at `to` in the agreement (no `to`: the root contract). See [calling a contract](#calling-a-contract) |
 | `join` | `{"node": "<your node's URL>", "nodeKey": "<your node's key>", "profile": …}` |
 | `leave` | `{"member": "<agent id>"}`: yourself to leave, or another member to remove |
 | `rotate_key` | `{"node": "<your new node's URL>", "nodeKey": "<its key>"}` |
@@ -266,15 +267,16 @@ type is not a transaction's, so a signed query can never be used as a transactio
 
 | Action | Body |
 |---|---|
-| `contract_read`, `contract_write` | `{"method": "count", "values": {…}}` |
+| `contract_read`, `contract_write` | `{"method": "count", "values": {…}, "to": "0x…"}`, or `{"data": "0x…", "to": "0x…"}`: see [calling a contract](#calling-a-contract) |
 | `revoke_app` | `{"app": "https://wishes.example.com"}` |
 | `get_contracts`, `get_contract`, `get_apps`, `stream` | `""` |
 
 ## Values
 
-Contract arguments are sent in `values`, an object keyed by the parameter names in the contract's
+Contract arguments are sent in `values`, an object keyed by the parameter names in the function's
 ABI. Every parameter must be given, and no others. A parameter without a name is keyed by its
-position: `"0"`, `"1"`, and so on.
+position: `"0"`, `"1"`, and so on. The node encodes them (in reads, silent calls, public reads and
+[`encode`](#encode)); a transaction carries the encoded calldata.
 
 | ABI type | Sent as | Returned as |
 |---|---|---|
@@ -380,16 +382,20 @@ browsers.
 PUT /ibc/app/<agent>?action=register_app
 {
   "consent": {"consent": {"agent": "0x86D6…", "app": "https://wishes.example.com", "appKey": "0x04…",
-                          "sourceHash": "0x…", "read": true, "functions": ["post"], "nonce": "…"},
+                          "sourceHash": "0x…", "read": true, "functions": ["post(string)"], "nonce": "…"},
               "signature": <the root key's envelope>},
   "grant":   {"grant": {"agent": "0x86D6…", "nodeKey": "<this node's key>", "sourceHash": "0x…",
-                        "functions": ["post"], "nonce": "…"},
+                        "functions": ["post(string)"], "nonce": "…"},
               "signature": <the root key's envelope>}
 }
 ```
 
 - The root key signs both. `grant` is needed when `functions` is not empty, and must name the same
   agent, code and functions, and this node's key.
+- Functions are named by their signature, as Solidity computes selectors: the name and the
+  parameters' canonical types, without spaces (`post(string)`, `vote((uint8,bytes32)[])`). In a
+  source, a signature means one function (see [compile](#compile)), so it names the same function
+  in every contract of the agreement that has it.
 - A consent replaces the app's permission for that source. A `sourceHash` of zero means every contract,
   and may only allow reading: the node's own page uses it.
 - A consent also connects its `appKey` as one of the app's browsers.
@@ -444,16 +450,50 @@ that name; it may be omitted if the source has only one deployable contract (a l
 contract imported from another file counts as one, so a source of several files usually names it).
 An import of a file not in `source` does not compile.
 
-**Reply:** `{"contract": "Chat", "code": "6080…", "abi": [...], "sourceHash": "0x…", "compiler":
-{"version": "0.8.38+commit.1835d247.Emscripten.clang", "settings": {"optimizer": {"enabled": true, "runs": 200}}}}`.
+**Reply:** what a deploy carries:
+
+```json
+{"contract": "Chat.sol:Chat", "code": "6080…", "abi": [...],
+ "abis": {"Chat.sol:Chat": [...], "lib/Names.sol:Names": [...]}, "membership": ["approve_guest"],
+ "sourceHash": "0x…",
+ "compiler": {"version": "0.8.38+commit.1835d247.Emscripten.clang", "settings": {"optimizer": {"enabled": true, "runs": 200}}}}
+```
+
+`contract` is the contract's name in the source, `path:Name`; `code` its creation bytecode and
+`abi` its ABI; `abis` the ABIs of all the source's contracts, by name; `membership` the
+[membership functions](#membership) the contract defines.
+
+In a source, a selector (the first 4 bytes of the keccak256 of a function's signature) must mean
+one function: the same signature, outputs, and kind (a read, or a transaction) in every contract
+that has it; and one custom error. So calldata alone says which function it calls, whatever
+contract runs it. A membership function must take an address and return `bool`.
+
 **Errors:** `solc 0.8.38: …` (the node could not get its compiler); `the source does not compile:
 …`; `the source has 2 deployable contracts (Chat.sol:Chat, lib/Names.sol:Names): say which one`;
-`2 files have a contract "Vault" (…): name it as path:Name`; `source file path "…": …`.
+`2 files have a contract "Vault" (…): name it as path:Name`; `source file path "…": …`;
+`get() means different functions in A.sol:A and A.sol:B (outputs or view): make them the same, or
+rename one`; `approve_guest(address) must return bool: it decides a membership change`.
 
 The node compiles with the Solidity version this release of ibc pins (0.8.38): with the `-solc`
 compiler if it is that version, or else with the solc-js build of it, which the node downloads from
 soliditylang.org into its data directory the first time, checks against the release list's hash,
 and runs with Node.js.
+
+### `encode`
+
+ABI-encodes values for one function or constructor, for clients that sign transactions: a
+function's calldata, or a constructor's arguments (`args` in a deploy). No signature: it is a
+computation.
+
+```
+POST /ibc/app?action=encode
+{"abi": {"type": "function", "name": "increment", "inputs": [{"name": "amount", "type": "uint256"}], …},
+ "values": {"amount": 5}}
+```
+
+`abi` is one item of an ABI, as `get_contract` or `compile` returns it. **Reply:**
+`{"data": "0x7cf5dab0…05"}`. **Errors:** as for [values](#values): `increment: missing argument
+"amount"`, `increment: unexpected argument "x"`, `increment: argument "amount": …`.
 
 ### `deploy_contract`
 
@@ -469,28 +509,31 @@ The body:
 
 | Field | Required | Meaning |
 |---|---|---|
-| `code` | yes | The contract's bytecode, as hex, with or without `0x`: from [compile](#compile) |
-| `abi` | yes | The contract's ABI (`.abi`), as a JSON array |
-| `constructor` | if the constructor has parameters | The constructor's arguments, as [values](#values) |
+| `contract`, `code`, `abis`, `membership` | yes (`membership` may be empty) | From [compile](#compile): the root contract's name, its creation bytecode (hex), the ABIs of the source's contracts, and the membership functions it defines |
+| `args` | if the constructor has parameters | The constructor's arguments, ABI-encoded (hex): from [encode](#encode) |
 | `node` | yes | This node's URL |
 | `nodeKey` | yes | This node's key, from `node_info` |
 | `protocol` | no | The consensus protocol: `cordial` (the default; `BFT` means the same) or `immediate`, which orders the creator's own transactions locally, with no partners, for testing |
-| `source`, `compiler` | yes | The Solidity [source](#transactions) (its files, by path) and how the node compiled `code` from it (the `compiler` of [compile](#compile)). Joins name the source's hash, and a joiner's node compiles the source again with that compiler and compares |
-| `contract` | no | The contract in the source, as [compile](#compile) named it (`Name` or `path:Name`) |
+| `source`, `compiler` | yes | The Solidity [source](#transactions) (its files, by path) and how the node compiled it (the `compiler` of [compile](#compile)). Joins name the source's hash, and a joiner's node compiles the source again with that compiler and checks `code`, `abis` and `membership` against it |
 | `name`, `default_app`, `profile` | no | Labels kept with the contract and returned by `get_contract` |
+
+An agreement's state is a small EVM world: the root contract, and the contracts it creates. Its
+partners execute calldata, and never read `abis`: users' nodes use them to encode calls and decode
+results.
 
 **Reply:** the transaction id, which is the new contract's id. Use it as `<contract>` in every later
 call.
 
 **Event:** `deploy_contract`, with `contract` set to the contract's id. `reply` is `true` if the
 contract was deployed, or the error as a string, for example
-`"execution reverted: a poll needs at least two options"` or
-`"constructor: missing argument \"start\""`. A contract whose deployment failed stays failed: every
+`"execution reverted: a poll needs at least two options"`, or `"execution reverted"` for
+constructor arguments that do not decode. A contract whose deployment failed stays failed: every
 later call to it is answered with `"contract deployment failed: <reason>"`.
 
 **Errors:** `unknown agent "0x…"` (register first); `deploy names node key 0x…, this node's key is
 0x…`; `consensus: unknown protocol "…"`; `deploy body needs the source and the compiler that compiled
-it`.
+it`; `deploy body needs the abis of the source's contracts, … among them`; `deploy body:
+membership: "…" is not a membership function`.
 
 ### `get_contracts`
 
@@ -516,43 +559,56 @@ contract.
 
 ## Calling a contract
 
+An agreement's state holds its root contract and the contracts it creates, at EVM addresses. A call
+runs on one of them: the root contract, or the one at `to`. Contracts call each other as on
+Ethereum, and every contract sees `msg.sender` as the agent who signed (or the contract that called
+it).
+
+Partners execute calldata. The node speaks names for its users and their apps: a read, a silent
+call or a public read names a function, by name (`"count"`) or, if the source has several of that
+name, by signature (`"pay(address,uint256)"`), with its [values](#values); the node finds it in the
+deploy's `abis`, encodes the call, and decodes the result. They may give `data`, calldata, instead.
+
 ### `contract_write`
 
 A transaction: runs a contract function and keeps its changes. All partners apply it, in the order
 the consensus protocol gives.
 
 ```
-POST /ibc/app/<agent>/<contract>/<method>?action=contract_write
+POST /ibc/app/<agent>/<contract>?action=contract_write
 {"tx": {"contract": "<contract>", "kind": "call", "agent": "<agent>", "nonce": "…",
-        "body": "{\"method\":\"<method>\",\"values\":{…}}"}, "signature": <the root key's envelope>}
+        "body": "{\"to\":\"0x…\",\"data\":\"0x7cf5dab0…\"}"}, "signature": <the root key's envelope>}
 ```
 
-The contract and method in the URL must match the transaction's.
+The contract in the URL must match the transaction's. The client makes `data` before signing: it
+finds the function in the contract's `abis` (from [`get_contract`](#get_contract)) and encodes it
+with [`encode`](#encode).
 
 **A silent call, by an app.** The body may instead be a [query](#queries) signed by an app's key, with
-action `contract_write` and body `{"method", "values"}`. If the agent lets the app call this function
-silently (its [consent](#register_app)), the node signs the call with its own key, under the agent's
-grant, and sends it to consensus; the reply and the event are the same. Otherwise the answer is
-`{"message": "calling <method> needs your approval on your node's page"}`: send the user to the
-approval page.
+action `contract_write` and body `{"method", "values", "to"}`. If the agent lets the app call this
+function silently (its [consent](#register_app)), the node encodes the call, signs it with its own
+key, under the agent's grant, and sends it to consensus; the reply and the event are the same.
+Otherwise the answer is `{"message": "calling <signature> needs your approval on your node's page"}`:
+send the user to the approval page.
 
 **Reply:** the transaction id.
 
-**Event:** `contract_write`, with `reply` set to the function's result. If the function fails,
-`error` is set to the reason, `reply` is the same text, nothing the function did is kept, and
-`state_root` is unchanged. Check `error`, not the type of `reply`: a function may return a string.
+**Event:** `contract_write`, with `reply` set to the function's result, which the node decodes with
+the source's ABIs (data it cannot decode stays hex). `selector` is the call's function selector. If
+the function fails, `error` is set to the reason, `reply` is the same text, nothing the function did
+is kept, and `state_root` is unchanged. Check `error`, not the type of `reply`: a function may return
+a string.
 
 | `error` | Meaning |
 |---|---|
-| `"execution reverted: <reason>"` | The function reverted with this reason (`require`, `revert`, or a custom error, shown as `Name(arg, …)`) |
-| `"execution reverted"` | The function reverted without a reason |
-| `"unknown method \"<method>\""` | The ABI has no function with this name |
-| `"<method>: missing argument \"<name>\""` | A parameter is missing from `values` |
-| `"<method>: unexpected argument \"<name>\""` | `values` has a key the function does not have |
-| `"<method>: argument \"<name>\": <problem>"` | A value of the wrong type or out of range |
+| `"execution reverted: <reason>"` | The function reverted with this reason (`require`, `revert`, or a custom error of the source, shown as `Name(arg, …)`; `revert` has its data, hex) |
+| `"execution reverted"` | The function reverted without a reason, or no function of the contract has the call's selector |
 | `"out of gas"` | The call used more than 100 million gas |
 | `"contract deployment failed: <reason>"` | The contract's constructor failed |
-| `"get_partners: not implemented"` | Also `get_parameters`: built-in methods that are not defined yet |
+
+A function, or values, that the node cannot encode are refused before anything is signed: `unknown
+method "incremnt"`, `increment: missing argument "amount"` (from `encode`, or as the `message` of a
+silent call).
 
 **Errors** (request not accepted): `consensus: unknown contract 0x…` (the agent is not a partner
 of this contract on this node); `transaction signed by 0x…, sent as 0x…`; `signature does not
@@ -563,26 +619,28 @@ match the agent`; `0x… is not a member`.
 Runs a `view` or `pure` function of a contract: one that does not change the state. Nothing goes
 through consensus, nothing is added to the ledger, and no event is sent. A function that may change
 the state is a transaction: send it with [`contract_write`](#contract_write); reading it answers
-`"<method> changes state: send it as a transaction (contract_write)"`. The body is a signed
-[query](#queries):
+`{"message": "<method> changes state: send it as a transaction (contract_write)"}`. The body is a
+signed [query](#queries), whose body names the function and its values (or gives `data`), and the
+contract it runs on (`to`; default: the root contract):
 
 ```
-POST /ibc/app/<agent>/<contract>/<method>?action=contract_read
+POST /ibc/app/<agent>/<contract>?action=contract_read
 {"query": {"agent": "<agent>", "action": "contract_read", "target": "<agent>", "contract": "<contract>",
-           "body": "{\"method\":\"getValue\",\"values\":{\"who\":\"0x86D6…\"}}",
+           "body": "{\"method\":\"getValue\",\"values\":{\"who\":\"0x86D6…\"},\"to\":\"0x…\"}",
            "time": 1789000000, "nonce": "…"},
  "signature": { "scheme": "p256", "key": "0x04…", "sig": "0x…" }}
 ```
 
 The query is signed by the agent's root key, or by an app the agent lets read this contract's code
 (otherwise: `reading this contract needs your approval on your node's page`). The agent reads its own
-copy, and the function sees `msg.sender` set to **the agent**. The `<method>` in the URL is optional;
-if given, it must match the query's. The function sees the latest state, and `block.timestamp` set to the
+copy, and the function sees `msg.sender` set to **the agent**. A `<method>` after the contract in
+the URL is optional; if given, it must be the query's function. The function sees the latest state, and `block.timestamp` set to the
 time of the request.
 
-**Reply:** the function's result, or `{"error": "<reason>"}` if the contract failed it (the same
-reasons as for `contract_write`). `{"message": "no such contract"}` if the agent has no such contract, or its
-deployment has not finished yet.
+**Reply:** the function's result, decoded, or `{"error": "<reason>"}` if the contract failed it (the
+same reasons as for `contract_write`). `{"message": "no such contract"}` if the agent has no such
+contract, or its deployment has not finished yet; `{"message": "<method>: missing argument …"}` and
+the like for values the node cannot encode.
 
 For a contract the agent is a [guest](#guests) of, the node sends the read to a host, which runs it
 on its copy with `msg.sender` set to the agent. The reply is the same; if no host answers:
@@ -635,11 +693,13 @@ Anyone's read of a public contract: no key, no signature. The URL names the agen
 read, since a node keeps a copy per agent.
 
 ```
-GET /ibc/app/<agent>/<contract>/<method>?action=public_read&values=<the arguments as URL-encoded JSON>
+GET /ibc/app/<agent>/<contract>/<method>?action=public_read&values=<the arguments as URL-encoded JSON>&to=<address>
 ```
 
 `values` is the same object as in a `contract_read` body, e.g. `{"limit":5}`, and may be left out
-for a function without arguments.
+for a function without arguments. `to` is the contract it runs on (default: the root contract).
+`data=<calldata>` may replace the method and values. Only `view` and `pure` functions:
+`{"message": "<method> changes state: a public read runs only view and pure functions"}`.
 
 **Reply:** the function's result, or `{"error": …}` as for `contract_read`, e.g.
 `{"error": "execution reverted: sign in to read the messages"}`. `{"message": "agent 0x… has no public
@@ -658,6 +718,17 @@ A contract's partners change through `join`, `leave` and `rotate_key` transactio
 ordered like every other transaction. While one is being decided, the contract holds back other
 transactions (see [consensus design](consensus.md#10-membership-changes)). A contract may also take
 [guests](#guests), who are not partners in consensus.
+
+The root contract decides the changes whose **membership function** it defines; the deploy lists
+them (`membership`), and a joining node checks the list against the source. Each takes the subject's
+address and returns `bool`: `true` approves, anything else (`false`, a revert) refuses. The others
+get the defaults:
+
+| Function | Decides | Without it |
+|---|---|---|
+| `approve_partner(address)` | a join, called as the joining agent | approved |
+| `approve_guest(address)` | a guest's join, called as the joining agent | refused |
+| `approve_removal(address)` | removing another member, called as the requester | refused |
 
 ### `join_contract`
 
@@ -684,8 +755,8 @@ once it holds the agent's copy.
 **What happens** ([consensus design](consensus.md#10-membership-changes)):
 
 1. The partners order the join. They refuse it if its `sourceHash` is not the hash of the contract's
-   source; otherwise the contract's `approve_partner(address)` function decides, called as the
-   joining agent (a contract without it accepts everyone). The partners' own streams see a `join`
+   source; otherwise the root contract's `approve_partner(address)` function decides, called as the
+   joining agent (an agreement whose root contract has none accepts everyone). The partners' own streams see a `join`
    event with the decision.
 2. Each partner's node welcomes the joining node with where the join left the contract: its ledger
    index, the state root after it, and the hash of the record ids up to it. Once members who
@@ -746,7 +817,7 @@ PUT /ibc/app/<agent>?action=leave_contract
 
 **Reply:** the transaction id. **Event:** `leave`, with `reply` set to the decision. Leaving
 yourself is always approved. Removing another member is decided by the contract's
-`approve_removal(address)` function, called as you; a contract without it refuses.
+`approve_removal(address)` function, called as you; an agreement whose root contract has none refuses.
 
 ### `rotate_key`
 
@@ -852,7 +923,7 @@ PUT /ibc/app/<agent>/<contract>?action=a2a_consent
 | `tx` | `tx`: a signed transaction to put in the miner's mempool (a relayed join, for example) | the transaction id |
 | `welcome` | `config`: the contract's new configuration; `sender`: the welcoming member; `index`, `stateRoot`, `history`: the ledger index of the change, the state root after it, and the keccak256 of the record ids up to it | `null`; once f+1 members agree, the node fetches the ledger (`get_ledger`), checks it, and joins (see [`join_contract`](#join_contract)) |
 | `join_result` | `txId`, `approved: false`: a refused join | `null` |
-| `read` | `guest`, `method`, `values`: a guest's read, sent to a host by the guest's node | `{"value": …}`, or `{"error": "…"}` for the contract's error |
+| `read` | `guest`, `to`, `data`: a guest's read (its calldata), sent to a host by the guest's node | `{"value": "0x…"}` (the return data), or `{"error": "…", "revert": "0x…"}` for the contract's error; the guest's node decodes |
 | `guest_welcome` | `config`: the members (the hosts); `sender`; `record`: the contract's deploy record; `txId`: the guest's join | `null`; the guest's node checks the deploy and its source, and adds the contract, as a guest |
 | `event` | `reply`: an [event](#event) of the contract; `config`: the current members | `null`; the guest's node passes the event to the guest's stream |
 
@@ -865,8 +936,9 @@ PUT /ibc/app/<agent>/<contract>?action=a2a_consent
 | `request` | The id of the request this event answers |
 | `contract` | The contract's id, or `null` for `register_agent` |
 | `action` | `register_agent`, `deploy_contract`, `contract_write`, `join` (a member's view of a join), `leave`, `rotate_key`, or `join_contract` (the joining agent's view) |
-| `reply` | The outcome: the function's result for `contract_write`, `true`/`false` for the others, or an error string |
-| `error` | Set, to the same text as `reply`, when the transaction failed (a revert, a wrong argument, an unknown function) |
+| `reply` | The outcome: the function's result for `contract_write` (decoded by the node), `true`/`false` for the others, or an error string |
+| `error` | Set, to the same text as `reply`, when the transaction failed (a revert, out of gas) |
+| `selector`, `revert` | `contract_write` only: the call's function selector, and its revert data if it reverted, hex: what the node decoded `reply` or `error` from |
 | `state_root` | The contract's state root after the transaction, as a hex hash. All zeros if the contract was never deployed |
 | `agent` | The subscribed agent the event belongs to |
 | `source_check`, `reason`, `source_hash` | `join_contract` only: see [`join_contract`](#join_contract) |
@@ -884,13 +956,13 @@ Returned by `get_contracts` and `get_contract`. Fields are present only when the
 | `name`, `contract`, `protocol`, `default_app`, `profile` | The labels given at deployment |
 | `pid` | The creating agent |
 | `address` | The creating agent's node URL |
-| `code`, `abi` | The bytecode and ABI given at deployment |
+| `code`, `abis`, `membership` | The root contract's creation bytecode, the ABIs of the source's contracts, and the membership functions it defines, as deployed |
 | `source`, `compiler` | The Solidity source (its files, by path) and how the node compiled it |
 | `role` | `partner`, or `guest`: the agent is a [guest](#guests), and this node has no copy of the contract (no state fields) |
 | `hosts` | For a guest: the contract's members, `[{agent, nodeKey, node}]`, to whom its node sends its transactions and reads |
 | `public` | Whether the agent lets anyone read its copy ([public contracts](#public-contracts)) |
 | `source_check`, `source_check_reason` | For a contract the agent joined: this node's check of the source against the code, `verified` or `unchecked` (with the reason), see [`join_contract`](#join_contract) |
-| `evm_address` | The contract's address in its own EVM state |
+| `evm_address` | The root contract's address in the agreement's EVM world |
 | `state_root` | The state root after the last successful transaction |
 | `block_number` | How many transactions the contract has processed |
 | `deploy_error` | Why the deployment failed, if it did |
@@ -905,7 +977,7 @@ A transaction as the ledger keeps it.
 | `action` | `deploy_contract`, `contract_write`, `join`, `leave` or `rotate_key` |
 | `agent` | The signing agent |
 | `contract` | The contract's id |
-| `method` | For `contract_write`, the function |
+| `to`, `data` | For `contract_write`, the call: its target (empty: the root contract) and calldata |
 | `message` | The transaction's body, decoded |
 | `timestamp` | The time of the consensus block that carried it: `YYYYMMDDHHMMSSffffff`, UTC |
 | `hash_code` | The transaction id |

@@ -97,9 +97,9 @@ Transaction {
   agent:    address   the signer
   nonce:    string    random, so equal requests are still different transactions
   body:     string    JSON, by kind:
-              deploy:     { name, contract, protocol, default_app, profile,
-                            code, abi, constructor, node, nodeKey }
-              call:       { method, values }
+              deploy:     { name, protocol, default_app, profile, node, nodeKey, source,
+                            compiler, contract, code, args, abis, membership }
+              call:       { to, data }   calldata, for the contract at to (none: the root)
               join:       { node, nodeKey, profile }
               leave:      { member }
               rotate_key: { nodeKey }
@@ -253,11 +253,12 @@ configuration 0, with the creator alone. `join`, `leave` and `rotate_key` transa
 3. **Decide.** When τ outputs the change, execution applies it at its place in the order:
    - a `join` names the hash of the contract's source (all its files, with their paths) as the
      joining agent read it (`sourceHash`); if that is not the hash of the source in the contract's deploy, it is
-     refused. Otherwise `join` calls the contract's `approve_partner(address)` as the joining
-     agent; a contract without that function accepts every join (as the Python default did);
-   - `leave` of oneself is always accepted; removing another member calls the contract's
-     `approve_removal(address)` as the requesting member, and a contract without that function
-     refuses;
+     refused. Otherwise, if the root contract defines `approve_partner(address)` (the deploy's
+     `membership` lists it), `join` calls it as the joining agent; without it, every join is
+     accepted (as the Python default did). `true` approves; `false` or a revert refuses;
+   - `leave` of oneself is always accepted; removing another member calls the root contract's
+     `approve_removal(address)` as the requesting member, and without that function it is
+     refused;
    - `rotate_key` by a member is always accepted. It names the agent's new node (URL and key):
      rotating a key means moving to another node, or replacing a compromised one.
 4. **Switch at the leader.** Let *L* be the leader whose part of τ's output holds the change. If
@@ -280,8 +281,9 @@ configuration 0, with the creator alone. `join`, `leave` and `rotate_key` transa
    configuration with members who never take part.
 7. **The source check.** The new node then compiles the deploy's source (its files, and nothing
    else: imports resolve only within them) with the compiler the
-   deploy names (`compiler`: version and settings), and compares the result with the deployed
-   code. If they differ (`mismatch`), the contract is not what its source says, and the node does
+   deploy names (`compiler`: version and settings), and compares the result with what the deploy
+   claims: the root contract's code, the ABIs of the source's contracts, and its membership
+   functions. If they differ (`mismatch`), the contract is not what its source says, and the node does
    not join: it keeps nothing, and the agent hears why. Its absence then costs the contract's
    members some liveness, but only members who did not check, since a correct member's node
    checks the same way. If it cannot compile (`unchecked`: it could not get that compiler version),
@@ -340,13 +342,13 @@ The hosts cannot forge the guest's transactions, since every partner checks thei
 1. The guest signs a `join` whose body says `"guest": true` and names its host: `"host"`, the member
    whose node it sends the join to. Its node sends it there, as for any join.
 2. The members order it like any transaction, but it is not a configuration change: no freeze, no
-   switch. Execution calls the contract's `approve_guest(address)` as the joining agent. **A contract
-   without that function refuses every guest**: guests are something a contract opts in to.
+   switch. Execution calls the root contract's `approve_guest(address)` as the joining agent. **A
+   contract without that function refuses every guest**: guests are something a contract opts in to.
 3. If approved, every member records the guest in the contract's partners, with the role `guest`,
    its node and node key, and its host. The members' nodes send the guest's node a **welcome**: the
    contract's members (the hosts) and the contract's deploy record. The guest's node checks that the
    deploy is signed by the creator and that its id is the contract's id, so it knows the contract's
-   code, ABI and source for certain, and compiles the source against the code as a partner's node
+   code, ABIs and source for certain, and compiles the source against them as a partner's node
    does (§10). It then adds the contract to the agent's list of contracts, with the role `guest`;
    on a mismatch, it does not. As for a partner, the guest's join names its source hash, and is
    refused if that is not the contract's.

@@ -8,7 +8,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"math/big"
-	"os"
 	"strings"
 	"testing"
 
@@ -19,25 +18,15 @@ import (
 )
 
 // precompilesState runs testdata/Precompiles.sol.
-func precompilesState(t *testing.T) *State {
+func precompilesState(t *testing.T) (*State, testContract) {
 	t.Helper()
-	bin, err := os.ReadFile("../testdata/Precompiles.bin")
-	if err != nil {
-		t.Fatal(err)
-	}
-	abiJSON, err := os.ReadFile("../testdata/Precompiles.abi")
-	if err != nil {
-		t.Fatal(err)
-	}
-	doc := NewMemoryDocument(map[string]any{
-		KeyPID: creator, KeyAddress: "http://alice.example",
-		KeyCode: strings.TrimSpace(string(bin)), KeyABI: string(abiJSON),
-	})
+	p := readContract(t, "Precompiles")
+	doc := NewMemoryDocument(map[string]any{KeyPID: creator, KeyAddress: "http://alice.example", KeyCode: p.code})
 	s := NewState(doc, NewMemoryCollection(), rawdb.NewMemoryDatabase())
 	if err := s.Run(creator, t0); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	return s
+	return s, p
 }
 
 // word is n as a 32-byte big-endian word.
@@ -56,10 +45,13 @@ func dec(t *testing.T, s string) *big.Int {
 
 // The precompiles of Osaka are on: each is reached, and computes.
 func TestPrecompiles(t *testing.T) {
-	s := precompilesState(t)
+	s, p := precompilesState(t)
 	view := func(method string, values map[string]any) (any, error) {
-		res, err := s.View("bob", method, values, t1)
-		return res.Value, err
+		res, err := s.View("bob", nil, p.encode(t, method, values), t1)
+		if err != nil {
+			return nil, err
+		}
+		return p.decode(t, method, res.Value), nil
 	}
 	// run calls the precompile at addr (a short address: 0x01…, 0x100) with input.
 	run := func(addr uint64, input []byte) ([]byte, error) {
@@ -111,8 +103,8 @@ func TestPrecompiles(t *testing.T) {
 	if double := mustRun("bn254 mul", 0x07, cat(g1, word(big.NewInt(2)))); len(sum) != 64 || !bytes.Equal(sum, double) {
 		t.Errorf("bn254: G+G = %x, 2G = %x", sum, double)
 	}
-	p, _ := new(big.Int).SetString("30644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd47", 16) // the field prime
-	negG1 := cat(word(big.NewInt(1)), word(new(big.Int).Sub(p, big.NewInt(2))))
+	prime, _ := new(big.Int).SetString("30644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd47", 16) // the field prime
+	negG1 := cat(word(big.NewInt(1)), word(new(big.Int).Sub(prime, big.NewInt(2))))
 	g2 := cat( // x = x_re + x_im·i, y likewise; encoded imaginary part first
 		word(dec(t, "11559732032986387107991004021392285783925812861821192530917403151452391805634")),
 		word(dec(t, "10857046999023057135944570762232829481370756359578518086990519993285655852781")),

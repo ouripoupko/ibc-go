@@ -209,6 +209,7 @@ export type Item = {
     [T in MessageType]: {
         type: T;
         message: Messages[T];
+        label?: string;
     };
 }[MessageType];
 /** A signature, with the public key and what the node needs to check it. */
@@ -254,6 +255,8 @@ export type Sources = Record<string, string>;
  * (UTF-8). The same as the node's (identity.SourceHash).
  */
 export declare function sourceHashOf(source: Sources): Hex;
+/** A function signature's selector ("pay(address,uint256)" -> 4 bytes, hex): how calldata starts. */
+export declare const selectorOf: (signature: string) => Hex;
 /** A random nonce, as hex without 0x. */
 export declare function nonce(): string;
 /** The time in unix seconds, for queries. */
@@ -294,7 +297,7 @@ export declare function passkeySigner({ credentialId, publicKey, rpId }: Passkey
     rpId?: string;
 }): Signer;
 /** Signs a message of one of TYPES. Returns its digest and envelope. */
-export declare function sign<T extends MessageType>(signer: Signer, type: T, message: Messages[T]): Promise<{
+export declare function sign<T extends MessageType>(signer: Signer, type: T, message: Messages[T], label?: string): Promise<{
     digest: Uint8Array;
     envelope: Envelope;
 }>;

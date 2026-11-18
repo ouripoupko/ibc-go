@@ -22,8 +22,8 @@ const root = p256Signer(rootKey);
 async function load(name) {
   // The source is files by path: here, one file.
   const source = { [`${name}.sol`]: await readFile(new URL(`${name}.sol`, contracts), 'utf8') };
-  const { contract, code, abi, compiler } = await ibc.compile(source);
-  return { name, contract, code, abi, source, compiler };
+  const { contract, code, abis, membership, compiler } = await ibc.compile(source);
+  return { name, contract, code, abis, membership, source, compiler };
 }
 
 const ibc = await Ibc.connect(url, { agent, root });

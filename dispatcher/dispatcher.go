@@ -45,6 +45,7 @@ const (
 	actionGetApps       = "get_apps"
 	actionRevokeApp     = "revoke_app"
 	actionCompile       = "compile"
+	actionEncode        = "encode"
 )
 
 // APIVersion is the version of the node's API: its HTTP calls and its
@@ -67,6 +68,7 @@ type Dispatcher struct {
 	nodeKey   ethcommon.Address
 	storage   func() (int64, bool)
 	compiler  *compiler.Toolchain
+	abis      abiSets
 	apps      *apps
 	done      <-chan struct{}
 	mux       *http.ServeMux
@@ -97,6 +99,7 @@ func New(navigator *execution.Navigator, protocol consensus.Protocol, broker *Br
 	d := &Dispatcher{navigator: navigator, consensus: protocol, broker: broker, key: opts.NodeKey,
 		nodeKey: identity.Address(opts.NodeKey), storage: storage, compiler: opts.Compiler,
 		apps: &apps{coll: opts.Apps}, done: done, guard: newGuard(), public: newLimiter()}
+	broker.SetDecoder(d.decodeReply)
 	d.mux = http.NewServeMux()
 	d.mux.HandleFunc("/ibc/app", d.handleApp)
 	d.mux.HandleFunc("/ibc/app/{path...}", d.handleApp)
@@ -306,6 +309,25 @@ func (d *Dispatcher) handle(ctx context.Context, record execution.Record, body [
 		}
 		return res, nil
 
+	case route{http.MethodPost, actionEncode}:
+		// ABI encoding, for clients that sign calls and deploys: a function's
+		// calldata, or a constructor's arguments.
+		var req struct {
+			ABI    json.RawMessage `json:"abi"`
+			Values map[string]any  `json:"values"`
+		}
+		if err := execution.DecodeJSON(body, &req); err != nil || len(req.ABI) == 0 {
+			return nil, errors.New("encode needs {abi, values}: abi is one function or constructor of an ABI")
+		}
+		if req.Values == nil {
+			req.Values = map[string]any{}
+		}
+		data, err := common.EncodeItem(req.ABI, req.Values)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"data": hexutil.Encode(data)}, nil
+
 	case route{http.MethodPut, actionLeaveContract}:
 		return d.submit(record, body, identity.KindLeave)
 
@@ -345,7 +367,8 @@ func (d *Dispatcher) handle(ctx context.Context, record execution.Record, body [
 		return d.consensus.Receive(ctx, record.Agent, record.Contract, body)
 
 	case route{http.MethodPost, actionRead}:
-		if err := d.readQuery(&record, body); err != nil {
+		c, err := d.readQuery(&record, body)
+		if err != nil {
 			if errors.Is(err, execution.ErrUnknownContract) {
 				return message("no such contract"), nil
 			}
@@ -355,7 +378,15 @@ func (d *Dispatcher) handle(ctx context.Context, record execution.Record, body [
 			return nil, err
 		} else if guest {
 			// A guest has no copy: a host reads its copy, as the guest.
-			return d.consensus.Read(ctx, record.Agent, record.Contract, record.Method, record.Message.Values)
+			ret, err := d.consensus.Read(ctx, record.Agent, record.Contract, c.to, c.data)
+			if err != nil {
+				var ce *common.ContractError
+				if errors.As(err, &ce) {
+					return map[string]any{"error": errorText(c.abis, err)}, nil
+				}
+				return nil, err
+			}
+			return c.decode(hexutil.Encode(ret)), nil
 		}
 		// The read runs as the agent: msg.sender is the agent itself.
 		result, err := d.navigator.Read(record.Agent, record.Agent, record)
@@ -364,12 +395,12 @@ func (d *Dispatcher) handle(ctx context.Context, record execution.Record, body [
 		}
 		if err != nil {
 			var ce *common.ContractError
-			if errors.As(err, &ce) || errors.Is(err, common.ErrNotImplemented) {
-				return readError(err), nil
+			if errors.As(err, &ce) {
+				return map[string]any{"error": errorText(c.abis, err)}, nil
 			}
 			return nil, err
 		}
-		return result.Value, nil
+		return c.decode(result.Value), nil
 	}
 	return nil, fmt.Errorf("unknown action %q for %s", record.Action, record.Type)
 }
@@ -383,42 +414,49 @@ func (d *Dispatcher) authorizeURL(auth string, record execution.Record, action s
 	return d.authorize(sq, action, record.Agent, record.Contract)
 }
 
-// callOf decodes the {method, values} body of a read or a silent write.
-func callOf(sq *identity.SignedQuery, method string) (identity.CallBody, error) {
-	var call identity.CallBody
-	if err := execution.DecodeJSON([]byte(sq.Query.Body), &call); err != nil {
-		return call, fmt.Errorf("%s body: %w", sq.Query.Action, err)
+// callOf reads the call a signed query carries (a read or a silent write)
+// and resolves it on agent's contract. A query sent to a function's URL
+// must call that function.
+func (d *Dispatcher) callOf(sq *identity.SignedQuery, agent, contract, method string) (call, error) {
+	var req callRequest
+	if err := execution.DecodeJSON([]byte(sq.Query.Body), &req); err != nil {
+		return call{}, fmt.Errorf("%s body: %w", sq.Query.Action, err)
 	}
-	if call.Method == "" {
-		return call, fmt.Errorf("%s body needs a method", sq.Query.Action)
+	c, err := d.resolve(agent, contract, req)
+	if err != nil {
+		return c, err
 	}
-	if method != "" && method != call.Method {
-		return call, fmt.Errorf("query calls %s, sent to %s", call.Method, method)
+	if method != "" && (c.fn == nil || (method != c.fn.RawName && method != c.fn.Sig)) {
+		return c, fmt.Errorf("query calls another function than %s", method)
 	}
-	return call, nil
+	return c, nil
 }
 
 // readQuery checks a contract_read's signed query, and whether its signer may
 // read the contract without asking, and puts the call it signs into record.
-func (d *Dispatcher) readQuery(record *execution.Record, body []byte) error {
+// A read runs only view and pure functions: a function that may change the
+// state is a transaction, ordered by consensus.
+func (d *Dispatcher) readQuery(record *execution.Record, body []byte) (call, error) {
 	sq, err := parseQuery(body)
 	if err != nil {
-		return err
+		return call{}, err
 	}
 	c, err := d.authorize(sq, actionRead, record.Agent, record.Contract)
 	if err != nil {
-		return err
-	}
-	call, err := callOf(sq, record.Method)
-	if err != nil {
-		return err
+		return call{}, err
 	}
 	if err := d.canRead(c, record.Contract); err != nil {
-		return err
+		return call{}, err
 	}
-	record.Method = call.Method
-	record.Message = execution.Message{Values: call.Values}
-	return nil
+	cl, err := d.callOf(sq, record.Agent, record.Contract, record.Method)
+	if err != nil {
+		return call{}, err
+	}
+	if cl.fn != nil && !cl.fn.IsConstant() {
+		return call{}, fmt.Errorf("%s changes state: send it as a transaction (contract_write)", cl.fn.RawName)
+	}
+	record.SetCall(cl.to, cl.data)
+	return cl, nil
 }
 
 // silentWrite serves a call an app asks the node to sign without the user:
@@ -430,22 +468,25 @@ func (d *Dispatcher) silentWrite(record execution.Record, sq *identity.SignedQue
 	if err != nil {
 		return nil, err
 	}
-	call, err := callOf(sq, record.Method)
+	if c.app == nil {
+		return nil, errors.New("the root key signs its own transactions: send a signed transaction")
+	}
+	cl, err := d.callOf(sq, c.agent, record.Contract, record.Method)
 	if err != nil {
 		return nil, err
 	}
-	if c.app == nil {
-		return nil, errors.New("the root key signs its own transactions: send a signed transaction")
+	if cl.fn == nil {
+		return nil, fmt.Errorf("calling function %s %w", hexutil.Encode(cl.data[:4]), errNeedsApproval)
 	}
 	hash, err := d.sourceHash(c.agent, record.Contract)
 	if err != nil {
 		return nil, err
 	}
 	p := c.app.permission(hash)
-	if p.Grant == nil || !p.Grant.Grant.Allows(call.Method) || !slices.Contains(p.Functions, call.Method) {
-		return nil, fmt.Errorf("calling %s %w", call.Method, errNeedsApproval)
+	if p.Grant == nil || !p.Grant.Grant.Allows(cl.data) || !slices.Contains(p.Functions, cl.fn.Sig) {
+		return nil, fmt.Errorf("calling %s %w", cl.fn.Sig, errNeedsApproval)
 	}
-	raw, err := json.Marshal(call)
+	raw, err := json.Marshal(identity.CallBody{To: cl.to, Data: cl.data})
 	if err != nil {
 		return nil, err
 	}
@@ -561,12 +602,6 @@ func (d *Dispatcher) submit(record execution.Record, body []byte, kind string) (
 	if kind == identity.KindCall {
 		if record.Contract != "" && !strings.EqualFold(record.Contract, stx.Tx.Contract) {
 			return nil, fmt.Errorf("transaction for contract %s sent to %s", stx.Tx.Contract, record.Contract)
-		}
-		if record.Method != "" {
-			var call identity.CallBody
-			if err := execution.DecodeJSON([]byte(stx.Tx.Body), &call); err == nil && call.Method != record.Method {
-				return nil, fmt.Errorf("transaction calls %s, sent to %s", call.Method, record.Method)
-			}
 		}
 	}
 	return d.consensus.SubmitTx(record.Agent, stx)
@@ -718,11 +753,6 @@ func hashRecord(record execution.Record) string {
 }
 
 func message(text string) map[string]any { return map[string]any{"message": text} }
-
-// readError is the reply to a read the contract failed: a revert, an argument
-// the function does not take, an unknown function. It is an object, not the
-// text alone, because a function may return a string.
-func readError(err error) map[string]any { return map[string]any{"error": err.Error()} }
 
 func short(hash string) string {
 	if len(hash) > 10 {
