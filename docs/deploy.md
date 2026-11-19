@@ -27,8 +27,8 @@ representation on the internet; give it a name you will keep.
 - [2. Create the server](#2-create-the-server)
 - [3. Point your domain at it](#3-point-your-domain-at-it)
 - [4. Prepare the server](#4-prepare-the-server)
-- [5. Build and copy the program](#5-build-and-copy-the-program)
-- [6. Run ibc as a service](#6-run-ibc-as-a-service)
+- [5. Install ibc](#5-install-ibc)
+- [6. Check the service](#6-check-the-service)
 - [7. Add HTTPS with Caddy](#7-add-https-with-caddy)
 - [8. Use it](#8-use-it)
 - [9. Backups](#9-backups)
@@ -44,7 +44,6 @@ representation on the internet; give it a name you will keep.
   such as `ibc.example.com`. A certificate cannot be issued for a bare IP address.
 - **An SSH key** on your computer (`~/.ssh/id_ed25519.pub`). Create one with `ssh-keygen -t ed25519`
   if you have none.
-- **Go** on your computer, to build the program (see the [README](../README.md#1-install-go)).
 
 In the commands below, replace `ibc.example.com` with your node's name and `SERVER_IP` with your
 server's address.
@@ -63,7 +62,7 @@ In the Hetzner Cloud console, create a server:
 | Backups | Turn on (see [Backups](#9-backups)); it adds a small monthly cost |
 | Firewall | Create one that allows incoming **TCP 22** (SSH), **80** and **443** (web), and nothing else |
 
-Note whether you chose **x86** or **Arm**: you build the program for that architecture in step 5.
+Note whether you chose **x86** or **Arm**: you install the package for that architecture in step 5.
 
 When the server is created, the console shows its IPv4 address (and IPv6 address).
 
@@ -105,12 +104,6 @@ nodes for 5 minutes, so a wrong clock makes the node refuse them:
 timedatectl          # "System clock synchronized: yes"
 ```
 
-Create a user for the node. It cannot log in, and owns only the node's data:
-
-```sh
-useradd --system --home-dir /var/lib/ibc --shell /usr/sbin/nologin ibc
-```
-
 If you did not create a Hetzner firewall in step 2, use the server's own firewall instead:
 
 ```sh
@@ -120,104 +113,53 @@ ufw allow 443/tcp
 ufw enable
 ```
 
-## 5. Build and copy the program
+## 5. Install ibc
 
-On **your computer**, in the project directory, build the program for the server's architecture.
-`CGO_ENABLED=0` makes a self-contained program that needs nothing else installed on the server:
-
-```sh
-# x86 server:
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o ibc-linux ./cmd/ibc
-# Arm server:
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o ibc-linux ./cmd/ibc
-```
-
-Copy it to the server, and install it as `/usr/local/bin/ibc`:
+ibc is released as a Debian package, for x86 (`amd64`) and Arm (`arm64`), on the project's
+[releases page](https://github.com/ouripoupko/ibc-go/releases). On the server, download the newest
+one and install it:
 
 ```sh
-scp ibc-linux root@SERVER_IP:/tmp/ibc
-ssh root@SERVER_IP 'install -m 755 /tmp/ibc /usr/local/bin/ibc && rm /tmp/ibc'
+ARCH=$(dpkg --print-architecture)      # amd64 (x86) or arm64 (Arm)
+curl -LO https://github.com/ouripoupko/ibc-go/releases/latest/download/ibc_$ARCH.deb
+apt install -y ./ibc_$ARCH.deb
+ibc version
 ```
 
-The web interface is built into the program; there are no other files to copy.
+The package:
+
+- installs the program as `/usr/bin/ibc`; the web interface is built into it;
+- creates the `ibc` user, which cannot log in, and owns only the node's data in `/var/lib/ibc`;
+- installs the Solidity compiler (below), and Node.js;
+- installs the `ibc` service, which starts now and at boot, and restarts if it stops;
+- keeps the service's settings in `/etc/default/ibc`.
+
+To check a download first, compare it with the release's `SHA256SUMS` file:
+`curl -LO https://github.com/ouripoupko/ibc-go/releases/latest/download/SHA256SUMS && sha256sum --check --ignore-missing SHA256SUMS`.
 
 **The Solidity compiler.** Apps send contracts as source, and the node compiles them; when one of
-your agents joins a contract, the node also compiles that contract's source again, with the version
-it was compiled with, and compares it with its code. This release of ibc pins **solc 0.8.38**. The
-node gets the compilers it needs by itself: it downloads solc-js (the Solidity compiler built for
-JavaScript) of the version it needs from soliditylang.org into its data directory
-(`/var/lib/ibc/solc`), checks it against Solidity's published hash, and runs it with **Node.js**. So
-install Node.js, on x86 and Arm servers alike:
+your agents joins a contract, the node also compiles that contract's source again and compares it
+with its code. The package brings the compiler the node pins (solc 0.8.38 in this release), as
+`/usr/lib/ibc/solc`; there is nothing to install. A contract compiled with another version of
+Solidity needs that version: the node downloads it by itself from `https://binaries.soliditylang.org`
+(solc-js, checked against Solidity's published hash) into `/var/lib/ibc/solc`, and runs it with
+Node.js, which the package also installs.
+
+**Building it yourself.** If you develop ibc, you can build the program on your computer for the
+server's architecture and install it over the package's:
 
 ```sh
-ssh root@SERVER_IP
-apt install -y nodejs
-node --version
+# x86 server (for Arm: GOARCH=arm64):
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o ibc-linux ./cmd/ibc
+scp ibc-linux root@SERVER_IP:/tmp/ibc
+ssh root@SERVER_IP 'install -m 755 /tmp/ibc /usr/bin/ibc && rm /tmp/ibc && systemctl restart ibc'
 ```
 
-The server must also reach `https://binaries.soliditylang.org`. Without Node.js the node cannot
-compile, and it joins contracts with the warning "source not checked".
+The next package you install replaces it.
 
-On x86, the native `solc` is faster, and the node uses it for its pinned version if it is installed
-(the service below names it): the static build, one file, from the
-[Solidity releases](https://github.com/ethereum/solidity/releases):
+## 6. Check the service
 
 ```sh
-curl -L -o /usr/local/bin/solc https://github.com/ethereum/solidity/releases/download/v0.8.38/solc-static-linux
-chmod 755 /usr/local/bin/solc
-solc --version
-```
-
-On Arm, skip this: there is no official Arm build, and the node uses solc-js.
-
-## 6. Run ibc as a service
-
-On the server, create the file `/etc/systemd/system/ibc.service`:
-
-```ini
-[Unit]
-Description=ibc node
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-User=ibc
-Group=ibc
-ExecStart=/usr/local/bin/ibc
-# Listen inside the server only; Caddy passes the traffic in.
-Environment=IBC_ADDR=127.0.0.1:2611
-Environment=IBC_DATA=/var/lib/ibc
-# The native Solidity compiler, if installed (step 5); otherwise the node downloads solc-js.
-Environment=IBC_SOLC=/usr/local/bin/solc
-# Creates /var/lib/ibc, owned by the ibc user.
-StateDirectory=ibc
-StateDirectoryMode=0700
-Restart=on-failure
-RestartSec=5
-# On stop, the node finishes the work it accepted; give it time.
-TimeoutStopSec=60
-
-# Limit what the program may touch.
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=true
-PrivateTmp=true
-PrivateDevices=true
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectControlGroups=true
-RestrictSUIDSGID=true
-LockPersonality=true
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Start it, and make it start at boot:
-
-```sh
-systemctl daemon-reload
-systemctl enable --now ibc
 systemctl status ibc                 # "active (running)"
 ```
 
@@ -230,6 +172,17 @@ curl -s 'http://127.0.0.1:2611/ibc/app?action=node_info'
 
 On its first start the node created its key, `/var/lib/ibc/nodekey`. The address above is that
 key's: it identifies your node in consensus. It is not anyone's personal key.
+
+The service listens inside the server only, on `127.0.0.1:2611`; Caddy passes the traffic in (next
+step). Its settings are in `/etc/default/ibc`:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `IBC_ADDR` | `127.0.0.1:2611` | Where the node listens |
+| `IBC_DATA` | `/var/lib/ibc` | The node's database and key; the service owns this directory, so keep it |
+| `IBC_SOLC` | `/usr/lib/ibc/solc` | The Solidity compiler of the pinned version, which the package installs |
+
+After changing one, run `systemctl restart ibc`. Package updates keep your changes.
 
 ## 7. Add HTTPS with Caddy
 
@@ -321,14 +274,20 @@ node cannot sign for its agents any more. Each agent can then move its contracts
 
 ## 10. Updates
 
-Build the new version on your computer as in step 5, then copy it and restart:
+On the server, download the newest package and install it, as in step 5. Installing restarts the
+service with the new program:
 
 ```sh
-scp ibc-linux root@SERVER_IP:/tmp/ibc
-ssh root@SERVER_IP 'install -m 755 /tmp/ibc /usr/local/bin/ibc && rm /tmp/ibc && systemctl restart ibc'
+ARCH=$(dpkg --print-architecture)
+curl -LO https://github.com/ouripoupko/ibc-go/releases/latest/download/ibc_$ARCH.deb
+apt install -y ./ibc_$ARCH.deb
+ibc version
 ```
 
-The data is kept. A clean backup first is a good habit.
+For a specific version, not the newest, download from that release instead, for example
+`https://github.com/ouripoupko/ibc-go/releases/download/v0.1.0/ibc_$ARCH.deb`.
+
+The data and your settings in `/etc/default/ibc` are kept. A clean backup first is a good habit.
 
 All partners of a contract must run the same version: a new version can change how transactions are
 executed, and partners must compute the same results. Agree on when to update together.
@@ -338,6 +297,7 @@ executed, and partners must compute the same results. Agree on when to update to
 | Task | Command |
 |---|---|
 | Is it running? | `systemctl status ibc` |
+| Which version? | `ibc version` |
 | Follow the node's log | `journalctl -u ibc -f` |
 | The log since this morning | `journalctl -u ibc --since today` |
 | Restart | `systemctl restart ibc` |
@@ -360,8 +320,8 @@ your node.
 | `502 Bad Gateway` | ibc is not running: `systemctl status ibc`, `journalctl -u ibc` |
 | The page says passkeys need a secure page | The page is open at `http://`, not `https://` |
 | "This passkey is not an ibc identity on this node" when signing in | The passkey was made on another node's address |
-| "solc 0.8.38: running solc-js needs Node.js" | Install Node.js (step 5) |
-| "solc 0.8.38: …" with a network error | The server cannot reach `https://binaries.soliditylang.org` to download the compiler |
+| "solc …: running solc-js needs Node.js" | Node.js is missing; the package installs it: `apt install -y nodejs` |
+| "solc …: …" with a network error | A contract needs another Solidity version, and the server cannot reach `https://binaries.soliditylang.org` to download it |
 | `query expired, or its time is wrong` | The clock of the server or of the user's computer is wrong: `timedatectl` |
 | Partners never see your transactions, or a join never completes | Your node is not reachable at the address your agents registered, or theirs is not. Check with `curl https://<their node>/ibc/app?action=node_info` from each side |
-| The service does not start after an update | `journalctl -u ibc -e` shows why; restore the previous program, or a backup |
+| The service does not start after an update | `journalctl -u ibc -e` shows why; install the previous release's package, or restore a backup |

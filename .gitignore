@@ -3,6 +3,9 @@
 /ibc.exe
 /ibc-linux
 
+# Release builds (packaging/nfpm.yaml)
+/dist/
+
 # A node's database (the default -data directory)
 /data/
 

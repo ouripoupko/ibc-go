@@ -1,0 +1,12 @@
+# Settings of the ibc service. After a change: systemctl restart ibc
+
+# Listen inside the server only; an HTTPS proxy (Caddy) passes the traffic in.
+IBC_ADDR=127.0.0.1:2611
+
+# The node's database and key. The service owns /var/lib/ibc; keep it there.
+IBC_DATA=/var/lib/ibc
+
+# The Solidity compiler of the version the node pins, which the package
+# installs. For contracts of other versions, the node downloads solc-js and
+# runs it with Node.js.
+IBC_SOLC=/usr/lib/ibc/solc

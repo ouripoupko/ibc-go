@@ -1,0 +1,68 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: ibc
+Upstream-Contact: https://github.com/ouripoupko/ibc-go/issues
+Source: https://github.com/ouripoupko/ibc-go
+Comment:
+ This package holds two programs: /usr/bin/ibc, built from ibc's source,
+ and /usr/lib/ibc/solc, the Solidity compiler, an unmodified official build
+ that the Solidity project publishes.
+
+Files: usr/bin/ibc
+Copyright: 2026 Ouri Poupko
+           The go-ethereum Authors
+License: MIT and LGPL-3.0+
+Comment:
+ ibc's own code is under the MIT license.
+ Source: https://github.com/ouripoupko/ibc-go/tree/@IBC_VERSION@
+ .
+ The program includes go-ethereum @GETH_VERSION@, under the LGPL-3.0+.
+ Source: https://github.com/ethereum/go-ethereum/tree/@GETH_VERSION@
+ .
+ It also includes other Go modules, each under its own license; go.mod in
+ ibc's source lists them.
+
+Files: usr/lib/ibc/solc
+Copyright: The Solidity Authors
+License: GPL-3.0+
+Comment:
+ solc @SOLC_VERSION@, the static Linux build from https://binaries.soliditylang.org,
+ unmodified.
+ Source: https://github.com/ethereum/solidity/releases/tag/v@SOLC_VERSION@
+ (solidity_@SOLC_VERSION@.tar.gz)
+
+License: MIT
+ Permission is hereby granted, free of charge, to any person obtaining a copy
+ of this software and associated documentation files (the "Software"), to deal
+ in the Software without restriction, including without limitation the rights
+ to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ copies of the Software, and to permit persons to whom the Software is
+ furnished to do so, subject to the following conditions:
+ .
+ The above copyright notice and this permission notice shall be included in all
+ copies or substantial portions of the Software.
+ .
+ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ SOFTWARE.
+
+License: LGPL-3.0+
+ This library is free software; you can redistribute it and/or modify it
+ under the terms of the GNU Lesser General Public License as published by the
+ Free Software Foundation; either version 3 of the License, or (at your
+ option) any later version.
+ .
+ On Debian systems, the full text of the GNU Lesser General Public License
+ version 3 is in /usr/share/common-licenses/LGPL-3.
+
+License: GPL-3.0+
+ This program is free software: you can redistribute it and/or modify it
+ under the terms of the GNU General Public License as published by the Free
+ Software Foundation, either version 3 of the License, or (at your option) any
+ later version.
+ .
+ On Debian systems, the full text of the GNU General Public License version 3
+ is in /usr/share/common-licenses/GPL-3.

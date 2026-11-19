@@ -1,0 +1,58 @@
+# The Debian package of an ibc node, built by nFPM (https://nfpm.goreleaser.com):
+#
+#   export VERSION=v0.1.0 GOARCH=amd64
+#   CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags "-X main.version=$VERSION" -o dist/stage/ibc ./cmd/ibc
+#   packaging/fetch-solc.sh dist/stage/solc
+#   packaging/copyright.sh dist/stage/copyright
+#   nfpm package -f packaging/nfpm.yaml -p deb -t dist/ibc_$GOARCH.deb
+#
+# (nFPM: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.41.1.) The release
+# workflow, .github/workflows/release.yml, does this for amd64 and arm64.
+name: ibc
+arch: ${GOARCH}
+platform: linux
+version: ${VERSION}
+version_schema: semver
+section: net
+priority: optional
+maintainer: Ouri Poupko <https://github.com/ouripoupko>
+description: |
+  An ibc node: apps act for users through their node, which asks them to
+  approve with a passkey. Runs as the ibc service on 127.0.0.1:2611; put an
+  HTTPS proxy such as Caddy in front of it.
+homepage: https://github.com/ouripoupko/ibc-go
+license: MIT
+
+depends:
+  - nodejs # runs solc-js, which the node downloads for contracts of other Solidity versions
+  - adduser
+recommends:
+  - caddy
+
+contents:
+  - src: dist/stage/ibc
+    dst: /usr/bin/ibc
+    file_info:
+      mode: 0755
+  - src: dist/stage/solc # the native Solidity compiler of the pinned version
+    dst: /usr/lib/ibc/solc
+    file_info:
+      mode: 0755
+  - src: dist/stage/copyright # the licenses of ibc and of the programs it holds
+    dst: /usr/share/doc/ibc/copyright
+    file_info:
+      mode: 0644
+  - src: packaging/ibc.service
+    dst: /usr/lib/systemd/system/ibc.service
+    file_info:
+      mode: 0644
+  - src: packaging/ibc.default
+    dst: /etc/default/ibc
+    type: config|noreplace
+    file_info:
+      mode: 0644
+
+scripts:
+  postinstall: packaging/postinstall.sh
+  preremove: packaging/preremove.sh
+  postremove: packaging/postremove.sh

@@ -1,0 +1,33 @@
+[Unit]
+Description=ibc node
+Documentation=https://github.com/ouripoupko/ibc-go/blob/main/docs/deploy.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ibc
+Group=ibc
+EnvironmentFile=/etc/default/ibc
+ExecStart=/usr/bin/ibc
+# Creates /var/lib/ibc, owned by the ibc user.
+StateDirectory=ibc
+StateDirectoryMode=0700
+Restart=on-failure
+RestartSec=5
+# On stop, the node finishes the work it accepted; give it time.
+TimeoutStopSec=60
+
+# Limit what the program may touch.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

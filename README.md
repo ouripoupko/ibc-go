@@ -113,7 +113,7 @@ Continue with the [usage guide](docs/usage.md) for the details, and for the shel
 clients.
 
 To run a node on a server, reachable by others over HTTPS, see
-[Deploying on a server](docs/deploy.md).
+[Deploying on a server](docs/deploy.md): servers install a released Debian package, with no Go needed.
 
 To stop the node, press Ctrl-C. It finishes the work it has already accepted, then exits. Your data
 stays in the data directory, and the node picks up from there when you start it again.
@@ -176,6 +176,7 @@ cmd/ibc/              the program (node, key and signing tools)
 node/                 wires the parts together
 dispatcher/           HTTP API and event stream
 web/                  the web interface, built into the program
+packaging/            the Debian package (nFPM), released by .github/workflows/release.yml
 js/                   the JavaScript client (npm package @ouripoupko/ibc), in TypeScript
 consensus/            each contract's protocol; Cordial Miners in consensus/cordial
 execution/            runs contracts, one goroutine per contract
@@ -186,6 +187,21 @@ docs/           documentation
 ```
 
 Run the tests with `go test ./...`. See [Architecture](docs/architecture.md#development) for more.
+
+## Releasing
+
+Push a version tag:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+GitHub Actions runs the tests, then publishes a release with the program (`ibc-linux-amd64`,
+`ibc-linux-arm64`), its Debian packages (`ibc_amd64.deb`, `ibc_arm64.deb`: the program, its service,
+and the Solidity compiler the node pins) and their `SHA256SUMS`.
+`ibc version` prints the tag. To build the packages locally, see
+[packaging/nfpm.yaml](packaging/nfpm.yaml).
 
 ## License
 

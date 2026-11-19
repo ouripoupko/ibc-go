@@ -2,6 +2,7 @@
 // command line (for scripts and testing; in apps, users sign with passkeys).
 //
 //	ibc [-addr ADDR] [-data DIR]          run a node
+//	ibc version                            print the program's version
 //	ibc key new FILE                       create a root key file; prints the agent id
 //	ibc key address FILE                   print the agent id of a key file
 //	ibc sign tx -key ROOT_KEY -kind KIND [-contract ID] -body JSON
@@ -37,6 +38,10 @@ import (
 	"github.com/ouripoupko/ibc-go/node"
 )
 
+// version is the release this program was built from, set by the release
+// build (-ldflags "-X main.version=v0.1.0"); partners of a contract must run the same one.
+var version = "dev"
+
 func main() {
 	var err error
 	if len(os.Args) > 1 {
@@ -49,6 +54,8 @@ func main() {
 			err = sourceHashCommand(os.Args[2:])
 		case "source":
 			err = sourceCommand(os.Args[2:])
+		case "version":
+			fmt.Println(version)
 		default:
 			err = runCommand(os.Args[1:])
 		}
@@ -76,7 +83,7 @@ func runCommand(args []string) error {
 	if err != nil {
 		return err
 	}
-	slog.Info("ibc node starting", "data", *dataDir, "nodeKey", n.NodeKey())
+	slog.Info("ibc node starting", "version", version, "data", *dataDir, "nodeKey", n.NodeKey())
 	return n.ListenAndServe(ctx, *addr)
 }
 

@@ -1,0 +1,52 @@
+# Publishes a release when a version tag is pushed:
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# The release carries, for x86 (amd64) and Arm (arm64), the program and its
+# Debian package (the program, its service, and the native Solidity compiler
+# of the version the node pins), under names without the version, so that
+# .../releases/latest/download/ibc_amd64.deb always names the newest.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write # to create the release
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.41.1
+          mkdir -p dist/stage
+          packaging/copyright.sh dist/stage/copyright
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath \
+              -ldflags "-s -w -X main.version=$VERSION" -o dist/ibc-linux-$arch ./cmd/ibc
+            cp dist/ibc-linux-$arch dist/stage/ibc
+            GOARCH=$arch packaging/fetch-solc.sh dist/stage/solc
+            if [ $arch = amd64 ]; then dist/stage/solc --version; fi # the runner is x86
+            GOARCH=$arch nfpm package -f packaging/nfpm.yaml -p deb -t dist/ibc_$arch.deb
+          done
+          rm -r dist/stage
+          (cd dist && sha256sum * > SHA256SUMS)
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes dist/*
