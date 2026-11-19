@@ -121,6 +121,7 @@ one and install it:
 
 ```sh
 ARCH=$(dpkg --print-architecture)      # amd64 (x86) or arm64 (Arm)
+cd /tmp      # apt reads the package from here as its own user, _apt
 curl -LO https://github.com/ouripoupko/ibc-go/releases/latest/download/ibc_$ARCH.deb
 apt install -y ./ibc_$ARCH.deb
 ibc version
@@ -279,6 +280,7 @@ service with the new program:
 
 ```sh
 ARCH=$(dpkg --print-architecture)
+cd /tmp      # apt reads the package from here as its own user, _apt
 curl -LO https://github.com/ouripoupko/ibc-go/releases/latest/download/ibc_$ARCH.deb
 apt install -y ./ibc_$ARCH.deb
 ibc version
