@@ -10,6 +10,8 @@
 # It also publishes the JavaScript client, @ouripoupko/ibc, to npm with the
 # same version (tag v0.2.0: version 0.2.0), by npm's trusted publishing: npm
 # accepts this workflow as a publisher of the package, with no stored token.
+# It stages the version: npm holds it until a maintainer approves it on
+# npmjs.com (Staged Packages) with their second factor.
 name: release
 
 on:
@@ -70,8 +72,9 @@ jobs:
         env:
           VERSION: ${{ github.ref_name }}
         run: |
-          npm install -g npm@^11.5.1 # trusted publishing needs npm 11.5.1 or later
+          npm install -g npm@^11.15.0 # staged publishing needs npm 11.15.0 or later
           npm version "${VERSION#v}" --no-git-tag-version
           # A pre-release (v0.2.0-rc.1) does not become the version npm installs by default.
           case "$VERSION" in *-*) tag=next ;; *) tag=latest ;; esac
-          npm publish --tag "$tag"
+          # The Test step ran the client's tests.
+          npm stage publish --tag "$tag"
