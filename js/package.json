@@ -17,6 +17,7 @@
   "types": "./dist/index.d.ts",
   "files": ["dist", "README.md", "LICENSE"],
   "engines": { "node": ">=20" },
+  "publishConfig": { "access": "public" },
   "scripts": {
     "build": "node scripts/build.mjs",
     "test": "node scripts/build.mjs --check && node --test test/*.test.mjs",
