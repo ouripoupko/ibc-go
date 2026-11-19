@@ -87,6 +87,28 @@ export function functionLabel(f, abis) {
 }
 
 /**
+ * Checkboxes for write functions, with an "All functions" toggle above the
+ * indented list when there are several. selected: the checked signatures, or
+ * null for all. Returns the node to show and a reader of the checked ones.
+ */
+export function functionChecklist(writes, abis, selected = null) {
+  const boxes = writes.map((f) => el('input', { type: 'checkbox', value: f.signature, checked: !selected || selected.includes(f.signature) }));
+  const rows = writes.map((f, i) => el('label', { class: 'check' }, boxes[i], functionLabel(f, abis)));
+  const chosen = () => boxes.filter((b) => b.checked).map((b) => b.value);
+  if (writes.length < 2) return { node: el('div', {}, ...rows), chosen };
+  const all = el('input', { type: 'checkbox' });
+  const sync = () => {
+    const on = boxes.filter((b) => b.checked).length;
+    all.checked = on === boxes.length;
+    all.indeterminate = on > 0 && on < boxes.length; // shows mixed
+  };
+  all.addEventListener('change', () => { boxes.forEach((b) => { b.checked = all.checked; }); sync(); });
+  boxes.forEach((b) => b.addEventListener('change', sync));
+  sync();
+  return { node: el('div', {}, el('label', { class: 'check all' }, all, 'All functions'), el('div', { class: 'fn-list' }, ...rows)), chosen };
+}
+
+/**
  * The messages that record what an app may do without asking, for contracts
  * of one source: the consent, and the grant for this node if it names functions.
  */

@@ -2,7 +2,7 @@
 import {
   $, el, status, busy, errorText, connect, functionForm, isRead, encodeInvite, pretty, short,
   loadIdentity, sourceHashOf, sourcePaths, showSource, writeFunctions, permissionItems, registerPermission,
-  functionLabel, contractName, signatureOf,
+  functionChecklist, contractName, signatureOf,
 } from './app.mjs';
 import { signBatch } from './js/index.js';
 
@@ -169,20 +169,20 @@ async function showApps(c) {
   const writes = writeFunctions(c.abis);
   const apps = (await ibc.apps()).filter((a) => !a.permissions[`0x${'0'.repeat(64)}`]); // not this page's own keys
   $('#app-perms').replaceChildren(...apps.map((a) => {
-    const now = a.permissions[sourceHash] ?? { read: false, functions: [] };
-    const read = el('input', { type: 'checkbox', checked: now.read });
-    const boxes = writes.map((f) => el('input', { type: 'checkbox', value: f.signature, checked: now.functions.includes(f.signature) }));
+    const now = a.permissions[sourceHash]; // none saved: every function starts selected
+    const read = el('input', { type: 'checkbox', checked: now?.read ?? false });
+    const list = functionChecklist(writes, c.abis, now ? now.functions : null);
     const save = el('button', { class: 'secondary' }, 'Save');
     const box = el('div', { class: 'app-perm', 'data-app': a.app },
       el('h3', {}, new URL(a.app).host),
       el('label', { class: 'check' }, read, 'Read this contract'),
       writes.length ? el('p', { class: 'hint' }, 'Call these functions (your node signs them for you):') : null,
-      ...writes.map((f, i) => el('label', { class: 'check' }, boxes[i], functionLabel(f, c.abis))),
+      writes.length ? list.node : null,
       save);
     save.addEventListener('click', () => busy(save, $('#apps-status'), async () => {
       status($('#apps-status'), 'Approve with your passkey…');
       const items = permissionItems(ibc, {
-        app: a.app, appKey: a.keys[0], sourceHash, read: read.checked, functions: boxes.filter((b) => b.checked).map((b) => b.value),
+        app: a.app, appKey: a.keys[0], sourceHash, read: read.checked, functions: list.chosen(),
       });
       await registerPermission(ibc, items, await signBatch(ibc.root, items));
       status($('#apps-status'), `Saved for ${new URL(a.app).host}.`, 'ok');

@@ -28,7 +28,7 @@
 import {
   $, el, status, errorText, loadIdentity, connect, rootSigner, signIn, createIdentity, isKnown, reregister,
   pretty, short, sourceHashOf, sourcePaths, showSource, writeFunctions, permissionItems, registerPermission,
-  functionOf, functionLabel, contractName,
+  functionOf, functionLabel, functionChecklist, contractName,
 } from './app.mjs';
 import { API_VERSION, describe, digestOf, nonce, now, signBatch, toHex } from './js/index.js';
 
@@ -221,12 +221,12 @@ const registerPublish = (ibc, item, signature) => ibc.setPublic(item.message.con
 /** Shows the permissions form for the contract's functions; returns a reader of the choices. */
 function permissionsForm(abis, current = null) {
   const writes = writeFunctions(abis);
-  const boxes = writes.map((f) => el('input', { type: 'checkbox', value: f.signature, checked: current?.functions?.includes(f.signature) }));
   if (current) $('#perm-read').checked = current.read;
-  $('#perm-writes').replaceChildren(...writes.map((f, i) => el('label', { class: 'check' }, boxes[i], functionLabel(f, abis))));
+  const list = functionChecklist(writes, abis, current ? current.functions ?? [] : null);
+  $('#perm-writes').replaceChildren(list.node);
   if (!writes.length) $('#perm-writes-hint').classList.add('hidden');
   $('#permissions').classList.remove('hidden');
-  return () => ({ read: $('#perm-read').checked, functions: boxes.filter((b) => b.checked).map((b) => b.value) });
+  return () => ({ read: $('#perm-read').checked, functions: list.chosen() });
 }
 
 /** The messages that record the app's permissions: the consent, and the grant if it names functions. */

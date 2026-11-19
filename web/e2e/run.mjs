@@ -159,7 +159,12 @@ async function appClick(appPage, button, { approve = null } = {}) {
       permissions: await popup.$eval('#permissions', (p) => !p.classList.contains('hidden')),
       public: await popup.$eval('#public-box', (b) => !b.classList.contains('hidden') && b.querySelector('#public').checked),
     };
-    for (const fn of approve.check ?? []) await popup.click(`#perm-writes input[value="${fn}"]`);
+    // check: exactly the functions to allow (every one starts ticked).
+    if (approve.check) {
+      await popup.$$eval('#perm-writes input[value]', (bs, want) => bs.forEach((b) => {
+        if (b.checked !== want.includes(b.value)) b.click();
+      }), approve.check);
+    }
     if (SHOTS && approve.shot) await popup.screenshot({ path: `${SHOTS}${approve.shot}.png`, fullPage: true });
     await popup.click('#approve');
   }
