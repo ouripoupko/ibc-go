@@ -6,6 +6,10 @@
 # Debian package (the program, its service, and the native Solidity compiler
 # of the version the node pins), under names without the version, so that
 # .../releases/latest/download/ibc_amd64.deb always names the newest.
+#
+# It also publishes the JavaScript client, @ouripoupko/ibc, to npm with the
+# same version (tag v0.2.0: version 0.2.0), by npm's trusted publishing: npm
+# accepts this workflow as a publisher of the package, with no stored token.
 name: release
 
 on:
@@ -14,6 +18,7 @@ on:
 
 permissions:
   contents: write # to create the release
+  id-token: write # to prove to npm that this workflow publishes
 
 jobs:
   release:
@@ -25,8 +30,14 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
       - name: Test
-        run: go test ./...
+        run: |
+          go test ./...
+          cd js && npm ci && npm test
 
       - name: Build
         env:
@@ -49,4 +60,18 @@ jobs:
       - name: Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes dist/*
+        # A pre-release (v0.2.0-rc.1) is not the "latest" release that servers download.
+        run: |
+          case "$GITHUB_REF_NAME" in *-*) pre=--prerelease ;; *) pre= ;; esac
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes $pre dist/*
+
+      - name: Publish the JavaScript client
+        working-directory: js
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          npm install -g npm@^11.5.1 # trusted publishing needs npm 11.5.1 or later
+          npm version "${VERSION#v}" --no-git-tag-version
+          # A pre-release (v0.2.0-rc.1) does not become the version npm installs by default.
+          case "$VERSION" in *-*) tag=next ;; *) tag=latest ;; esac
+          npm publish --tag "$tag"

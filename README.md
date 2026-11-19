@@ -199,7 +199,12 @@ git push origin v0.1.0
 
 GitHub Actions runs the tests, then publishes a release with the program (`ibc-linux-amd64`,
 `ibc-linux-arm64`), its Debian packages (`ibc_amd64.deb`, `ibc_arm64.deb`: the program, its service,
-and the Solidity compiler the node pins) and their `SHA256SUMS`.
+and the Solidity compiler the node pins) and their `SHA256SUMS`. It also publishes the JavaScript
+client to npm, `@ouripoupko/ibc`, with the same version: tag `v0.2.0` makes version `0.2.0`, so
+`js/package.json`'s version need not be changed by hand. npm holds the new version until a
+maintainer approves it on npmjs.com (staged publishing). A tag with a pre-release part
+(`v0.2.0-rc.1`) makes a pre-release: servers' downloads of the latest release, and `npm install`,
+keep getting the previous version.
 `ibc version` prints the tag. To build the packages locally, see
 [packaging/nfpm.yaml](packaging/nfpm.yaml).
 
