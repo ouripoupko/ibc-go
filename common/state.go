@@ -184,11 +184,6 @@ type State struct {
 	root          ethcommon.Hash
 	blockNumber   uint64
 	lastTimestamp string
-
-	// TODO: read(contract_id, method, arguments) lived here in Python: a
-	// read-only call into another contract whose partners include all of
-	// ours. It is dropped from the demo, as are parameters/medians,
-	// random, hashcode, elapsed_time and Storage(name).
 }
 
 // NewState creates the State of one contract. db is this contract's own

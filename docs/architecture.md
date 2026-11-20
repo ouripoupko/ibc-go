@@ -213,11 +213,8 @@ source.
 - Contracts are EVM bytecode, called with calldata, not Python classes called by method name.
 - A failed call rolls back completely. In Python, writes made before an exception stayed.
 - A read runs on a copy of the state. In Python, a read could change state.
-- Dropped: `read()` between contracts, governance `parameters` and medians, `random`, `hashcode`,
-  `elapsed_time`, and `Storage(name)`.
 - Membership is decided by the root contract's own `approve_partner(address)`, `approve_guest(address)`
   and `approve_removal(address)` functions, if it defines them (the deploy lists them).
-- The built-in methods `get_partners` and `get_parameters` are gone.
 
 ## Development
 

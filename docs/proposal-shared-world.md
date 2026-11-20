@@ -164,7 +164,6 @@ host executes `{to, data}` like any call.
 - The deploy's `abi` and JSON `constructor` fields.
 - Grants by method name.
 - The "accept when there is no `approve_partner`" default.
-- The Python-era built-ins `get_partners` and `get_parameters` (never implemented in Go).
 - Any need for facades, Diamonds, combined ABIs or service declarations to build an app from
   several contracts.
 
